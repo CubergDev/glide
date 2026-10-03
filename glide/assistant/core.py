@@ -47,6 +47,7 @@ from .tasks import DEFAULT_RUNS_DIR, ComputerTask, TaskBusy, TaskResult, TaskRun
 HISTORY_CHARS = 400  # how much of one earlier message the router and the answer are shown
 ANSWER_TOKENS = 1024  # room for a reasoning model's thinking as well as a short spoken answer (see router.ROUTER_TOKENS)
 ANSWER_TEMPERATURE = 0.3
+UNWIND_S = 2.0  # how long a request waits for the task whose question it dropped to end, so that its own task can start
 MIN_SPEECH_RMS = 150.0  # audio quieter than this overall is silence: an empty transcript is believed, not retried
 
 
@@ -543,6 +544,7 @@ class Assistant:
         a task is waiting on is dropped with them: this request is not its answer. False if `turn` was cancelled first.
 
         A request still being heard is not touched: the person said it and wants it answered too."""
+        dropped = None
         with self._lock:
             if turn.cancelled:
                 return False
@@ -551,7 +553,10 @@ class Assistant:
             waiting = self._tasks.current
             if waiting is not None and waiting.pending_question is not None:
                 waiting.stop()
+                dropped = waiting
         self._cancel_speech()
+        if dropped is not None:
+            dropped.wait(UNWIND_S)  # a correction that is itself a task ("open Safari instead") must find the machine free
         return True
 
     def _messages(self) -> list[dict]:
@@ -580,12 +585,14 @@ class Assistant:
             return self._speaker
 
     def _cancel_speech(self) -> None:
-        if self._voice is not None:
-            self._voice.cut()  # the sentence being made: its connection is closed and its thread released
+        """Silence now. The lane is marked dead and its queue drained BEFORE the sentence being made is cut: the thread
+        that the cut wakes then finds a dead lane and ends, instead of starting the next queued sentence."""
         if self._speaker is not None:
             self._speaker.cancel()
         elif self.io.player is not None:
             self.io.player.cancel()
+        if self._voice is not None:
+            self._voice.cut()  # the sentence being made: its connection is closed and its thread released
 
     def _speech_failed(self, exc: BaseException) -> None:
         if isinstance(exc, ProviderError) and exc.kind == CANCELLED:

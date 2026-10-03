@@ -16,6 +16,7 @@ from test_assistant_fakes import WAIT, FakeClassifier, FakeLLM, route_json, wait
 from test_cancel_chain import Connection
 
 from glide.assistant.audio_io import chunked
+from glide.assistant.core import Assistant
 from glide.assistant.tasks import ComputerTask
 from glide.computer import runner
 from glide.computer.control import controlled
@@ -364,18 +365,23 @@ def test_a_stop_reaches_the_model_call_a_computer_task_is_waiting_on(tmp_path, m
 def asking(monkeypatch):
     """The screen-driving loop replaced by one that asks the user a question and records what it got back."""
     state = type("State", (), {})()
-    state.asked, state.replies, state.ask_was = threading.Event(), [], []
+    state.asked, state.replies, state.ask_was, state.goals = threading.Event(), [], [], []
+    state.unwinding, state.release = threading.Event(), threading.Event()  # a stopped run takes its time to end
+    state.release.set()
 
     def fake_run(cfg, ctx_factory, classifier_factory=None, control=None):
         ctx = ctx_factory(None, [])
+        state.goals.append(cfg.goal)
         state.ask_was.append(ctx.ask)
-        if ctx.ask is None:
+        if ctx.ask is None or cfg.goal != "Open the file":
             return RunState(outcome="done")
         state.asked.set()
         try:
             state.replies.append(ctx.ask("Which one?"))
         except Abort as stopped:
             state.replies.append(stopped)
+            state.unwinding.set()
+            state.release.wait(WAIT)
             return RunState(outcome="aborted (stopped by the user)")
         return RunState(outcome="done")
 
@@ -383,13 +389,14 @@ def asking(monkeypatch):
     return state
 
 
-def assistant_that_asks(tmp_path, chats, **kw):
-    model = Model(chats=chats)
-    return build(tmp_path, llm=llm_of(model), writer=object(), classifier=FakeClassifier(None), **kw)
+def assistant_that_asks(tmp_path, chats, *, clarify=True, **kw):
+    """An assistant built through its public `clarify` parameter, over a model that answers `chats` in turn."""
+    rig = build(tmp_path, llm=llm_of(Model(chats=chats)), writer=object(), classifier=FakeClassifier(None), **kw)
+    rig.assistant = Assistant(rig.config, io=rig.assistant.io, runs_dir=tmp_path / "runs", clarify=clarify)
+    return rig
 
 
 def start_asking_task(rig, asking):
-    rig.assistant._clarify = True
     reply = rig.assistant.handle_text("open the file", wait=False)
     assert asking.asked.wait(WAIT) and wait_until(lambda: rig.assistant.pending_question == "Which one?")
     return reply.task
@@ -443,8 +450,31 @@ def test_the_question_is_spoken_and_a_voice_request_is_not_its_answer_either(tmp
     assert len(asking.replies) == 1 and isinstance(asking.replies[0], Abort)
 
 
+def test_a_correction_that_is_itself_a_task_waits_for_the_dropped_task_to_end_and_is_not_busy(tmp_path, asking, monkeypatch):
+    """ "Open the file" ... "Which one?" ... "open Safari instead": the question is dropped and the new task is not busy."""
+    instead = route_json("computer", reply="Switching.", goal="Open Safari")
+    rig = assistant_that_asks(tmp_path, [COMPUTER, instead])
+    first = start_asking_task(rig, asking)
+    asking.release.clear()  # the stopped run needs a moment to end, as one that reads the screen once more does
+    waited_on, wait = [], ComputerTask.wait
+    monkeypatch.setattr(ComputerTask, "wait", lambda self, timeout=None: waited_on.append(self) or wait(self, timeout))
+
+    done, box = in_thread(lambda: rig.assistant.handle_text("open Safari instead", wait=True))
+    assert asking.unwinding.wait(WAIT)
+    assert wait_until(lambda: first in waited_on)  # the new request is waiting for the task it dropped to end
+    assert asking.goals == ["Open the file"] and not done.is_set()  # held back: the machine is not free yet
+    asking.release.set()
+
+    assert done.wait(WAIT)
+    reply = box["value"]
+    assert reply.route == "computer" and reply.error is None and reply.task is not first
+    assert first.wait(WAIT) and isinstance(asking.replies[0], Abort) and len(asking.replies) == 1
+    assert asking.goals == ["Open the file", "Open Safari"] and reply.task.result.outcome == "done"
+    assert rig.warned == []  # not "a task is already running"
+
+
 def test_by_default_a_task_never_asks(tmp_path, asking):
-    rig = assistant_that_asks(tmp_path, [COMPUTER])
+    rig = assistant_that_asks(tmp_path, [COMPUTER], clarify=False)
     reply = rig.assistant.handle_text("open the file", wait=False)
     assert reply.task.wait(WAIT)
     assert asking.ask_was == [None]
