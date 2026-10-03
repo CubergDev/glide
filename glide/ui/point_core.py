@@ -197,7 +197,7 @@ class PointMode:
             assistant.bind(session)
             made.append(session)
 
-        started = self._start_voice(lambda config, io=None: PointAssistant(config, io=io), bind)
+        started = self._start_voice(lambda config, io=None, **options: PointAssistant(config, io=io, **options), bind)
         if not (started and made):
             return None
         self._voiced = True

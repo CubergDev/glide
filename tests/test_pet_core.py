@@ -307,6 +307,13 @@ def test_typed_text_during_a_voice_session_goes_to_the_voice_assistant(tmp_path)
     core.close()
 
 
+def test_the_assistant_factory_passes_on_whatever_options_the_voice_stack_gives_it(tmp_path):
+    core, config = make_core(tmp_path)
+    assistant = core._make_assistant(config, history_turns=1)
+    assert isinstance(assistant, PetAssistant) and assistant._history.maxlen == 2
+    core.close()
+
+
 def test_closing_twice_is_harmless(tmp_path):
     core, config = make_core(tmp_path)
     core.close()

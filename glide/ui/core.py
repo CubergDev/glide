@@ -370,8 +370,9 @@ class PetCore:
             voice = voice or self._voice
             return [a for a in (self._text, voice.assistant if voice is not None else None) if a is not None]
 
-    def _make_assistant(self, config, io=None) -> PetAssistant:
-        return PetAssistant(config, io=io or self._new_io(), runs_dir=self._runs_dir, report=self._report)
+    def _make_assistant(self, config, io=None, **options) -> PetAssistant:
+        """What `build_voice` calls to make the assistant: `options` are whatever it passes on (settings of the stack)."""
+        return PetAssistant(config, io=io or self._new_io(), runs_dir=self._runs_dir, report=self._report, **options)
 
     def _new_io(self) -> IO:
         return IO(

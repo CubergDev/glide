@@ -199,7 +199,11 @@ def _voice(args, config, writer, selection, voice_factory, emit, finished, outco
     try:
         io = IO(heard=lambda text: _say(f"you said: {config.scrub(text)}"), warn=lambda message: _say(config.scrub(message)))
         loop = voice_factory(
-            config, settings, io=io, act=False, assistant_factory=lambda cfg, io=None: PointAssistant(cfg, io=io)
+            config,
+            settings,
+            io=io,
+            act=False,
+            assistant_factory=lambda cfg, io=None, **options: PointAssistant(cfg, io=io, **options),
         )
         session = PointSession(selection, writer, emit, speak=loop.assistant.say, cancel_speech=loop.assistant.cut_voice)
         loop.assistant.bind(session)
