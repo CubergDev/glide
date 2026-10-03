@@ -86,7 +86,7 @@ what it printed. That is a driver change, not a configuration problem.
 
 | Step | Expect |
 |---|---|
-| Probe with `act=False` (the probe above) | `Playwright CLI is not enabled: it needs Allow computer actions ...`. Its inspection can recreate a tab, so it is refused when actions are off |
+| Probe with `act=False` (the probe above) | `Unsupported capability required: Playwright CLI inspection requires Allow computer actions; use CDP for passive inspection`, and no process started. Its inspection can recreate a tab, so it is refused when actions are off. (With a fallback configured, the same refusal is the message `Playwright CLI is not enabled: it needs Allow computer actions ...` and the next provider is tried.) |
 | Probe with `act=True` and the session open | `playwright-cli tabs: ... ready: True elements: N` |
 | CLI not installed (rename it) | `Playwright CLI is not installed: install @playwright/cli, or set its path ...` before anything is spawned |
 | Session not open | `Cannot connect to playwright-cli at playwright:glide. Open the selected Playwright CLI session and try again.` |
