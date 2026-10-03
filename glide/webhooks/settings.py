@@ -5,6 +5,7 @@ Everything is off until switched on (D5): the file needs `"enabled": true` and e
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -56,8 +57,6 @@ class Source(Message):
     @field_validator("key_envs")
     @classmethod
     def secret_references(cls, values):
-        import re
-
         if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", value) for value in values):
             raise ValueError("Invalid secret environment name.")
         return values
@@ -109,8 +108,6 @@ class ServerSettings(Message):
     def unique_sources(self):
         if len({source.id for source in self.sources}) != len(self.sources):
             raise ValueError("Duplicate webhook source identifiers.")
-        import re
-
         if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}", host) for host in self.allowed_hosts):
             raise ValueError("Configure explicit callback hosts.")
         return self

@@ -16,7 +16,7 @@ import json
 import re
 from datetime import UTC, datetime
 
-from .contracts import AgentCall, AuthError, TranslationError, call_id
+from .contracts import AgentCall, AuthError, TranslationError, call_id, strict_json
 
 _DELIVERY_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SUBSCRIPTION = re.compile(r"projects/[A-Za-z0-9._:-]{1,128}/subscriptions/[A-Za-z0-9._~-]{1,255}\Z", re.ASCII)
@@ -33,15 +33,6 @@ def _text(value, *, limit: int, name: str) -> str:
     except UnicodeEncodeError as exc:
         raise TranslationError(f"Invalid {name}") from exc
     return value
-
-
-def _unique_json(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise TranslationError("Duplicate Gmail metadata key")
-        result[key] = value
-    return result
 
 
 def translate_gmail(
@@ -84,11 +75,9 @@ def translate_gmail(
         raise TranslationError("Invalid Gmail data encoding")
     try:
         decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
-        data = json.loads(decoded.decode("utf-8"), object_pairs_hook=_unique_json)
-    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        data = strict_json(decoded)
+    except (binascii.Error, TranslationError) as exc:
         raise TranslationError("Invalid Gmail metadata") from exc
-    if not isinstance(data, dict):
-        raise TranslationError("Invalid Gmail metadata")
     address = _text(data.get("emailAddress"), limit=320, name="Gmail mailbox")
     if not hmac.compare_digest(address.casefold().encode(), mailbox.casefold().encode()):
         raise AuthError("Unauthorized Gmail mailbox")
