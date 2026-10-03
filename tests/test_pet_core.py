@@ -402,9 +402,9 @@ class _Stream:
 def test_build_voice_makes_its_assistant_through_the_factory_it_is_given():
     made = []
 
-    def factory(config, io=None):
+    def factory(config, io=None, **options):
         made.append(io)
-        return PetAssistant(config, io=io)
+        return PetAssistant(config, io=io, **options)
 
     device = FullDuplexDevice(input_factory=lambda cb: _Stream(), output_factory=lambda cb, rate: _Stream())
     loop = build_voice(
