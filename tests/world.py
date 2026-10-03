@@ -510,17 +510,22 @@ def drive(
     noul: float = 0.95,
     replies: list[str] | None = None,
     handoffs: int | None = None,
+    record_content: bool = True,
+    control=None,
 ) -> RunState:
     """Run the real loop against the world until it stops itself. `world.fake` holds the classifier.
 
     `replies` are what the user types when the writer asks, in order; with none, nobody is at the
     terminal and the writer is told so. `world.asked` collects the questions that were put.
+
+    Most scenarios read the run folder (run.log, step files), so they record content; pass
+    `record_content=False` for the default a user gets.
     """
     world.install(monkeypatch)
     fake = FakeTypeSafe(policy, noul)
     world.fake = fake
     monkeypatch.setattr(runner, "TypeSafeClient", lambda: fake)
-    cfg = RunConfig(goal=goal, out=tmp_path / "run", act=True, steps=steps, delay=0)
+    cfg = RunConfig(goal=goal, out=tmp_path / "run", act=True, steps=steps, delay=0, record_content=record_content)
     if handoffs is not None:
         cfg.handoffs = handoffs
     client = writer or FakeWriter()
@@ -541,4 +546,5 @@ def drive(
             history=history,
             ask=ask if replies is not None else None,
         ),
+        **({"control": control} if control is not None else {}),
     )

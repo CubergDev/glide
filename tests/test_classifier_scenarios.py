@@ -541,7 +541,7 @@ def test_without_a_factory_the_loop_uses_the_hosted_client_as_it_always_did(monk
     w = World([Page(name="done", items=["Order 4821"], url="https://example.com/done")])
     w.install(monkeypatch)
     monkeypatch.setattr(runner, "TypeSafeClient", Hosted)
-    cfg = runner.RunConfig(goal="g", out=tmp_path / "run", act=True, steps=3, delay=0)
+    cfg = runner.RunConfig(goal="g", out=tmp_path / "run", act=True, steps=3, delay=0, record_content=True)
     state = runner.run(
         cfg,
         lambda typesafe, history: Context(
@@ -555,7 +555,7 @@ def drive_with(w: World, classifier, *, steps=20, monkeypatch, tmp_path, writer=
     """`world.drive`, but handing the classifier to `runner.run(classifier_factory=...)` as the caller would."""
     w.install(monkeypatch)
     monkeypatch.setattr(runner, "TypeSafeClient", refuse_hosted_client)
-    cfg = runner.RunConfig(goal="do the thing", out=tmp_path / "run", act=True, steps=steps, delay=0)
+    cfg = runner.RunConfig(goal="do the thing", out=tmp_path / "run", act=True, steps=steps, delay=0, record_content=True)
     client = writer or FakeWriter()
     return runner.run(
         cfg,

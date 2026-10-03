@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import subprocess
 import time
+import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
 
 from ..providers.errors import AllProvidersFailed, ProviderError
+from . import diagnostics
 from .actions import Context, perform
 from .calls import Calls, MeteredClassifier, MeteredWriter
-from .config import DEFAULT_DELAY, DEFAULT_HANDOFFS, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
-from .decide import Decision, decide, offscreen_records
-from .models import Abort, Guidance, Item, Screen, Signature, same_screen, signature
+from .config import DEFAULT_DELAY, DEFAULT_HANDOFFS, DEFAULT_MIN_CONFIDENCE, DEFAULT_READINESS_TIMEOUT, DEFAULT_STEPS, MAX_OPTIONS
+from .control import RunControl, checkpoint, controlled, current_control
+from .decide import OFFSCREEN_PREFIX, Decision, decide, offscreen_records
+from .generation import GenerationUnavailable
+from .models import Abort, DesktopError, Guidance, Item, Screen, Signature, same_screen, signature
 from .perception import OcrCache, capture, perceive
 from .platform_adapter import desktop
 from .report import Log, annotate, ax_count, render_payload, top
@@ -26,6 +32,8 @@ from .writer import Answer, WriterError, compose_answer
 MAX_IDLE = 3  # consecutive actions that left the screen as it was: refusals, waits on a spinner, scrolls at the bottom
 MAX_REPEATS = 2  # consecutive actions already taken on the same screen earlier in the run: a cycle, or a click that does nothing
 MAX_STALLS = 3  # stalls with no new page between them; the last is final, since two focuses from the writer did not free the run
+WOULD_DO_CHARS = 60  # the most of an item's text quoted when describing a dry run's move
+FAILURE_CHARS = 400  # the most of a failure's words kept in run.json
 EARLIER_LINES = 600  # lines of text from the screens before the last one that the answer may also be read from
 MAX_QUESTIONS = 3  # questions the writer may put to the user in one run; an empty reply ends the asking sooner
 
@@ -60,6 +68,11 @@ class RunConfig:
     # field, and URL (see `OcrCache.read_ahead`). Worth it where those questions are slow, as over an
     # OSWorld VM; off for this machine, whose own are quick.
     read_ahead: bool = False
+    # D3: the goal, answers, history, screenshots and step files are written only when this is set. Off by default.
+    record_content: bool = False
+    engine: str = "legacy"  # "structured" is the execution engine of a later phase
+    execution_browser: str = ""
+    readiness_timeout: float = DEFAULT_READINESS_TIMEOUT
 
     @property
     def replay(self) -> bool:
@@ -91,26 +104,88 @@ class RunState:
     outcome: str = "crashed"  # every way out of the loop names its own; only an unexpected exception leaves this
     ocr_cache: OcrCache = field(default_factory=OcrCache)  # carries one step's OCR into the next
     view: tuple[Screen, list[Item]] | None = None  # the latest capture, until an action makes it stale
+    uncertain: bool = False
+    readback: str = "not needed"
+    failure: str = ""  # why the run ended, when it did not end with an answer; scrubbed before it is stored
     answer: Answer | None = None  # the writer's latest; the last one is the run's answer
     guidance: Guidance = field(default_factory=Guidance)  # the writer's focus and the user's replies, as they stand
     handoffs: list[Handoff] = field(default_factory=list)
     calls: Calls = field(default_factory=Calls)  # requests to each model, over the whole run
-    failure: str | None = None  # which provider failed and why, when the outcome is "provider failure"
+    progress: list[dict] = field(default_factory=list)
+    plan_revisions: int = 0
+    first_action_s: float | None = None
+    unsupported_capabilities: list[str] = field(default_factory=list)
+    cancel_reason: str = ""
+    would_do: str | None = None  # a dry run's first move in words; kept in memory only, never written (D3)
 
 
-def run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
-    """Drive the loop. ctx_factory(typesafe, history) builds the action Context.
+def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunControl | None = None) -> RunState:
+    """Drive the run under a `RunControl` and report how it ended. The legacy loop is `_run`.
 
     `classifier_factory()` returns the classifier as a context manager with the `system_one` of
     `TypeSafeClient`: a `ChainedClassifier`, an `LLMClassifier`, or any stand-in. Left out, the hosted
     TypeSafe client is used as before. The default is looked up here, not bound at import, so
     replacing `runner.TypeSafeClient` still replaces it.
 
+    `control` is the run's stop gate (see `control.py`). Left out, a private one is made, so a caller that
+    never stops the run needs nothing. Its events are delivered to its own `emit`; nothing is printed.
+
     A provider that fails is not a crash: the run ends with the outcome "provider failure", a log
     line naming each provider and why, and a run.json as for any other stop.
+
+    Content (goal, answers, history, page text, raw URLs, screenshots, step files) is written only when
+    `cfg.record_content` is set. Otherwise the run folder holds run.json with counts, timings, the outcome
+    and a scrubbed `failure`.
     """
+    if cfg.replay:
+        cfg = replace(cfg, engine="legacy")  # a replay must never inspect or act on the live machine
+    control = control or RunControl(str(uuid.uuid4()))
+    recorder = diagnostics.Diagnostics(cfg.out, record_content=cfg.record_content, task_id=control.task_id)
+    with controlled(control), recorder.activate():
+        recorder.event("task_started", engine=cfg.engine, act=cfg.act, goal=cfg.goal, configuration=asdict(cfg))
+        control.event("accepted", "Working on your request.")
+        try:
+            state = _run(cfg, ctx_factory, classifier_factory)
+        except BaseException as error:
+            cancelled = isinstance(error, Abort | KeyboardInterrupt)
+            recorder.finish({"outcome": "aborted" if cancelled else "crashed", "engine": cfg.engine}, error=error)
+            raise
+        recorder.finish({"outcome": state.outcome, "engine": cfg.engine, "act": cfg.act, "steps_taken": len(state.history)})
+        if state.outcome.startswith("aborted"):
+            hint = (
+                " Move the pointer out of the top-left abort corner before retrying."
+                if state.cancel_reason == "mouse in top-left corner"
+                else ""
+            )
+            control.event("cancelled", "Stopped." + hint, outcome=state.outcome)
+        elif state.outcome == "dry run":
+            control.event("dry_run", state.would_do or "", outcome=state.outcome)
+        elif state.failure:
+            control.event("blocked", state.failure, outcome=state.outcome)
+        elif state.answer is not None:
+            control.event(
+                "completed" if state.answer.achieved else "blocked",
+                state.answer.text,
+                outcome=state.outcome,
+                spoken_text=getattr(state.answer, "spoken_text", ""),  # set by the writer boundary
+            )
+        else:
+            control.event("blocked", "The task ended without a verified result.", outcome=state.outcome)
+        return state
+
+
+def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
+    """Drive the loop. ctx_factory(typesafe, history) builds the action Context."""
+    if cfg.engine == "structured":
+        if importlib.util.find_spec(f"{__package__}.execution.engine") is None:
+            raise ValueError("the structured engine is not part of this build; use engine='legacy'")
+        from .execution.engine import run_execution
+
+        return run_execution(cfg, ctx_factory)
+    if cfg.engine != "legacy":
+        raise ValueError("Unknown execution engine")
     cfg.out.mkdir(parents=True, exist_ok=True)
-    log = Log(cfg.out / "run.log")
+    log = Log(cfg.out / "run.log" if cfg.record_content else None, enabled=cfg.record_content)
     log(f"run folder: {cfg.out}")
     if cfg.act:
         log(f"driving the machine. abort: {desktop.abort_hint()}.")
@@ -130,10 +205,36 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
                 log(f"\nstopped after {cfg.steps} steps")
                 state.outcome = "step limit"
                 hand_off(cfg, ctx, state, cfg.steps, log)
+    except GenerationUnavailable as error:
+        diagnostics.exception(error, stage="generation")
+        state.outcome = "generation unavailable"
+        state.failure = str(error)
+    except (DesktopError, subprocess.CalledProcessError) as error:
+        diagnostics.exception(error, stage="desktop_operation")
+        state.outcome = "desktop unavailable"
+        state.failure = (
+            str(error) if isinstance(error, DesktopError) else "A desktop operation failed; completion could not be verified."
+        )
+        state.uncertain = bool(current_control() and current_control().in_flight)
+        if state.uncertain:
+            state.readback = "unavailable; completion unknown"
     except (KeyboardInterrupt, Abort) as e:
+        state.uncertain = bool(current_control() and current_control().in_flight)
+        if state.uncertain:
+            # Read only, on the execution thread. A changed screen cannot prove that a
+            # submit did or did not reach the server, so replacement remains gated.
+            try:
+                with controlled(None):
+                    observed = capture(cfg.image, cfg.app, cfg.url, ctx.browser)
+                    state.view = (observed, perceive(observed, MAX_OPTIONS, cfg.goal))
+                state.readback = "captured; completion unknown"
+            except Exception:
+                state.readback = "unavailable; completion unknown"
+        state.cancel_reason = str(e)
         state.outcome = f"aborted ({e or 'Ctrl-C'})"
         log(f"\n{state.outcome} after {len(state.history)} actions")
     except ProviderError as e:
+        diagnostics.exception(e, stage="provider")
         state.outcome = "provider failure"
         state.failure = provider_failure(e)
         log(f"\nprovider failure after {len(state.history)} actions: {state.failure}")
@@ -155,6 +256,13 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
             "history": state.history,
             "config": {k: str(v) for k, v in asdict(cfg).items()},
         }
+        if not cfg.record_content:
+            summary = {k: summary[k] for k in ("steps_taken", "seconds", "calls", "usage", "timing")}
+            summary["outcome"] = "aborted" if state.outcome.startswith("aborted") else state.outcome
+        # Named providers and error kinds, without URLs or anything key-like, in both modes.
+        summary["failure"] = diagnostics.scrub_text(state.failure, limit=FAILURE_CHARS) if state.failure else None
+        summary["interrupted_readback"] = state.readback
+        summary["task_id"] = current_control().task_id if current_control() else ""
         (cfg.out / "run.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         log(f"{state.calls.line()}  handoffs {len(state.handoffs)}  questions {len(state.guidance.exchanges)}")
         log(f"run folder: {cfg.out}")
@@ -195,7 +303,7 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     if stopped is None:
         return False
     if ctx.writer is None:
-        log("\nno answer: the writer is disabled (set ANTHROPIC_API_KEY or CLICKER_WRITER_BASE_URL)")
+        log("\nno answer: the writer is disabled (no writer provider is configured; see glide.toml)")
         return False
     if state.handoffs and state.handoffs[-1].actions == len(state.history) and state.answer is not None:
         log(f"\nanswer ({verdict(state.answer)}; the focus led to no action, so the last answer stands):\n  {state.answer.text}")
@@ -209,6 +317,7 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         try:
             answer = review(cfg, ctx, state, stopped, can_ask)
         except WriterError as e:
+            state.failure = str(e)
             log(f"\nno answer: the writer failed ({e})")
             return False
         state.answer = answer
@@ -219,7 +328,12 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
             resuming = may_resume and not answer.achieved
             if resuming and can_ask and answer.question:
                 log(f"\nreview ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}\n  the writer asks: {answer.question}")
+                checkpoint()
+                active = current_control()
+                if active:
+                    active.event("question", answer.question, question_id=str(uuid.uuid4()))
                 reply = ctx.ask(answer.question).strip()
+                checkpoint()
                 record["reply"] = reply
                 log(f"  > {reply}", echo=False)  # the terminal already shows what was typed
                 if not reply:
@@ -241,7 +355,8 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
             log(f"\nanswer ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}")
             return False
         finally:
-            (cfg.out / f"step-{step:03d}-review.json").write_text(json.dumps(reviews, indent=2), encoding="utf-8")
+            if cfg.record_content:
+                (cfg.out / f"step-{step:03d}-review.json").write_text(json.dumps(reviews, indent=2), encoding="utf-8")
 
 
 def stuck(state: RunState, log: Log) -> None:
@@ -275,8 +390,13 @@ def review(cfg: RunConfig, ctx: Context, state: RunState, stopped: str, can_ask:
     if state.view is None:
         desktop.check_abort()
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser)
-        screen.image.save(cfg.out / "answer-raw.png")
+        if cfg.record_content:
+            screen.image.save(cfg.out / "answer-raw.png")
         state.view = (screen, perceive(screen, MAX_OPTIONS, cfg.goal))
+    active = current_control()
+    if active and active.in_flight:
+        active.in_flight = False
+        active.event("action_checked")
     screen, items = state.view
     earlier = earlier_screens(state, signature(screen, items))
     earlier_stops = [{"after_action": h.actions, "why": STOPPED[h.outcome], "focus_given": h.focus} for h in state.handoffs]
@@ -306,6 +426,7 @@ def earlier_screens(state: RunState, final: Signature, budget: int = EARLIER_LIN
 
 
 def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log) -> bool:
+    checkpoint()
     desktop.check_abort()
     timing: dict[str, float] = {}
     started = time.perf_counter()
@@ -314,19 +435,26 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing, ahead=cache if cfg.read_ahead else None)
     items = perceive(screen, MAX_OPTIONS, cfg.goal, timing, cache)
     state.view = (screen, items)
+    active = current_control()
+    if active and state.history:
+        active.in_flight = False
+        active.event("action_checked")
     if not screen_moved(state, screen, items, log):
         return False
     tried = tried_here(state)
     prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
-    screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
-    prefix.with_name(prefix.name + "-payload.txt").write_text(
-        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance), encoding="utf-8"
-    )
+    if cfg.record_content:
+        screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
+        prefix.with_name(prefix.name + "-payload.txt").write_text(
+            render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance), encoding="utf-8"
+        )
 
     with phase(timing, "decide"):
         decision = decide(ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance)
     by_index = {str(it.index): it for it in items}
-    annotate(screen, items, decision.chosen, prefix.with_suffix(".png"))
+    checkpoint()
+    if cfg.record_content:
+        annotate(screen, items, decision.chosen, prefix.with_suffix(".png"))
 
     field_desc = f" field={screen.field.role}:{screen.field.label!r}" if screen.field else ""
     log(
@@ -350,10 +478,11 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     timing["total"] = round(time.perf_counter() - started, 3)
     state.timings.append(timing)
 
-    prefix.with_name(prefix.name + "-answers.json").write_text(
-        json.dumps(answers(decision, screen, items, timing, tried, state), indent=2), encoding="utf-8"
-    )
-    log(f"  files: {prefix.name}-raw.png, {prefix.name}.png, {prefix.name}-payload.txt, {prefix.name}-answers.json")
+    if cfg.record_content:
+        prefix.with_name(prefix.name + "-answers.json").write_text(
+            json.dumps(answers(decision, screen, items, timing, tried, state), indent=2), encoding="utf-8"
+        )
+        log(f"  files: {prefix.name}-raw.png, {prefix.name}.png, {prefix.name}-payload.txt, {prefix.name}-answers.json")
     log(format_timing(timing))
 
     if state.view is None:  # an action ran: let the screen settle before the next step, or the answer, reads it
@@ -383,12 +512,18 @@ def resolve(
     if not cfg.act or cfg.replay:
         log(f"  would do: {decision.chosen}. dry run (pass --act without --image to drive the machine)")
         state.outcome = "dry run"
+        state.would_do = describe_move(decision, items)
         return False
 
+    checkpoint()
+    active = current_control()
     with phase(timing, "act"):
         what = perform(decision, screen, items, ctx)
     state.view = None
     state.history.append(what)
+    active = current_control()
+    if active:
+        active.event("progress", "Checking the result of the action.")
     log(f"  did: {what}")
     return not repeating(state, what, decision.kind.choice == "wait", log)
 
@@ -439,6 +574,17 @@ def repeating(state: RunState, what: str, waiting: bool, log: Log) -> bool:
         state.outcome = "stalled"
         return True
     return False
+
+
+def describe_move(decision: Decision, items: list[Item]) -> str:
+    """The move a dry run stopped at, in words. Item text is screen content, so this stays in memory (D3)."""
+    chosen = str(decision.chosen)
+    if chosen.isdigit():
+        text = next((it.text for it in items if str(it.index) == chosen), "")
+        return f"click {text[:WOULD_DO_CHARS]!r}" if text else "click an item"
+    if chosen.startswith(OFFSCREEN_PREFIX):
+        return "press an off-screen control"
+    return chosen.replace("_", " ")
 
 
 def answers(

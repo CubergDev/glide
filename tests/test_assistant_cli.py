@@ -234,7 +234,7 @@ def loop_calls(monkeypatch):
     """Replace the screen-driving loop with a recorder of what it was asked to do. Nothing real runs."""
     calls = []
 
-    def fake_run(cfg, ctx_factory, classifier_factory=None):
+    def fake_run(cfg, ctx_factory, classifier_factory=None, control=None):
         calls.append(cfg)
         return RunState(outcome="dry run")
 
@@ -295,7 +295,7 @@ def test_act_mode_prints_a_banner_so_it_is_never_a_surprise(monkeypatch, loop_ca
     ],
 )
 def test_ask_exits_nonzero_when_the_task_could_not_run_at_all(monkeypatch, outcome, code):
-    monkeypatch.setattr(runner, "run", lambda cfg, ctx_factory, classifier_factory=None: RunState(outcome=outcome))
+    monkeypatch.setattr(runner, "run", lambda cfg, ctx_factory, classifier_factory=None, control=None: RunState(outcome=outcome))
     assert run(["ask", "open", "safari"], monkeypatch, acting_config())[0] == code
 
 
@@ -410,7 +410,7 @@ def test_a_typed_stop_during_chat_aborts_a_running_task(monkeypatch):
     release, started = threading.Event(), threading.Event()
     seen = {}
 
-    def slow(cfg, ctx_factory, classifier_factory=None):
+    def slow(cfg, ctx_factory, classifier_factory=None, control=None):
         started.set()
         seen["stopped"] = release.wait(WAIT)
         return RunState(outcome="aborted (stopped by the user)")
