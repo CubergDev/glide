@@ -56,7 +56,7 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           python-version: "3.13"
-          enable-cache: true
+          enable-cache: false # the release is built from a clean cache: nothing restored from earlier runs
 
       - run: uv sync --locked
       - run: uv lock --check
@@ -79,6 +79,11 @@ jobs:
   release:
     name: release
     needs: verify
+    # The checks above live in this same file, so anyone who can push a tag could push a commit that edits them out.
+    # The environment is the gate that file cannot remove: give "release" a required reviewer and a deployment tag
+    # rule `v*.*.*` in Settings > Environments (see .github/REVIEW_SETUP.md).
+    if: github.ref_type == 'tag'
+    environment: release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

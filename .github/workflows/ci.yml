@@ -19,7 +19,7 @@ permissions: {}
 
 # One run per PR or ref; a newer push cancels the older PR run; runs on main are never cancelled.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -148,7 +148,7 @@ jobs:
             run=true   # label ci-macos
           else
             changed="$(git diff --name-only HEAD^1 HEAD)"
-            if printf '%s\n' "${changed}" | grep -Eq '^glide/computer/(macos|windows|desktop_access|platform_adapter)\.py$'; then
+            if printf '%s\n' "${changed}" | grep -Eq '^(glide/computer/|tests/conftest\.py$|pyproject\.toml$|uv\.lock$|\.github/workflows/ci\.yml$)'; then
               run=true # a platform adapter changed
             fi
           fi

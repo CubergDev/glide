@@ -30,7 +30,7 @@ Check names as GitHub shows them (job names):
 | `actionlint` | CI | via `ci-ok` | Lints `.github/workflows` with a pinned release binary, sha256-checked. |
 | `secret-scan` | CI | via `ci-ok` | gitleaks, PR commits (or pushed commits on `main`). |
 | `macos-gate` | CI | via `ci-ok` | Cheap Linux job that decides whether macOS runs. |
-| `test-macos` | CI | via `ci-ok`, skip allowed | Runs on push to `main`, manual dispatch, a PR with label `ci-macos`, or a PR that changes `glide/computer/{macos,windows,desktop_access,platform_adapter}.py`. The diff is `git diff --name-only HEAD^1 HEAD` on the PR merge commit. |
+| `test-macos` | CI | via `ci-ok`, skip allowed | Runs on push to `main`, manual dispatch, a PR with label `ci-macos`, or a PR that changes `glide/computer/**`, `tests/conftest.py`, `pyproject.toml`, `uv.lock` or `ci.yml`. The diff is `git diff --name-only HEAD^1 HEAD` on the PR merge commit. |
 | `app-test` | App CI | No (advisory) | Path-filtered, so a required check would hang as "pending" on PRs that do not touch `app/`. |
 | `review` | claude-review | No (advisory) | Needs the secret below; a green no-op without it. |
 
@@ -181,3 +181,17 @@ generally available; its first PR will show it); Codex steps (taken from its doc
    `id-token: write` to the review job and drop the `github_token` line.
 4. Label a PR `ci-macos` once to confirm `test-macos` runs and passes.
 5. The first Dependabot PRs: grouped, at most 3 open, `uv.lock` updated.
+
+## Hardening the owner must do (settings, not files)
+
+These come from the independent security review of the workflows. They are repository settings, so only you change them.
+
+1. **Required check source.** In the `main` ruleset, set the required check `ci-ok` with its integration pinned to
+   *GitHub Actions*. Otherwise a PR can add a workflow with a job named `ci-ok` that always succeeds.
+2. **Release gate.** Settings > Environments > `release`: add yourself as a required reviewer and restrict deployment
+   tags to `v*.*.*`. The release job declares this environment, so it cannot run unreviewed. Consider a tag ruleset
+   that restricts who can create `v*` tags. Without it, anyone with push access can tag a commit that edits the release
+   checks out of the workflow file.
+3. **Claude review is read-only on purpose.** The agent has the inline-comment tool, `gh pr view`/`gh pr diff` and
+   read-only `git`; it has no `gh pr comment`, no `gh api`, no `/proc` and no `.git` access, so a prompt-injected PR
+   cannot post the job's environment or token. If you add a tool, re-check that it cannot write free text.

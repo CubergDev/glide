@@ -11,6 +11,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7 # a release yanked within a week never reaches a PR
     groups:
       actions:
         patterns: ["*"]
@@ -20,6 +22,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7 # a release yanked within a week never reaches a PR
     groups:
       python:
         patterns: ["*"]
