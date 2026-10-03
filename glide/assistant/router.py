@@ -130,12 +130,20 @@ def _is_cjk_stop(compact: str) -> bool:
     return any(p and len(compact) % len(p) == 0 and compact == p * (len(compact) // len(p)) for p in STOP_CJK if len(p) <= 2)
 
 
-def is_stop(text: str) -> bool:
-    """Whether the whole utterance is a request to stop. Not a substring match: it must be nothing else."""
+def stop_phrases(phrases) -> frozenset[str]:
+    """Extra whole-utterance stop phrases (from configuration), normalised the way an utterance is."""
+    return frozenset(filter(None, map(normalize, phrases)))
+
+
+def is_stop(text: str, extra: frozenset[str] = frozenset()) -> bool:
+    """Whether the whole utterance is a request to stop. Not a substring match: it must be nothing else.
+
+    `extra` holds more phrases to treat as a stop, from `stop_phrases()`; each must be the whole utterance.
+    """
     norm = normalize(text)
     if not norm:
         return False
-    if norm in STOP_PHRASES:
+    if norm in STOP_PHRASES or norm in extra:
         return True
     tokens = norm.split()
     if all(t in STOP_CORE or t in STOP_FILLER for t in tokens) and any(t in STOP_CORE for t in tokens):
@@ -143,9 +151,9 @@ def is_stop(text: str) -> bool:
     return _is_cjk_stop("".join(tokens))
 
 
-def fast_path(text: str) -> Route | None:
+def fast_path(text: str, extra: frozenset[str] = frozenset()) -> Route | None:
     """The route for text that needs no model, or None. Today that is only stop."""
-    if is_stop(text):
+    if is_stop(text, extra):
         return Route("stop", source="fast_path")
     return None
 

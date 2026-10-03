@@ -87,6 +87,10 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 # speaking (vad = "auto"). The model is a file you supply: its path and its SHA-256 digest are required, the https
 # URL only says where it was fetched from. `glide doctor` reports which of these is in effect.
 #
+#
+# Talking over Glide through speakers (docs/voice-echo-cancellation.md). "auto" takes WebRTC echo cancellation
+# (the aec extra), then the built-in numpy filter (the speech extra), and says which; "none" is half duplex.
+#
 # [speech]
 # language = "en"
 # silence_ms = 700          # how long a pause ends your turn (200-2000)
@@ -97,6 +101,11 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 # vad_model_path = "models/vad.onnx"
 # vad_model_url = "https://example.invalid/vad.onnx"
 # vad_model_sha256 = "<64 hexadecimal digits>"
+# echo_canceller = "auto"
+# barge_min_voiced_ms = 190   # how long you must speak over Glide before it stops for you
+# barge_margin_db = 8.0       # how far above the echo still left in the microphone your voice must be
+# barge_min_erle_db = 6.0     # no interruption by voice until the canceller removes at least this much echo
+# stop_phrases = ["hold on please"]   # whole-utterance phrases that stop Glide, besides the built-in ones
 
 # Personalization and memory (`glide memory`). Off unless you turn it on, and it saves what you typed or said, so
 # it stays on this machine, in files only you can read. GLIDE_MEMORY=1 or 0 in the environment overrides `enabled`.

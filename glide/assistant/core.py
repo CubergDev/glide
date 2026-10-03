@@ -40,7 +40,7 @@ from ..providers.config import ConfigError
 from ..providers.errors import CANCELLED, ProviderError
 from .audio_io import SAMPLE_RATE, Player, rms
 from .phrases import say
-from .router import Route, Router, answer_messages, fast_path, is_stop
+from .router import Route, Router, answer_messages, fast_path, is_stop, stop_phrases
 from .speech import SentenceSplitter, Speaker, detect_language, split_sentences
 from .tasks import DEFAULT_RUNS_DIR, ComputerTask, TaskBusy, TaskResult, TaskRunner
 
@@ -150,8 +150,10 @@ class Assistant:
         history_turns: int = 4,
         clock: Callable[[], float] = time.monotonic,
         clarify: bool = False,
+        extra_stop_phrases: Iterable[str] = (),
     ) -> None:
         self._config = config
+        self._stops = stop_phrases(extra_stop_phrases)
         self.io = io or IO()
         self._clock = clock
         self._tasks = TaskRunner(config, runs_dir)
@@ -188,7 +190,7 @@ class Assistant:
         text = " ".join(text.split())
         if not text:
             return Reply("none")
-        if fast_path(text) is not None:  # before any model is built or asked: stopping must never wait
+        if fast_path(text, self._stops) is not None:  # before any model is built or asked: stopping must never wait
             self.stop()
             return Reply("stop", timings={"total_s": self._clock() - started})
 
@@ -242,6 +244,7 @@ class Assistant:
         language: str | None = None,
         act: bool = False,
         wait: bool = True,
+        stop_only: bool = False,
     ) -> Reply:
         """Transcribe speech as it is captured, then handle the transcript as text.
 
@@ -253,6 +256,11 @@ class Assistant:
         Speech that was begun before a stop or a barge-in is cancelled, even in the middle of being transcribed
         (the connection to the transcriber is closed at once), and is dropped, not answered: whoever interrupted
         wants the newer request. Call `interrupt_speech()` BEFORE starting the speech that interrupts.
+
+        `stop_only=True` is a listen for a stop and nothing else: a partial or final transcript that is a stop
+        phrase silences the voice and stops everything, and any other transcript is dropped unheard (not
+        shown, not remembered, not answered). The voice loop opens one while Glide is speaking and a sound is
+        not yet clearly the person, so that Glide's own transcribed echo can never become a request.
         """
         epoch = self._epoch
         turn = self._enter(epoch, hearing=True)
@@ -260,11 +268,13 @@ class Assistant:
             return Reply("none")
         try:
             with controlled(turn.control):
-                return self._hear(turn, chunks, sample_rate, language, act, wait)
+                return self._hear(turn, chunks, sample_rate, language, act, wait, stop_only)
         finally:
             self._leave(turn)
 
-    def _hear(self, turn: _Turn, chunks: Iterable[bytes], sample_rate: int, language: str | None, act: bool, wait: bool) -> Reply:
+    def _hear(
+        self, turn: _Turn, chunks: Iterable[bytes], sample_rate: int, language: str | None, act: bool, wait: bool, stop_only: bool
+    ) -> Reply:
         try:
             stt = self._config.stt()
         except ConfigError as exc:
@@ -285,8 +295,9 @@ class Assistant:
                 if not transcript.partial:
                     final = transcript
                     continue
-                self.io.partial(transcript.text)
-                if is_stop(transcript.text):
+                if not stop_only:
+                    self.io.partial(transcript.text)  # a probe's interim text, Glide's own echo among it, is never shown
+                if is_stop(transcript.text, self._stops):
                     self._silence()  # a stop that is still being said already silences the voice
         except ProviderError as exc:
             error = exc
@@ -316,6 +327,8 @@ class Assistant:
                 reply.error = self._scrub(str(error))
                 self.io.warn(f"speech recognition failed: {reply.error}")
             return reply
+        if stop_only and not is_stop(heard, self._stops):
+            return Reply("none")  # not a stop: nothing of it is kept
         self.io.heard(heard)
         reply = self._handle(heard, act, wait, spoken_language or language, self._epoch, turn)
         reply.heard = heard
