@@ -33,6 +33,10 @@ speech = [
     "sounddevice>=0.5.6,<1",
     "websockets>=17.1,<18",
 ]
+# Echo cancellation for talking over Glide through speakers: WebRTC's AEC3 through the livekit package (a wheel; no
+# system library, no compiler). Without it, `echo_canceller = "auto"` falls back to a numpy filter from the `speech`
+# extra, and says so. Candidates evaluated and not chosen are listed in docs/voice-echo-cancellation.md.
+aec = ["livekit>=1.1.20,<2"]
 # The PySide6 pet. Optional until the SwiftUI pet exists (decision D11). Cocoa must match the core's pyobjc pins.
 ui = [
     "PySide6>=6.10,<7",
@@ -58,7 +62,7 @@ keyring = ["keyring>=25.7,<26"]
 # Personalization and memory (SQLite, standard library only): no packages to add. The extra exists so installs and
 # docs name the feature; MCP-facing parts also need the `mcp` extra.
 memory = []
-all = ["glide[speech,ui,webhooks,mcp,ocr,keyring,memory]"]
+all = ["glide[speech,aec,ui,webhooks,mcp,ocr,keyring,memory]"]
 
 [project.scripts]
 glide = "glide.cli:main"
