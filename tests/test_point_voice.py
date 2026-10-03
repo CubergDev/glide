@@ -82,10 +82,10 @@ def test_without_a_player_saying_an_answer_is_a_no_op_and_builds_no_tts():
     assert config.calls.tts == 0
 
 
-def test_the_four_assistant_members_it_relies_on_still_exist_with_the_shapes_it_calls():
+def test_the_assistant_members_it_relies_on_still_exist_with_the_shapes_it_calls():
     """If core.py changes one of these, this fails here, not in front of a person."""
-    parameters = inspect.signature(Assistant._handle).parameters
-    assert list(parameters) == ["self", "text", "act", "wait", "hint_language", "epoch"]
-    assert list(inspect.signature(Assistant._begin).parameters) == ["self", "epoch"]
+    leading = list(inspect.signature(Assistant._handle).parameters)[:6]
+    assert leading == ["self", "text", "act", "wait", "hint_language", "epoch"]
+    assert list(inspect.signature(PointAssistant._handle).parameters)[-1] == "_later"
     assert list(inspect.signature(Assistant._silence).parameters) == ["self"]
     assert list(inspect.signature(Assistant._speaker_or_none).parameters) == ["self"]

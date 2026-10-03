@@ -6,9 +6,13 @@ cuts the answer and its readout, anything else is a question about the pin. Tran
 epoch that drops a request a newer one has overtaken, the speaker and its sentence queue are all the base class's, so
 there is exactly one implementation of each. It never starts a computer task: the router is not called.
 
-Four members of `Assistant` are used from here and nowhere else outside it: `_handle`, `_begin`, `_silence` and
+Three members of `Assistant` are used from here and nowhere else outside it: `_handle`, `_silence` and
 `_speaker_or_none`. tests/test_point_voice.py runs this class over the real `Assistant`, so a change to one of them fails
-there instead of in front of a person.
+there instead of in front of a person. `_handle` takes the five parameters it has always had and ignores any that
+a later `Assistant` adds after them (the branches that make requests cancellable pass the request's turn as a sixth).
+It does not call `_begin` or `_enter`: a question that a barge-in or a stop overtook was already dropped by
+`handle_audio` before it got here, and what `_begin` would add (cutting the previous answer's readout, cancelling the
+previous request) is what `PointSession.ask` does for the pin's own answers.
 
 The session is bound after the loop is built (`bind`), because the session needs this assistant's voice and this
 assistant needs the session. A question that arrives before `bind` is dropped, never queued.
@@ -33,7 +37,7 @@ class PointAssistant(Assistant):
         with self._bound:
             self._session = session
 
-    def _handle(self, text: str, act: bool, wait: bool, hint_language: str | None, epoch: int) -> Reply:
+    def _handle(self, text: str, act: bool, wait: bool, hint_language: str | None, epoch: int, *_later) -> Reply:
         text = " ".join(text.split())
         with self._bound:
             session = self._session
@@ -43,9 +47,7 @@ class PointAssistant(Assistant):
             self._silence()
             session.stop()
             return Reply("stop")
-        if self._begin(epoch) is None:  # a barge-in or a stop came after this was said: a newer request owns the pin
-            return Reply("none")
-        session.ask(text)
+        session.ask(text)  # supersedes the answer in flight and its readout
         return Reply("answer", language=hint_language)
 
     def say(self, text: str) -> None:
