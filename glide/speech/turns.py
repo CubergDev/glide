@@ -104,6 +104,10 @@ class VoiceLoop:
 
         self._on_heard = self._io.heard = on_heard
 
+    @property
+    def assistant(self):
+        return self._assistant
+
     # -- control (any thread) -------------------------------------------------------------------
 
     def start(self) -> None:

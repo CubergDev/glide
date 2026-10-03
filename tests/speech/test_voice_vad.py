@@ -170,3 +170,25 @@ def test_silero_without_its_extra_says_which_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "__import__", refuse)
     with pytest.raises(VadError, match="speech extra"):
         vad.Silero(tmp_path / "vad.onnx", DIGEST)
+
+
+def test_silero_frames_keep_state_and_a_64_sample_context_between_calls():
+    np = pytest.importorskip("numpy")
+    seen = []
+
+    class FakeSession:
+        def run(self, _, feed):
+            seen.append({k: np.array(v, copy=True) for k, v in feed.items()})
+            return np.array([[0.75]], dtype=np.float32), feed["state"] + 1
+
+    silero = vad.Silero.__new__(vad.Silero)  # the model file is not available offline: only the plumbing is under test
+    silero._np, silero._session = np, FakeSession()
+    silero.reset()
+    frame = array("h", range(FRAME_BYTES // 2)).tobytes()
+    assert silero(frame) == 0.75 and silero(frame) == 0.75
+    first, second = seen
+    assert first["input"].shape == (1, 64 + 512) and not first["input"][:, :64].any()  # no context before the first frame
+    assert np.array_equal(second["input"][:, :64], first["input"][:, -64:])  # the last 64 samples carry over
+    assert second["state"].max() == 1 and int(second["sr"]) == 16000
+    with pytest.raises(ValueError, match="512 samples"):
+        silero(frame[:-2])
