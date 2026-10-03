@@ -54,3 +54,9 @@ def writer_vision() -> bool:
 
 def email() -> str | None:
     return os.environ.get("GLIDE_EMAIL") or None
+
+
+def search_url() -> str:
+    """Where a search starts when the task names no site. Configuration only (GLIDE_SEARCH_URL): the code names no
+    search engine, so an unset value means a task has to name its own address."""
+    return os.environ.get("GLIDE_SEARCH_URL", "").strip()

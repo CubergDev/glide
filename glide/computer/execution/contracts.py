@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
+from ..config import MAX_OPTIONS
 from ..writer import looks_credential
 
 KINDS = {"inspect", "click", "type", "key", "navigate", "tab_create", "tab_switch", "tab_close", "scroll"}
@@ -32,7 +33,7 @@ KEYS = {"return", "escape", "tab", "delete", "left", "right", "up", "down", "hom
 MODIFIERS = {"command", "control", "alt", "shift"}
 SCROLL_DIRECTIONS = {"up", "down"}
 MAX_REPETITIONS = 100
-MAX_ACTION_CHOICES = 250  # Reserve five workflow choices below the provider's 255-choice ceiling.
+MAX_ACTION_CHOICES = MAX_OPTIONS - 5  # Five choices stay free for the workflow answers (replan, key, ...).
 MAX_PLAN_STEPS = 16
 
 

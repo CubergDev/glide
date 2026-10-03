@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import re
 import subprocess
 import time
 import uuid
@@ -70,7 +70,7 @@ class RunConfig:
     read_ahead: bool = False
     # D3: the goal, answers, history, screenshots and step files are written only when this is set. Off by default.
     record_content: bool = False
-    engine: str = "legacy"  # "structured" is the execution engine of a later phase
+    engine: str = "legacy"  # "structured" is the execution engine (execution/engine.py)
     execution_browser: str = ""
     readiness_timeout: float = DEFAULT_READINESS_TIMEOUT
 
@@ -117,21 +117,24 @@ class RunState:
     unsupported_capabilities: list[str] = field(default_factory=list)
     cancel_reason: str = ""
     would_do: str | None = None  # a dry run's first move in words; kept in memory only, never written (D3)
+    summary: dict = field(default_factory=dict)  # the structured engine's run.json, for the recorder's report
 
 
 def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunControl | None = None) -> RunState:
-    """Drive the run under a `RunControl` and report how it ended. The legacy loop is `_run`.
+    """Drive the run under a `RunControl` and report how it ended. `_run` is the legacy loop; `cfg.engine == "structured"`
+    hands the run to `execution.engine.run_execution`, with the same classifier, control and recorder.
 
     `classifier_factory()` returns the classifier as a context manager with the `system_one` of
     `TypeSafeClient`: a `ChainedClassifier`, an `LLMClassifier`, or any stand-in. Left out, the hosted
-    TypeSafe client is used as before. The default is looked up here, not bound at import, so
-    replacing `runner.TypeSafeClient` still replaces it.
+    TypeSafe client is used as before by the legacy loop (looked up here, not bound at import, so replacing
+    `runner.TypeSafeClient` still replaces it). The structured engine has no such default: it refuses to start
+    without a factory, so its classifier always comes from the provider chains (D7).
 
     `control` is the run's stop gate (see `control.py`). Left out, a private one is made, so a caller that
     never stops the run needs nothing. Its events are delivered to its own `emit`; nothing is printed.
 
-    A provider that fails is not a crash: the run ends with the outcome "provider failure", a log
-    line naming each provider and why, and a run.json as for any other stop.
+    A provider that fails is not a crash: the run ends with the outcome "provider failure" and a run.json as for any
+    other stop (the legacy loop logs each provider and why; the structured engine says it in one fixed sentence).
 
     Content (goal, answers, history, page text, raw URLs, screenshots, step files) is written only when
     `cfg.record_content` is set. Otherwise the run folder holds run.json with counts, timings, the outcome
@@ -150,7 +153,18 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunContro
             cancelled = isinstance(error, Abort | KeyboardInterrupt)
             recorder.finish({"outcome": "aborted" if cancelled else "crashed", "engine": cfg.engine}, error=error)
             raise
-        recorder.finish({"outcome": state.outcome, "engine": cfg.engine, "act": cfg.act, "steps_taken": len(state.history)})
+        recorder.finish(
+            {
+                "outcome": state.outcome,
+                "failure": state.failure,
+                "engine": cfg.engine,
+                "act": cfg.act,
+                "steps_taken": len(state.history),
+                "goal_achieved": state.answer.achieved if state.answer else None,
+                "uncertain": state.uncertain,
+                **state.summary,
+            }
+        )
         if state.outcome.startswith("aborted"):
             hint = (
                 " Move the pointer out of the top-left abort corner before retrying."
@@ -161,7 +175,7 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunContro
         elif state.outcome == "dry run":
             control.event("dry_run", state.would_do or "", outcome=state.outcome)
         elif state.failure:
-            control.event("blocked", state.failure, outcome=state.outcome)
+            control.event("blocked", spoken_failure(state), outcome=state.outcome)
         elif state.answer is not None:
             control.event(
                 "completed" if state.answer.achieved else "blocked",
@@ -174,20 +188,26 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunContro
         return state
 
 
+def spoken_failure(state: RunState) -> str:
+    """The failure as a person is told it. The structured engine's own report keeps the capability list and the
+    effect counts; neither belongs in a spoken sentence (the counts are in run.json's `progress`)."""
+    if state.unsupported_capabilities and "Available capabilities:" in state.failure:
+        return "I couldn't complete the requested task with the available browser capabilities. Details are in the task report."
+    return re.sub(r"\s+Verified \d+ effect\(s\); \d+ remain\.$", "", state.failure)
+
+
 def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
     """Drive the loop. ctx_factory(typesafe, history) builds the action Context."""
+    if cfg.engine not in ("legacy", "structured"):
+        raise ValueError("Unknown execution engine")
     if cfg.engine == "structured":
-        try:
-            present = importlib.util.find_spec(f"{__package__}.execution.engine") is not None
-        except ModuleNotFoundError:  # the whole execution package is absent
-            present = False
-        if not present:
-            raise ValueError("the structured engine is not part of this build; use engine='legacy'")
+        if classifier_factory is None:
+            raise ValueError("the structured engine takes its classifier from the provider chains: pass classifier_factory")
         from .execution.engine import run_execution
 
-        return run_execution(cfg, ctx_factory)
-    if cfg.engine != "legacy":
-        raise ValueError("Unknown execution engine")
+        return run_execution(cfg, ctx_factory, classifier_factory)
+    # Looked up here, not bound at import, so replacing `runner.TypeSafeClient` still replaces it.
+    classifier_factory = classifier_factory if classifier_factory is not None else TypeSafeClient
     cfg.out.mkdir(parents=True, exist_ok=True)
     log = Log(cfg.out / "run.log" if cfg.record_content else None, enabled=cfg.record_content)
     log(f"run folder: {cfg.out}")
@@ -197,7 +217,7 @@ def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
     state = RunState()
     started = time.time()
     try:
-        with (classifier_factory if classifier_factory is not None else TypeSafeClient)() as typesafe:
+        with classifier_factory() as typesafe:
             ctx = metered(ctx_factory(typesafe, state.history), state.calls)
             for step in range(1, cfg.steps + 1):
                 if run_step(cfg, ctx, state, step, log):
@@ -267,7 +287,7 @@ def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
         summary["failure"] = diagnostics.scrub_text(state.failure, limit=FAILURE_CHARS) if state.failure else None
         summary["interrupted_readback"] = state.readback
         summary["task_id"] = current_control().task_id if current_control() else ""
-        (cfg.out / "run.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        diagnostics.write_private(cfg.out / "run.json", json.dumps(summary, indent=2))
         log(f"{state.calls.line()}  handoffs {len(state.handoffs)}  questions {len(state.guidance.exchanges)}")
         log(f"run folder: {cfg.out}")
     return state

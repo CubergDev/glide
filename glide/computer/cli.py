@@ -28,6 +28,11 @@ WRITER_DISABLED = (
     "writer disabled: no usable llm provider in glide.toml; type_text, writer-proposed URLs and the final answer need one "
     "(run `glide doctor`)"
 )
+ABORTED, FAILED = (
+    130,
+    1,
+)  # exit codes: stopped by the user (the shell's own value for Ctrl-C), and any run that did not do the job
+FAILED_OUTCOMES = {"blocked", "unsupported", "crashed", "provider failure"}  # failures that may carry no `failure` text
 
 
 def _fail(message: str, code: int = 2) -> int:
@@ -56,6 +61,19 @@ def main(argv: list[str] | None, glide_config) -> int:
     )
     parser.add_argument("goal", help="what you want done on this computer")
     parser.add_argument("--act", action="store_true", help="actually click and type (default: dry run, one step)")
+    parser.add_argument(
+        "--engine",
+        choices=["legacy", "structured"],
+        default="legacy",
+        help="legacy: the screen loop. structured: planned effects checked after each action, through the "
+        "provider chains of glide.toml (browser and desktop tasks; research and reasoning)",
+    )
+    parser.add_argument(
+        "--readiness-timeout",
+        type=float,
+        default=config.DEFAULT_READINESS_TIMEOUT,
+        help="structured engine: seconds a page or an effect may take to show before the run reports it (0-30)",
+    )
     parser.add_argument("--steps", type=int, default=config.DEFAULT_STEPS, help="max actions before stopping")
     parser.add_argument("--min-confidence", type=float, default=config.DEFAULT_MIN_CONFIDENCE, help="stop below this confidence")
     parser.add_argument("--delay", type=float, default=config.DEFAULT_DELAY, help="seconds to wait after each action")
@@ -100,6 +118,9 @@ def main(argv: list[str] | None, glide_config) -> int:
         app=args.app,
         url=args.url,
         record_content=args.record_content,
+        engine=args.engine,
+        execution_browser=config.browser(),
+        readiness_timeout=args.readiness_timeout,
     )
 
     def ctx_factory(classifier, history):
@@ -119,7 +140,11 @@ def main(argv: list[str] | None, glide_config) -> int:
         state = run(cfg, ctx_factory, classifier_factory=glide_config.classifier, control=control)
     except ConfigError as e:  # no classifier slot is usable: the message names the variables to set
         return _fail(glide_config.scrub(str(e)))
-    return 130 if state.outcome.startswith("aborted") else 0
+    if state.outcome.startswith("aborted"):
+        return ABORTED
+    if state.failure or state.outcome in FAILED_OUTCOMES:
+        return FAILED
+    return 0
 
 
 def inspect(argv: list[str] | None = None) -> int:
