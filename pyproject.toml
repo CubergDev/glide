@@ -1,0 +1,43 @@
+[project]
+name = "glide"
+version = "0.1.0"
+description = "A voice and text assistant that drives your Mac, on swappable API providers."
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic==1.6.0",
+    "openai==2.54.0",
+    "pillow>=11.0,<13",
+    "typesafe-sdk==0.6.0",
+    "websocket-client==1.9.0",
+    "httpx>=0.27",
+    "ocrmac==1.0.1; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices==12.2.2; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+glide = "glide.cli:main"
+glide-computer = "glide.computer.cli:main"
+glide-inspect = "glide.computer.cli:inspect"
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.16.8"]
+
+[build-system]
+requires = ["hatchling==1.32.1"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["glide"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+extend-exclude = ["consolidation-inputs", "review-evidence"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
