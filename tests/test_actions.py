@@ -3,12 +3,13 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from writer_endpoint import writer_for
 
 from glide.computer import actions
 from glide.computer.actions import click_item, fill_field, press_offscreen
 from glide.computer.models import AxNode, Field, Item, Missed, Popup
 from glide.computer.platform_adapter import desktop
-from glide.computer.writer import Fill, make_writer
+from glide.computer.writer import Fill
 
 
 @pytest.fixture
@@ -212,10 +213,9 @@ def test_use_browser_refuses_when_the_writer_proposes_nothing(screen, browser, m
 
 @pytest.fixture
 def broken_writer(clean_env, endpoint):
-    """A real writer whose endpoint refuses every request."""
-    clean_env.setenv("CLICKER_WRITER_BASE_URL", endpoint.url)
+    """A real writer, over the provider chains, whose endpoint refuses every request."""
     endpoint.state["reject"] = lambda body: "model 'nope' not found"
-    return make_writer()
+    return writer_for(endpoint.url)
 
 
 def test_a_writer_that_fails_refuses_the_url_instead_of_ending_the_run(screen, browser, broken_writer):

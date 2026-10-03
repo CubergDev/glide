@@ -6,7 +6,6 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from types import SimpleNamespace
 
 CLASSIFIER = "classifier"
 WRITER = "writer"
@@ -108,22 +107,24 @@ class MeteredClassifier:
 
 
 class MeteredWriter:
-    """The Anthropic client, counting each request. `messages.create` is the only call the package makes."""
+    """The neutral writer (generation.py), counting each request. `generate` is the only call the package makes.
+
+    Nothing here reads a vendor's reply shape: a `GenerationResult` names its model and carries `TokenUsage`
+    with the cached tokens already apart.
+    """
 
     def __init__(self, client, calls: Calls):
         self._client = client
         self._calls = calls
-        self.messages = SimpleNamespace(create=self._create)
 
-    def _create(self, **request):
+    def generate(self, request, cancel=None):
         with self._calls.record(WRITER):
-            reply = self._client.messages.create(**request)
-        usage = getattr(reply, "usage", None)
+            reply = self._client.generate(request, cancel)
         self._calls.used(
-            _model(request.get("model"), WRITER),
-            input_tokens=_tokens(usage, "input_tokens") + _tokens(usage, "cache_creation_input_tokens"),
-            cached_input_tokens=_tokens(usage, "cache_read_input_tokens"),
-            output_tokens=_tokens(usage, "output_tokens"),
+            _model(reply.model, request.model, WRITER),
+            input_tokens=reply.usage.input_tokens,
+            cached_input_tokens=reply.usage.cached_input_tokens,
+            output_tokens=reply.usage.output_tokens,
         )
         return reply
 

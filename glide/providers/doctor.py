@@ -33,7 +33,7 @@ from typesafe_sdk import Choice
 from glide.computer.config import load_dotenv
 
 from .base import Audio
-from .config import ROLES, ConfigError, GlideConfig, SlotInfo, load_config
+from .config import ALL_ROLES, EXTRA_LLM_ROLES, ROLES, ConfigError, GlideConfig, SlotInfo, load_config
 from .errors import AllProvidersFailed, ProviderError
 
 PROBE_PROMPT = "Reply with the single word: ok"
@@ -72,7 +72,7 @@ def doctor(
     seconds, and the adapters' own limit applies when it is left out.
     """
     rows: list[Row] = []
-    for role in roles or ROLES:
+    for role in roles or (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in config.roles)):  # planner, research: only if configured
         rows.extend(_role_rows(config, role, live, timeout, clock))
     return rows
 
@@ -253,7 +253,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     parser.add_argument(
         "--config", help="the glide.toml to read (default: $GLIDE_CONFIG, ./glide.toml, ~/.config/glide/glide.toml)"
     )
-    parser.add_argument("--role", action="append", choices=ROLES, help="check only this role (repeatable)")
+    parser.add_argument("--role", action="append", choices=ALL_ROLES, help="check only this role (repeatable)")
     parser.add_argument("--timeout", type=float, help="seconds to allow each live request")
     args = parser.parse_args(argv)
     if env is None:
