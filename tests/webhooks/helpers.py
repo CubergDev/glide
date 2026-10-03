@@ -96,3 +96,29 @@ def make_call(
         context={"number": 7} if context is None else context,
         allow_actions=allow_actions,
     )
+
+
+class Hdrs:
+    """Just enough of starlette's `Headers` (case-insensitive, `getlist`, `raw`, dict() of the first values)
+    for the auth and translation tests, so they run without the `webhooks` extra."""
+
+    def __init__(self, data=None, *, raw=None):
+        pairs = list(raw) if raw is not None else [(k.encode(), v.encode()) for k, v in (data or {}).items()]
+        self.raw = [(k.lower(), v) for k, v in pairs]
+
+    def getlist(self, name):
+        key = name.lower().encode()
+        return [v.decode() for k, v in self.raw if k == key]
+
+    def keys(self):
+        return list(dict.fromkeys(k.decode() for k, _ in self.raw))
+
+    def __getitem__(self, name):
+        values = self.getlist(name)
+        if not values:
+            raise KeyError(name)
+        return values[0]
+
+    def get(self, name, default=None):
+        values = self.getlist(name)
+        return values[0] if values else default
