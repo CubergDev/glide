@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typesafe_sdk import TypeSafeClient
 
 from .config import SITES
+from .control import checkpoint, dispatch
 from .decide import OFFSCREEN_PREFIX, Decision, row_mates, verify_typed
 from .models import Field, Guidance, Item, Missed, Popup, Screen
 from .platform_adapter import desktop
@@ -57,12 +58,12 @@ def click_item(item: Item, screen: Screen) -> str:
     A click there would land on a popup in front of the item, so that popup is closed first.
     """
     ref = screen.ax_refs.get(item.index)
-    if ref is not None and desktop.ax_press(ref):
+    if ref is not None and dispatch(desktop.ax_press, ref):
         return f"pressed {item.text!r} via accessibility"
     popup = screen.covered.get(item.index)
     closed = f"{close_popup(popup)} then " if popup is not None else ""
     try:
-        desktop.click_at(screen.to_points(item))
+        dispatch(desktop.click_at, screen.to_points(item))
     except Missed as e:
         return f"{closed}click refused: {item.text!r} was not clicked, {e}"
     if ref is None:
@@ -77,11 +78,11 @@ def close_popup(popup: Popup) -> str:
     button = popup.close
     if button is not None:
         try:
-            desktop.click_at((button.x + button.w / 2, button.y + button.h / 2))
+            dispatch(desktop.click_at, (button.x + button.w / 2, button.y + button.h / 2))
         except Missed:
             button = None  # the pointer never got there
     if button is None:
-        desktop.press("escape")
+        dispatch(desktop.press, "escape")
     desktop.sleep_watching(CLOSE_SECONDS)
     return f"closed {popup.title}" if button is not None else f"closed {popup.title} with Escape"
 
@@ -97,7 +98,7 @@ def press_offscreen(key: str, screen: Screen) -> str:
     node = nodes[int(key)] if key.isdigit() and int(key) < len(nodes) else None
     if node is None:
         return f"press_offscreen refused: there is no off-screen control {key!r}"
-    if desktop.ax_press(node.ref):
+    if dispatch(desktop.ax_press, node.ref):
         return f"pressed {node.label!r} (off-screen control) via accessibility"
     return f"press_offscreen refused: {node.label!r} did not accept the press"
 
@@ -113,13 +114,13 @@ def fill_field(field: Field, text: str) -> str:
     """
     ref = field.ref
     if ref is not None:
-        desktop.ax_focus(ref)
-        if desktop.ax_set_value(ref, text):
+        dispatch(desktop.ax_focus, ref)
+        if dispatch(desktop.ax_set_value, ref, text):
             back = desktop.ax_value(ref)
             if back is not None and back.endswith(text):
                 return "via accessibility"
-    desktop.clear_field()
-    desktop.type_text(text)
+    dispatch(desktop.clear_field)
+    dispatch(desktop.type_text, text)
     return "via keystrokes"
 
 
@@ -132,19 +133,19 @@ def restore_field(field: Field, typed: str) -> bool:
     ref = field.ref
     if ref is None or desktop.ax_value(ref) != typed:
         return False
-    return desktop.ax_set_value(ref, field.value) and desktop.ax_value(ref) == field.value
+    return dispatch(desktop.ax_set_value, ref, field.value) and desktop.ax_value(ref) == field.value
 
 
 def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
     """Go to the browser, and open the website the site answer named.
 
     `none` is the page already open there, so bringing the browser forward is the whole action. A
-    catalog key is its URL, and `other` is a site outside the catalog, which only the writer can
-    name. Opening a URL activates the browser too, so the three cases differ only in the page.
+    catalog key is its URL; `other` uses a literal address from a simple navigation request or
+    asks the writer to propose one. Opening a URL activates the browser too.
     """
     site = decision.site.choice
     if site == "none":
-        if desktop.activate(ctx.browser):
+        if dispatch(desktop.activate, ctx.browser):
             return f"activated {ctx.browser}"
         return f"use_browser failed: {ctx.browser} did not come to the front"
     url = SITES.get(site)
@@ -154,10 +155,12 @@ def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
         try:
             url = compose_url(ctx.writer, ctx.goal, ctx.history, ctx.guidance)
         except WriterError as e:
+            if getattr(e, "halt", False):
+                raise
             return f"use_browser refused: the writer failed ({e})"
     if not url:
         return "use_browser refused: the writer proposed no usable URL for this goal"
-    if desktop.open_url(ctx.browser, url):
+    if dispatch(desktop.open_url, ctx.browser, url):
         return f"opened {url}"
     return f"use_browser failed: opened {url} but {ctx.browser} did not come to the front"
 
@@ -183,16 +186,20 @@ def _type_text(decision, screen: Screen, items, ctx: Context) -> str:
     try:
         fill = compose_text(ctx.writer, ctx.goal, screen, items, ctx.history, ctx.guidance)
     except WriterError as e:
+        if getattr(e, "halt", False):
+            raise
         return f"type_text refused: the writer failed ({e})"
     text = fill.text
     if not text:
         return "type_text refused: writer declined to fill this field"
     how = fill_field(screen.field, text)
     if fill.submit:
-        desktop.press("return")
+        dispatch(desktop.press, "return")
         return f"typed {text!r} into {screen.field.label!r} {how} and pressed Return"
     time.sleep(0.3)
+    checkpoint()
     p = verify_typed(ctx.typesafe, ctx.goal, screen.field, text, desktop.focused_field())
+    checkpoint()
     if p < VERIFY_THRESHOLD:
         recovery = "restored previous value" if restore_field(screen.field, text) else "could not safely restore previous value"
         return f"typed {text!r} into {screen.field.label!r} {how} but verification failed ({p:.2f}); {recovery}"
@@ -201,7 +208,7 @@ def _type_text(decision, screen: Screen, items, ctx: Context) -> str:
 
 def _key(name: str, description: str, command: bool = False):
     def handler(decision, screen, items, ctx) -> str:
-        desktop.press(name, command)
+        dispatch(desktop.press, name, command)
         return description
 
     return handler
@@ -209,7 +216,7 @@ def _key(name: str, description: str, command: bool = False):
 
 def _scroll(lines: int, description: str):
     def handler(decision, screen, items, ctx) -> str:
-        desktop.scroll(lines)
+        dispatch(desktop.scroll, lines)
         return description
 
     return handler
