@@ -1,8 +1,8 @@
 """Guard for glide.memory and glide.mcp tests: nothing reaches the user's real data or starts a real MCP server.
 
-Loaded by path from tests/memory/conftest.py and tests/mcp/conftest.py (the hyphen in this file's name makes it
-unimportable as a module). tests/conftest.py should load it the same way so the guard also covers any other test
-that touches these packages. It adds to tests/conftest.py's `no_real_machine`; it does not replace or weaken it.
+Registered by tests/conftest.py (by path: the hyphen in this file's name makes it unimportable as a module) and
+imported by the test modules of tests/memory and tests/mcp through their loaders. It confines only the tests under
+those two directories. It adds to tests/conftest.py's `no_real_machine`; it does not replace or weaken it.
 
 What it refuses, so that a test which forgot to patch fails instead of acting on the real machine:
 - the user's real home, data directory and glide.toml: HOME, GLIDE_DATA_DIR and the GLIDE_* switches are replaced
@@ -47,7 +47,12 @@ def _inside_temp(path: object) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def no_real_memory_or_mcp(monkeypatch, tmp_path):
+def no_real_memory_or_mcp(request, monkeypatch, tmp_path):
+    # conftest registers every tests/guards_*.py suite-wide, so this autouse fixture runs for every test: it
+    # confines only the tests of the packages it guards and leaves the temp directory of all others untouched.
+    if not {"memory", "mcp"} & set(request.node.path.relative_to(Path(__file__).parent).parts):
+        return
+
     def refuse(what: str):
         def call(*args, **kwargs):
             raise RuntimeError(f"a test reached the real machine through {what}; patch it in the test")
