@@ -59,7 +59,7 @@ def test_budget_caps_items():
 def test_goal_echo_matches_wrapped_command_lines():
     goal = "go to cnn and click onto something related to AI on the homepage"
     echoes = goal_echoes(goal)
-    assert is_echo('clear && uv run clicker "go to cnn and click onto something', echoes)
+    assert is_echo('clear && uv run glide computer "go to cnn and click onto something', echoes)
     assert is_echo('related to AI on the homepage" --act', echoes)
     assert not is_echo("Trending: Trump and AI warnings", echoes)
 
