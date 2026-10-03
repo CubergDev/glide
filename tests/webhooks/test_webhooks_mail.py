@@ -367,3 +367,85 @@ def test_recording_mode_never_changes_notification_identity():
     [kept] = outlook({"value": [graph_notification()]}, record_content=True)
     assert (plain.id, plain.event_id) == (kept.id, kept.event_id)
     assert gmail(gmail_payload()).id == gmail(gmail_payload(), record_content=True).id
+
+
+# -- characterisation: clocks, text hygiene and call construction -----------------------------------------------------------
+
+
+def test_the_freshness_clock_must_be_aware_and_the_bounds_positive():
+    with pytest.raises(ValueError):
+        translate_gmail(
+            gmail_payload(),
+            source_id="gmail-team",
+            event_id="2070443601311540",
+            agent_id="triage-agent",
+            mailbox=MAILBOX,
+            subscription=SUBSCRIPTION,
+            now=datetime(2026, 10, 3, 5, 0),
+        )
+    with pytest.raises(ValueError):
+        gmail(gmail_payload(), max_age_s=0)
+    with pytest.raises(ValueError):
+        gmail(gmail_payload(), future_skew_s=-1)
+
+
+@pytest.mark.parametrize("bad", ["a\nb", "a\x00b", "a\x7fb", "\ud800", "x" * 321])
+def test_mail_text_fields_are_single_line_clean_and_bounded(bad):
+    with pytest.raises(TranslationError):
+        gmail(gmail_payload({"emailAddress": bad, "historyId": "1"}))
+    with pytest.raises(TranslationError):
+        gmail(gmail_payload({"emailAddress": MAILBOX, "historyId": bad}))
+
+
+def test_the_mailbox_comparison_ignores_case_only():
+    assert gmail(gmail_payload({"emailAddress": MAILBOX.upper(), "historyId": "1"})).context["history_id"] == "1"
+    with pytest.raises(AuthError):
+        gmail(gmail_payload({"emailAddress": "x" + MAILBOX, "historyId": "1"}))
+
+
+def test_a_call_that_cannot_be_built_is_a_validation_error():
+    with pytest.raises(ValueError):
+        translate_gmail(
+            gmail_payload(),
+            source_id="gmail-team",
+            event_id="2070443601311540",
+            agent_id="Not A Slug",
+            mailbox=MAILBOX,
+            subscription=SUBSCRIPTION,
+            now=NOW,
+        )
+    with pytest.raises(ValueError):
+        outlook({"value": [graph_notification()]}, agent_id="Not A Slug")
+
+
+def test_outlook_client_states_must_be_configured_and_are_compared_as_bytes():
+    for states in ((), ("",), ("s" * 256,), (7,)):
+        with pytest.raises(ValueError):
+            outlook({"value": [graph_notification()]}, client_states=states)
+    with pytest.raises(AuthError):
+        outlook({"value": [graph_notification(clientState="état-\ud800")]})
+    with pytest.raises(AuthError):
+        outlook({"value": [graph_notification(clientState="s" * 256)]})
+    with pytest.raises(AuthError):
+        outlook({"value": [graph_notification(clientState=7)]})
+
+
+def test_outlook_batches_are_between_one_and_one_hundred_objects():
+    with pytest.raises(TranslationError):
+        outlook({"value": []})
+    with pytest.raises(TranslationError):
+        outlook({"value": [graph_notification(f"id{i}==") for i in range(101)]})
+    with pytest.raises(TranslationError):
+        outlook({"value": ["text"]})
+    assert len(outlook({"value": [graph_notification(f"id{i}==") for i in range(100)]})) == 100
+
+
+def test_the_outlook_context_keeps_identifiers_and_drops_repeats_by_default():
+    [kept] = outlook({"value": [graph_notification()]}, record_content=True)
+    [default] = outlook({"value": [graph_notification()]})
+    assert {"resource", "subscription_id"} <= kept.context.keys()
+    assert not {"resource", "subscription_id"} & default.context.keys()
+    assert default.context["mailbox_id"] == MAILBOX_ID and default.context["tenant_id"] == TENANT_ID
+    assert (
+        default.context["mcp_required"] is True and default.allow_actions is False and default.operation == "outlook.mail.changed"
+    )

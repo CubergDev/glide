@@ -618,3 +618,119 @@ def test_the_note_is_what_the_default_store_keeps_of_a_blocked_run(redacting):
 def test_secure_delete_is_on(redacting):
     store, _ = redacting
     assert store._db.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
+# -- characterisation: argument validation and the listing API ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "limits", [{"max_pending": 0}, {"max_pending": True}, {"max_pending": "5"}, {"max_events": 0}, {"max_events": 1.5}]
+)
+def test_the_capacity_limits_must_be_positive_integers(tmp_path, limits):
+    with pytest.raises(ValueError):
+        QueueStore(tmp_path / "q.sqlite", **limits)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "text",
+        {"source": "s", "event_id": "e", "digest": "d"},  # no call key
+        {"source": "s", "event_id": "e", "digest": "d", "call": None, "extra": 1},
+        {"source": "s", "event_id": "e", "digest": "d", "call": None, "dedupe_body": "yes"},
+        {"source": "", "event_id": "e", "digest": "d", "call": None},
+        {"source": "s", "event_id": "e" * 4097, "digest": "d", "call": None},
+        {"source": "s", "event_id": 7, "digest": "d", "call": None},
+        {"source": "s", "event_id": "e", "digest": "d", "call": {"agent_id": "laptop"}},  # no message id
+        {"source": "s", "event_id": "e", "digest": "d", "call": {"id": "m", "agent_id": ""}},
+        {"source": "s", "event_id": "e", "digest": "d", "call": {"id": "m", "agent_id": "a", "n": float("nan")}},
+        {"source": "s", "event_id": "e", "digest": "d", "call": {"id": "m", "agent_id": "a", "text": "x" * 70000}},
+    ],
+)
+def test_a_malformed_delivery_is_refused_before_anything_is_stored(stored, item):
+    store, _ = stored
+    with pytest.raises(ValueError):
+        store.enqueue_many([item])
+    assert store.messages("laptop") == [] and store.enqueue_many([]) == []
+
+
+def test_a_batch_must_be_a_list_of_at_most_one_thousand(stored):
+    store, _ = stored
+    with pytest.raises(ValueError):
+        store.enqueue_many(tuple())
+    with pytest.raises(ValueError):
+        store.enqueue_many([{}] * 1001)
+
+
+def test_listing_is_newest_first_filtered_and_bounded(stored):
+    store, clock = stored
+    for index, identity in enumerate(("m1", "m2", "m3")):
+        clock.now = 100.0 + index
+        enqueue(store, identity)
+    assert [m["message_id"] for m in store.messages("laptop")] == ["m3", "m2", "m1"]
+    assert [m["message_id"] for m in store.messages("laptop", limit=2)] == ["m3", "m2"]
+    claim(store)
+    assert [m["message_id"] for m in store.messages("laptop", status="leased")] == ["m1"]
+    assert [m["message_id"] for m in store.messages("laptop", status="pending")] == ["m3", "m2"]
+    assert store.messages("other") == []
+    for bad in ({"limit": 0}, {"limit": 101}, {"limit": True}, {"limit": "5"}, {"status": "ignored"}, {"status": "DROP TABLE"}):
+        with pytest.raises(ValueError):
+            store.messages("laptop", **bad)
+
+
+@pytest.mark.parametrize("subject", ["", None, 7])
+def test_a_claim_needs_a_named_owner(stored, subject):
+    store, _ = stored
+    enqueue(store)
+    with pytest.raises(LeaseConflict):
+        store.claim("laptop", subject)
+    assert store.get("laptop", "m1")["status"] == "pending"
+
+
+@pytest.mark.parametrize("token", ["", None, 7, "t" * 1025])
+def test_an_unusable_token_is_a_lease_conflict_everywhere(stored, token):
+    store, _ = stored
+    enqueue(store)
+    lease = claim(store)
+    for action in (
+        lambda: store.heartbeat("laptop", "operator-one", "m1", token),
+        lambda: store.finish("laptop", "operator-one", "m1", token, "completed"),
+        lambda: store.publish("laptop", "operator-one", "m1", token, {"kind": "progress"}),
+    ):
+        with pytest.raises(LeaseConflict):
+            action()
+    assert store.get("laptop", "m1")["status"] == "leased" and lease["lease_token"]
+
+
+def test_finish_resolve_and_publish_refuse_unusable_values(stored):
+    store, _ = stored
+    enqueue(store)
+    lease = claim(store)
+    for bad in (
+        {"outcome": "pending"},
+        {"outcome": "execute"},
+        {"outcome": "completed", "summary": 7},
+        {"outcome": "completed", "note": None},
+    ):
+        outcome = bad.pop("outcome")
+        with pytest.raises(ValueError):
+            store.finish(*args(lease), outcome, **bad)
+    with pytest.raises(ValueError):
+        store.publish(*args(lease), "not an event")
+    with pytest.raises(ValueError):
+        store.publish(*args(lease), {"kind": "progress", "text": "x" * (MAX_EVENT_BYTES + 1)})
+    for outcome in ("uncertain", "pending", "ignored"):
+        with pytest.raises(ValueError):
+            store.resolve("laptop", "m1", outcome)
+    with pytest.raises(ValueError):
+        store.resolve("laptop", "m1", "failed", summary=7)
+    assert store.get("laptop", "m1")["status"] == "leased"
+
+
+@pytest.mark.parametrize("fixture,kept", [("stored", "Reviewed by the operator."), ("redacting", "Reconciled by an operator.")])
+def test_a_resolution_keeps_its_summary_only_under_recording(request, fixture, kept):
+    store, _ = request.getfixturevalue(fixture)
+    enqueue(store)
+    lease = claim(store)
+    store.finish(*args(lease), "uncertain", summary="s", note="n")
+    assert store.resolve("laptop", "m1", "failed", summary="Reviewed by the operator.")["summary"] == kept

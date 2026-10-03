@@ -12,6 +12,7 @@ import pytest
 
 from glide.computer.models import Abort
 from glide.webhooks import worker
+from glide.webhooks.contracts import AgentEvent
 from glide.webhooks.worker import Control, LeaseControl
 from webhooks.helpers import make_call
 
@@ -47,8 +48,10 @@ class OfflineTransport:
         if kind == "heartbeat":
             server_time = time.time()
             return self.heartbeat() if self.heartbeat else {"server_time": server_time, "expires_at": server_time + self.duration}
-        if kind == "events" and self.fail_event:
-            raise httpx.ConnectError("Offline fixture disconnected")
+        if kind == "events":
+            AgentEvent.model_validate(data)  # the real server answers 422 to anything else, and the worker then drops the lease
+            if self.fail_event:
+                raise httpx.ConnectError("Offline fixture disconnected")
         return {"status": "completed"}
 
     def close(self):
@@ -576,3 +579,238 @@ def test_cli_refuses_missing_consent_or_unapproved_desktop_configuration(argumen
 def test_the_real_executor_is_refused_by_the_guard():
     with pytest.raises(RuntimeError, match="real machine"):
         worker.ComputerExecutor(None, "runs").execute(task(), Control(), act=False)
+
+
+# -- characterisation: the loop's failure paths, the text it sends, and the command line's wiring ------------------------
+
+
+def test_a_handler_crash_cancels_the_run_and_reports_failed_with_a_fixed_note():
+    transport = OfflineTransport()
+
+    def handler(message, control):
+        raise RuntimeError("synthetic-secret-in-error")
+
+    assert worker.run_one(transport, **handlers_for(transport, handler))
+    [result] = completed(transport)
+    assert result["outcome"] == "failed" and result["note"] == worker.NOTE_FAILED and result["summary"] == worker.NOTE_FAILED
+    assert "synthetic-secret" not in json.dumps(result)
+
+
+def test_an_interrupted_run_that_never_reached_the_desktop_is_cancelled_with_a_fixed_note():
+    transport = OfflineTransport()
+
+    def handler(message, control):
+        raise Abort("synthetic-secret-in-abort")
+
+    assert worker.run_one(transport, **handlers_for(transport, handler))
+    [result] = completed(transport)
+    assert result["outcome"] == "cancelled" and result["note"] == worker.NOTE_INTERRUPTED
+    assert "synthetic-secret" not in json.dumps(result)
+
+
+def test_a_cancel_that_arrives_after_the_handler_returned_is_still_a_cancel():
+    transport = OfflineTransport()
+
+    def handler(message, control):
+        control.cancel()
+        return {"outcome": "completed", "summary": "Too late"}
+
+    assert worker.run_one(transport, **handlers_for(transport, handler))
+    assert completed(transport)[0]["outcome"] == "cancelled"
+
+
+def test_a_failed_completion_is_raised_to_the_caller_not_swallowed():
+    transport = OfflineTransport()
+    request = transport.request
+
+    def refuse_completion(method, suffix, data=None):
+        if suffix.endswith("/complete"):
+            raise httpx.ConnectError("Offline fixture disconnected")
+        return request(method, suffix, data)
+
+    transport.request = refuse_completion
+    with pytest.raises(httpx.ConnectError):
+        worker.run_one(transport, **handlers_for(transport, lambda *_: {"outcome": "completed"}))
+
+
+def test_a_lease_lost_to_a_failed_heartbeat_sends_no_completion_and_no_more_events():
+    def refuse():
+        raise httpx.ConnectError("Offline fixture disconnected")
+
+    transport = OfflineTransport(duration=0.8, heartbeat=refuse)
+    events = []
+
+    def handler(message, control):
+        assert control.cancelled.wait(2)
+        control.event("progress", "after the loss")
+        events.append(len([1 for kind, _ in transport.requests if kind == "events"]))
+        control.check()
+
+    assert worker.run_one(transport, **handlers_for(transport, handler))
+    assert events == [0] and not completed(transport)
+
+
+def test_the_completion_text_is_clipped_to_the_envelope_and_stripped_of_controls():
+    transport = OfflineTransport()
+    result = {"outcome": "completed", "summary": "é" * 3000 + "\x00\x1b[2J", "note": "n" * 500}
+    assert worker.run_one(transport, **handlers_for(transport, lambda *_: result))
+    [sent] = completed(transport)
+    assert len(sent["summary"].encode()) <= 4096 and "\x00" not in sent["summary"] and "\x1b" not in sent["summary"]
+    assert len(sent["note"].encode()) <= 200 and sent["lease_token"] == "synthetic-lease-token-is-not-a-secret"
+
+
+def test_a_reporter_reply_is_clipped_and_the_outcome_follows_its_uncertainty():
+    long = "x" * 5000
+    done = gate(call(), reporter=lambda *_: (long, False))
+    assert done["outcome"] == "completed" and len(done["summary"]) == 4096 and done["note"] == "Report written."
+    unsure = gate(call(), reporter=lambda *_: ("Unsure.", True))
+    assert unsure["outcome"] == "blocked" and unsure["note"] == "Report written."
+
+
+def test_a_handler_is_used_only_for_its_own_operation():
+    seen = []
+
+    def handler(message, control):
+        seen.append(message.operation)
+        return {"outcome": "completed", "summary": "h", "note": "h"}
+
+    assert gate(call("github.issue.triage"), handlers={"github.issue.triage": handler})["note"] == "h"
+    assert gate(call("github.comment.summarize"), handlers={"github.issue.triage": handler})["outcome"] == "blocked"
+    assert seen == ["github.issue.triage"]
+
+
+def test_desktop_outcome_summary_prefers_the_failure_then_the_answer_then_the_outcome():
+    def mapped(**kw):
+        base = dict(outcome="done", achieved=True, failure=None, stopped=False, answer=None)
+        return worker.desktop_outcome(SimpleNamespace(**{**base, **kw}))
+
+    assert mapped(failure="why", answer="what")["summary"] == "why"
+    assert mapped(answer="what")["summary"] == "what"
+    assert mapped()["summary"] == "done"
+    assert len(mapped(outcome="o" * 300)["note"]) <= len("Desktop run ended: .") + 100
+    assert "\x1b" not in mapped(answer="a\x1b[2Kb")["summary"]
+
+
+def test_the_transport_sends_json_bodies_and_raises_on_http_errors():
+    seen = []
+
+    def respond(request):
+        seen.append((request.method, request.url.path, request.content))
+        return httpx.Response(409, json={"detail": "x"})
+
+    with httpx.Client(base_url="https://callbacks.example/", transport=httpx.MockTransport(respond)) as client:
+        transport = worker.AgentTransport(
+            "https://callbacks.example",
+            "laptop",
+            "GLIDE_AGENT_TOKEN",
+            client=client,
+            secrets=__import__("glide.webhooks.secret_sources", fromlist=["DictSecrets"]).DictSecrets({"GLIDE_AGENT_TOKEN": "t"}),
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            transport.request("POST", "messages/m1/complete", {"lease_token": "x"})
+    assert seen == [("POST", "/v1/agents/laptop/messages/m1/complete", b'{"lease_token":"x"}')]
+
+
+@pytest.mark.parametrize(
+    "server", ["http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000", "https://callbacks.example"]
+)
+def test_the_transport_accepts_loopback_http_and_any_https(server):
+    worker.AgentTransport(server, "laptop", "GLIDE_AGENT_TOKEN").close()
+
+
+class FakeConfig:
+    def __init__(self):
+        self.asked, self.switch = [], None
+
+    def on_switch(self, callback):
+        self.switch = callback
+
+    def llm(self, role="fast"):
+        self.asked.append(role)
+        return SimpleNamespace(chat=lambda *a, **k: pytest.fail("a report was requested while only wiring"))
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """The command line over fakes: a config, a transport that records its use, and a `run_one` that records its options."""
+    state = SimpleNamespace(config=FakeConfig(), loaded=[], runs=[], closed=[], built=[], fail=None, real=worker.AgentTransport)
+
+    def load_config(path=None):
+        state.loaded.append(path)
+        return state.config
+
+    class Transport:
+        def __init__(self, server, agent, token_env):
+            state.built.append((server, agent, token_env))
+
+        def close(self):
+            state.closed.append(True)
+
+    def run_one(transport, *, stop=None, **options):
+        state.runs.append(options)
+        if state.fail:
+            raise state.fail
+        return True
+
+    monkeypatch.setattr("glide.providers.config.load_config", load_config)
+    monkeypatch.setattr(worker, "AgentTransport", Transport)
+    monkeypatch.setattr(worker, "run_one", run_one)
+    return state
+
+
+ARGS = ["--server", "http://127.0.0.1:8000", "--agent", "laptop", "--allow-model", "--once"]
+
+
+def test_the_command_line_by_default_runs_reports_only_and_wires_no_desktop(wired):
+    assert worker.main(ARGS) == 0
+    [options] = wired.runs
+    assert options["allow_desktop"] is False and options["act"] is False
+    assert options["executor"] is None and options["approver"] is None and callable(options["reporter"])
+    assert wired.built == [("http://127.0.0.1:8000", "laptop", "GLIDE_AGENT_TOKEN")] and wired.closed == [True]
+    assert wired.loaded == [None]
+
+
+def test_the_command_line_wires_the_real_executor_and_the_terminal_approver_only_for_the_desktop_flag(wired, tmp_path):
+    assert worker.main([*ARGS, "--allow-desktop", "--runs", str(tmp_path), "--config", "g.toml", "--token-env", "MY_TOKEN"]) == 0
+    [options] = wired.runs
+    assert options["allow_desktop"] is True and options["act"] is False
+    assert isinstance(options["executor"], worker.ComputerExecutor) and options["executor"].runs_dir == tmp_path
+    assert options["executor"].config is wired.config and isinstance(options["approver"], worker.TerminalApprover)
+    assert wired.loaded == ["g.toml"] and wired.built[0][2] == "MY_TOKEN"
+    assert worker.main([*ARGS, "--allow-desktop", "--act"]) == 0
+    assert wired.runs[-1]["act"] is True
+
+
+def test_provider_switches_are_shown_on_standard_error(wired, capsys):
+    worker.main(ARGS)
+    wired.config.switch(SimpleNamespace(role="llm.smart", from_slot="a", to_slot="b", kind="rate_limit"))
+    wired.config.switch(SimpleNamespace(role="llm.smart", from_slot="b", to_slot=None, kind="auth"))
+    err = capsys.readouterr().err
+    assert "fallback: llm.smart a -> b (rate_limit)" in err and "b -> nothing left (auth)" in err
+
+
+@pytest.mark.parametrize(
+    "failure,code",
+    [
+        (KeyboardInterrupt(), 130),
+        (httpx.ConnectError("marker-private-text"), 2),
+        (ValueError("marker-private-text"), 2),
+        (OSError("marker-private-text"), 2),
+    ],
+)
+def test_the_command_line_closes_its_transport_and_maps_failures_to_exit_codes(wired, failure, code, capsys):
+    wired.fail = failure
+    if code == 2:
+        with pytest.raises(SystemExit) as error:
+            worker.main(ARGS)
+        assert error.value.code == 2 and "marker-private-text" not in capsys.readouterr().err
+    else:
+        assert worker.main(ARGS) == code
+    assert wired.closed == [True]
+
+
+def test_a_bad_server_address_stops_before_any_request(wired, monkeypatch):
+    monkeypatch.setattr(worker, "AgentTransport", wired.real)
+    with pytest.raises(SystemExit) as error:
+        worker.main(["--server", "http://example.com", "--agent", "laptop", "--allow-model", "--once"])
+    assert error.value.code == 2 and wired.runs == []

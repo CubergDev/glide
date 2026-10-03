@@ -485,3 +485,252 @@ def test_a_desktop_task_request_is_queued_not_run(environment):
     assert env.client.post("/webhooks/standard/standard", content=raw, headers=headers).status_code == 202
     [queued] = env.store.messages("team")
     assert queued["status"] == "pending" and queued["call"]["operation"] == "agent.task.requested"
+
+
+# -- characterisation: the finer rules of the ingress and the queue API ---------------------------------------------------
+
+
+def standard_post(env, *, identity="task_9", goal="Open the report", client=None, content_type="application/json"):
+    now = str(int(time.time()))
+    raw = json.dumps(
+        {"specversion": "1.0", "id": identity, "source": "urn:test", "type": "agent.task.requested", "data": {"goal": goal}}
+    ).encode()
+    signature = (
+        "v1," + base64.b64encode(hmac.digest(b"a" * 32, identity.encode() + b"." + now.encode() + b"." + raw, "sha256")).decode()
+    )
+    headers = {
+        "Content-Type": content_type,
+        "webhook-id": identity,
+        "webhook-timestamp": now,
+        "webhook-signature": signature,
+    }
+    return (client or env.client).post("/webhooks/standard/standard", content=raw, headers=headers)
+
+
+def app_with(env, tmp_path, **changes):
+    """A second app over the same queue with settings changed; the caller closes nothing (the store is shared)."""
+    settings = ServerSettings.model_validate_json(json.dumps({**env.data, **changes}))
+    return TestClient(create_app(settings, store=env.store, google_verifier=SimpleNamespace(verify=lambda *a, **k: None)))
+
+
+@pytest.mark.parametrize("allow_actions", [False, True])
+def test_a_task_request_gets_the_action_flag_only_from_the_source_configuration(environment, allow_actions):
+    env = environment
+    sources = [{**s, "allow_actions": allow_actions} if s["id"] == "standard" else s for s in env.data["sources"]]
+    with app_with(env, None, sources=sources) as client:
+        assert standard_post(env, client=client).status_code == 202
+    [queued] = env.store.messages("team")
+    assert queued["call"]["allow_actions"] is allow_actions
+
+
+def test_a_task_body_cannot_ask_for_actions(environment):
+    env = environment
+    now = str(int(time.time()))
+    raw = json.dumps(
+        {
+            "specversion": "1.0",
+            "id": "task_x",
+            "source": "urn:test",
+            "type": "agent.task.requested",
+            "allow_actions": True,
+            "data": {"goal": "Open the report", "allow_actions": True, "context": {"act": "true"}},
+        }
+    ).encode()
+    signature = "v1," + base64.b64encode(hmac.digest(b"a" * 32, b"task_x." + now.encode() + b"." + raw, "sha256")).decode()
+    headers = {
+        "Content-Type": "application/json",
+        "webhook-id": "task_x",
+        "webhook-timestamp": now,
+        "webhook-signature": signature,
+    }
+    assert env.client.post("/webhooks/standard/standard", content=raw, headers=headers).status_code == 400
+    assert not env.store.messages("team")
+
+
+@pytest.mark.parametrize(
+    "content_type,status",
+    [
+        ("application/json", 202),
+        ("application/json; charset=utf-8", 202),
+        ("APPLICATION/JSON", 202),
+        ("application/cloudevents+json", 202),
+        ("text/plain", 415),
+        ("application/json-seq", 415),
+        ("", 415),
+    ],
+)
+def test_callbacks_require_a_json_content_type(environment, content_type, status):
+    assert (
+        standard_post(
+            environment, identity="ct_" + ("".join(c for c in content_type if c.isalnum()) or "empty"), content_type=content_type
+        ).status_code
+        == status
+    )
+
+
+def test_the_source_must_match_the_provider_in_the_path(environment):
+    env = environment
+    for path in ("/webhooks/outlook/gh", "/webhooks/github/standard", "/webhooks/github/missing", "/webhooks/mcp/gh"):
+        assert env.client.post(path, content=b"{}", headers={"Content-Type": "application/json"}).status_code == 404
+
+
+def test_an_enabled_mcp_source_has_no_receiver_and_queues_nothing(environment):
+    env = environment
+    sources = [*env.data["sources"], {"id": "events", "enabled": True, "provider": "mcp", "agent_id": "team"}]
+    with app_with(env, None, sources=sources) as client:
+        response = client.post("/webhooks/mcp/events", json={"anything": 1})
+        assert response.status_code == 400 and response.json() == {"detail": "Invalid callback payload."}
+        assert client.post("/webhooks/mcp/events", content=b"x", headers={"Content-Type": "text/plain"}).status_code == 415
+    assert not env.store.messages("team")
+
+
+def test_outlook_validation_handshake_rules(environment):
+    env = environment
+    assert env.client.post("/webhooks/outlook/outlook?validationToken=a&validationToken=b").status_code == 400
+    assert env.client.post("/webhooks/outlook/outlook?validationToken=%3Cscript%3E").status_code == 400
+    assert env.client.post("/webhooks/outlook/outlook?validationToken=").status_code == 400
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    sources = [{**s, "subscription_expires_at": past} if s["id"] == "outlook" else s for s in env.data["sources"]]
+    with app_with(env, None, sources=sources) as client:
+        assert client.post("/webhooks/outlook/outlook?validationToken=ok").status_code == 401
+        assert client.post("/webhooks/outlook/outlook", json={"value": [graph_notification()]}).status_code == 401
+    assert not env.store.messages("team")
+
+
+def test_a_source_has_its_own_request_limit_beyond_the_global_one(environment):
+    env = environment
+    with app_with(env, None, source_requests_per_minute=1) as client:
+        assert client.post("/webhooks/outlook/outlook", json={"value": []}).status_code == 400
+        assert client.post("/webhooks/outlook/outlook", json={"value": []}).status_code == 429
+        assert client.post("/webhooks/github/gh", content=b"{}", headers={"Content-Type": "application/json"}).status_code == 401
+
+
+def test_the_queue_api_scopes_every_route(environment):
+    env = environment
+    github(env)
+    claimed = env.client.post("/v1/agents/team/claim", headers=auth(env)).json()
+    mid, lease = claimed["message_id"], {"lease_token": claimed["lease_token"]}
+    base = f"/v1/agents/team/messages/{mid}"
+    routes = [
+        ("POST", "/v1/agents/team/claim", None, "agent:claim"),
+        ("GET", "/v1/agents/team/messages", None, "agent:read"),
+        ("GET", base, None, "agent:read"),
+        ("POST", base + "/heartbeat", lease, "agent:report"),
+        ("POST", base + "/events", {**lease, "kind": "progress"}, "agent:report"),
+        ("POST", base + "/complete", {**lease, "outcome": "completed"}, "agent:report"),
+        ("POST", base + "/resolve", {"outcome": "failed"}, "agent:resolve"),
+    ]
+    every = ["agent:read", "agent:claim", "agent:report", "agent:resolve"]
+    for method, path, body, needed in routes:
+        for scope in every:
+            response = env.client.request(method, path, json=body, headers=auth(env, scope=scope))
+            if scope == needed:
+                assert response.status_code != 403, (path, scope)
+            else:
+                assert response.status_code == 403, (path, scope)
+        assert env.client.request(method, path, json=body).status_code == 401
+        assert env.client.request(method, path, json=body, headers=auth(env, agent="other")).status_code == 401
+
+
+def test_the_queue_api_answers_for_a_missing_message_and_lists_and_heartbeats(environment):
+    env = environment
+    github(env)
+    assert env.client.get("/v1/agents/team/messages/missing", headers=auth(env)).status_code == 404
+    [listed] = env.client.get("/v1/agents/team/messages", headers=auth(env)).json()
+    assert listed["status"] == "pending" and listed["call"]["agent_id"] == "team"
+    claimed = env.client.post("/v1/agents/team/claim", headers=auth(env)).json()
+    assert env.client.post("/v1/agents/team/claim", headers=auth(env)).json() is None  # one owner at a time
+    beat = env.client.post(
+        f"/v1/agents/team/messages/{claimed['message_id']}/heartbeat",
+        json={"lease_token": claimed["lease_token"]},
+        headers=auth(env),
+    ).json()
+    assert set(beat) == {"expires_at", "server_time"} and beat["expires_at"] > beat["server_time"]
+    assert claimed["expires_at"] - claimed["leased_at"] == pytest.approx(env.settings.lease_seconds)
+
+
+def test_every_response_carries_the_hardening_headers_and_health_is_open(environment):
+    env = environment
+    health = env.client.get("/healthz")
+    assert health.status_code == 200 and health.json() == {"status": "ok"}
+    other = env.client.post("/v1/agents/team/claim")
+    assert other.status_code == 401 and other.headers["www-authenticate"] == "Bearer"
+    for response in (health, other):
+        assert response.headers["cache-control"] == "no-store" and response.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-request-id"] != other.headers["x-request-id"]
+    assert env.client.get("/docs").status_code == 404 and env.client.get("/openapi.json").status_code == 404
+
+
+def test_an_unlisted_host_is_refused(environment):
+    assert environment.client.get("/healthz", headers={"Host": "evil.example"}).status_code == 400
+
+
+def test_a_full_queue_and_a_failing_database_are_answered_as_unavailable(environment, monkeypatch):
+    import sqlite3
+
+    env = environment
+    env.store.max_pending = 1
+    assert github(env).status_code == 202
+    other = json.dumps(
+        {
+            "action": "opened",
+            "repository": {"full_name": "team/repo"},
+            "sender": {"login": "reporter", "type": "User"},
+            "issue": {"number": 9, "title": "Second", "body": "x"},
+        }
+    ).encode()
+    full = github(env, body=other)
+    assert full.status_code == 503 and full.headers["retry-after"] == "5" and len(env.store.messages("team")) == 1
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("marker-private-text")
+
+    monkeypatch.setattr(env.store, "claim", boom)
+    response = env.client.post("/v1/agents/team/claim", headers=auth(env))
+    assert response.status_code == 503 and response.headers["retry-after"] == "5" and "marker" not in response.text
+
+
+def run_body(chunks, headers, limit=1024):
+    import asyncio
+
+    from starlette.requests import Request
+
+    from glide.webhooks.app import read_body
+
+    pending = list(chunks)
+
+    async def receive():
+        if pending:
+            return {"type": "http.request", "body": pending.pop(0), "more_body": bool(pending)}
+        return {"type": "http.disconnect"}
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [(k.lower().encode(), v.encode()) for k, v in headers]}
+    return asyncio.run(read_body(Request(scope, receive), limit))
+
+
+def test_the_body_reader_bounds_size_encoding_and_declared_length():
+    from fastapi import HTTPException
+
+    from glide.webhooks.contracts import TranslationError
+
+    assert run_body([b"ab", b"cd"], []) == b"abcd"
+    assert run_body([b"x" * 1024], [("content-length", "1024")]) == b"x" * 1024
+    for chunks, headers, status in (
+        ([b"x" * 1025], [], 413),
+        ([b"x" * 600, b"x" * 600], [], 413),
+        ([b"x"], [("content-length", "1025")], 413),
+        ([b"x"], [("content-encoding", "gzip")], 415),
+        ([b"x"], [("content-encoding", "br")], 415),
+    ):
+        with pytest.raises(HTTPException) as error:
+            run_body(chunks, headers)
+        assert error.value.status_code == status
+    for headers in (
+        [("content-length", "1"), ("content-length", "1")],
+        [("content-length", "abc")],
+        [("content-length", "-1")],
+        [("content-length", "\u0661")],
+    ):
+        with pytest.raises(TranslationError):
+            run_body([b"x"], headers)
+    assert run_body([b"x"], [("content-encoding", "identity")]) == b"x"

@@ -346,3 +346,31 @@ def test_standard_valid_optional_metadata_and_json_content_type():
     call = translate_standard(payload, **STANDARD_POLICY)
     assert call.source == "github-team"
     assert "dataschema" not in call.context and "time" not in call.context
+
+
+# -- characterisation: text hygiene shared by every translator --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["\ud800", "a\x00b", "a\x1bb", "   ", 7, None])
+def test_selected_text_rejects_surrogates_controls_and_blank_goals(bad):
+    payload = standard_payload()
+    payload["data"]["goal"] = bad
+    with pytest.raises(TranslationError):
+        translate_standard(payload, **STANDARD_POLICY)
+    github = github_payload()
+    github["issue"]["title"] = bad
+    with pytest.raises(TranslationError):
+        translate_github(github, "issues", **POLICY)
+
+
+def test_text_keeps_newlines_and_tabs_which_mail_text_does_not():
+    payload = standard_payload()
+    payload["data"]["goal"] = "line one\n\tline two\r\n"
+    assert translate_standard(payload, **STANDARD_POLICY).goal == payload["data"]["goal"]
+
+
+def test_a_call_that_cannot_be_built_is_a_translation_error():
+    with pytest.raises(TranslationError):
+        translate_standard(standard_payload(), **{**STANDARD_POLICY, "agent_id": "Not A Slug"})
+    with pytest.raises(TranslationError):
+        translate_github(github_payload(), "issues", **{**POLICY, "agent_id": "Not A Slug"})
