@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import subprocess
 
-TimeoutExpired = subprocess.TimeoutExpired  # so callers need not import subprocess themselves
+# So callers need not import subprocess themselves.
+DEVNULL = subprocess.DEVNULL
+TimeoutExpired = subprocess.TimeoutExpired
 
 
 def start(args: list[str], **options) -> subprocess.Popen:
