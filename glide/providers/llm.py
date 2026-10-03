@@ -38,7 +38,7 @@ import httpx
 
 from .base import ChatResult, LLMClient, ProviderSpec, Usage
 from .chain import Chain
-from .errors import ProviderError, from_exception, from_status, snippet
+from .errors import ProviderError, from_exception, from_status, snippet, spent
 
 DEFAULT_TIMEOUT_S = 30.0
 CONNECT_TIMEOUT_S = 5.0
@@ -63,6 +63,7 @@ OPEN_TAG, CLOSE_TAG = "<think>", "</think>"
 
 _clock = time.monotonic  # a seam for tests
 _LONG_BLOB = re.compile(r"[A-Za-z0-9+/=_-]{80,}")  # base64 of an image, or any other long token a server may echo
+_BEARER = re.compile(r"(?i)bearer\s+\S+")
 MIN_ECHO = 12  # shorter request text than this is too common a string to cut out of an error reply
 _EOL = re.compile(r"\r\n|\n|\r")  # the line ends of the SSE spec, and no others
 _HTTPX_ERRORS = (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError)
@@ -348,7 +349,7 @@ class OpenAICompatLLM:
                 raise from_exception(e, provider=self.name) from e
             if response.is_success:
                 return response
-            text = _without(self._error_text(response, started + limit), echo)  # a server may quote the prompt back
+            text = _without(self._error_text(response, started + limit), echo)
             error = self._status_error(response.status_code, text, response.headers)
             sent_format = schema is not None and mode.response_format != "none"
             if response.status_code in ADAPTABLE_STATUS and self._adapt(mode, text.lower(), sent_format):
@@ -388,8 +389,10 @@ class OpenAICompatLLM:
         return _LONG_BLOB.sub("[...]", text)
 
     def _status_error(self, status: int, body: str, headers: Mapping[str, str]) -> ProviderError:
-        # A spent account (a 402, or a 429 that says so) comes back from errors.from_status as `auth` with fixed text.
-        return from_status(status, self._scrub(body), provider=self.name, retry_after=_retry_after(headers))
+        # A spent account (a 402, or a 429 that says so, in the code of the reply) comes back from errors.from_status
+        # as `auth` with fixed text, so it is judged on the whole reply. Any other message is only what the server said.
+        said = self._scrub(body) if spent(status, body) else _what_it_said(self._scrub(body))
+        return from_status(status, said, provider=self.name, retry_after=_retry_after(headers))
 
     def _body_error(self, error: object) -> ProviderError:
         """An error a server reported inside a 200 reply or a stream (OpenRouter does), mapped as its status would be."""
@@ -446,8 +449,7 @@ class OpenAICompatLLM:
         try:
             data = json.loads(raw)
         except ValueError:
-            shown = snippet(self._scrub(raw[:ERROR_BODY_LIMIT].decode("utf-8", "replace")))
-            raise self._content_error(f"answered with something that is not JSON: {shown}") from None
+            raise self._content_error("answered with something that is not JSON") from None
         if not isinstance(data, dict):
             raise self._content_error("answered with JSON that is not a chat completion")
         return data
@@ -494,7 +496,7 @@ class OpenAICompatLLM:
                 return text[start:end]
             position = end
         cut = " (the reply was cut off at the token limit)" if finish_reason == "length" else ""
-        raise self._content_error(f"answered without JSON that fits the schema{cut}: {snippet(text)}")
+        raise self._content_error(f"answered without JSON that fits the schema{cut}")  # never the reply itself
 
     def _events(self, response: httpx.Response, started: float, deadline: float) -> Iterator[str]:
         """The text deltas of a stream, or of a plain JSON reply from a server that ignored `stream`."""
@@ -591,10 +593,27 @@ def _texts(messages: Sequence[dict]) -> list[str]:
 
 
 def _without(text: str, echo: Sequence[str]) -> str:
-    """`text` with each piece of the request that it quotes cut out: a request body must not reach an error message."""
+    """`text` with each piece of the request that it quotes cut out: a request body must not reach an error message.
+
+    A server may quote the request inside a JSON string, where quotes and newlines are escaped, so that form is cut too.
+    """
     for piece in echo:
-        text = text.replace(piece, "[request text]")
+        for form in (piece, json.dumps(piece)[1:-1]):
+            text = text.replace(form, "[request text]")
     return text
+
+
+def _what_it_said(body: str) -> str:
+    """The message of an error reply. A JSON reply is reduced to its `error.message` (or `message`): the rest of it
+    may be a quoted request, headers or credentials, which no error message may carry. Anything else is kept as is
+    (a plain-text reply), after a bearer token, if one was quoted, is cut out."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return _BEARER.sub("Bearer [redacted]", body)
+    error = data.get("error", data) if isinstance(data, dict) else data
+    message = error.get("message") if isinstance(error, dict) else error
+    return _BEARER.sub("Bearer [redacted]", message) if isinstance(message, str) else "(no message in the reply)"
 
 
 def _timeout(limit: float) -> httpx.Timeout:

@@ -731,7 +731,7 @@ def test_the_classifier_factory_hands_the_run_the_provider_chain_with_failover_a
             assert isinstance(classifier, ChainedClassifier) and classifier.chain is cfg.chain("classifier")
             assert classifier.system_one(state="s", questions=questions).answers["q"].choice == "a"
             assert classifier.last_slot == "llm.fast"
-    assert [(e.role, e.from_slot, e.to_slot, e.kind) for e in heard][0] == (
+    assert next((e.role, e.from_slot, e.to_slot, e.kind) for e in heard) == (
         "classifier",
         "typesafe:jev-latest",
         "llm.fast",

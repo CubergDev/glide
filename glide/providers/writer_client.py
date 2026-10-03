@@ -27,7 +27,7 @@ from glide.computer.generation import (
 )
 
 from .base import ChatResult, Usage
-from .errors import ProviderError
+from .errors import AllProvidersFailed, ProviderError
 
 # Which LLM facade serves which `GenerationRequest.role`. A role is a job, never a model: the chain decides which
 # model answers, from glide.toml. `research_*` is every stage of the research supervisor.
@@ -154,7 +154,10 @@ class ChainWriter:
 def _generation_error(error: ProviderError) -> GenerationError:
     if error.kind == "bad_request":
         return GenerationError(str(error))
-    return GenerationUnavailable(str(error))
+    message = str(error)
+    if isinstance(error, AllProvidersFailed) and error.errors:
+        message += f"; the last said: {error.errors[-1][1]}"  # why, in the adapter's own safe words (a spent account, say)
+    return GenerationUnavailable(message)
 
 
 def _messages(request: GenerationRequest) -> list[dict]:

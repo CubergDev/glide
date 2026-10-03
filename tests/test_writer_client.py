@@ -204,7 +204,7 @@ def test_a_provider_error_is_a_writer_error_and_only_a_bad_request_leaves_the_ru
             call(writer)
         assert type(caught.value) is expected
         assert isinstance(caught.value, GenerationUnavailable) is (expected is WriterUnavailable)
-        assert str(caught.value) == str(error)
+        assert str(caught.value).startswith(str(error))
 
 
 def test_a_bug_in_a_facade_is_not_swallowed_as_a_writer_error():
