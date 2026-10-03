@@ -10,6 +10,7 @@ falls back to loudness says so through `io.warn` instead of quietly listening wo
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from ..assistant.core import IO, Assistant
@@ -40,10 +41,12 @@ def build_voice(
     device=None,
     vad: Probability | None = None,
     on_idle=None,
+    assistant_factory: Callable[..., Assistant] = Assistant,
 ) -> VoiceLoop:
     """A `VoiceLoop`, not yet started: call `start()` (or `run()`), and `stop()` then `loop.assistant.close()` to end.
 
-    `act=False` keeps every computer task a dry run, as everywhere else.
+    `act=False` keeps every computer task a dry run, as everywhere else. `assistant_factory(config, io=io)` makes the
+    assistant: a front end that wants to watch what each request came to passes a subclass.
     """
     io = io or IO()
     owned = device is None  # a device handed in was started by whoever made it
@@ -55,7 +58,7 @@ def build_voice(
         output_device=settings.output_device,
     )
     io.player = device
-    assistant = Assistant(config, io=io)
+    assistant = assistant_factory(config, io=io)
     try:
         loop = VoiceLoop(
             assistant,
