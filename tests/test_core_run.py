@@ -1,7 +1,7 @@
 """The run under a RunControl: stops, unknown writes, unavailable desktops and what a run leaves behind (D2, D3).
 
-Recorded failures this covers: a dead browser endpoint ends the run with an actionable message, zero actions
-and the goal kept; a stop during a correction (a re-decision) dispatches nothing; an interrupted write is read
+Recorded failures this covers: a dead browser endpoint ends the run with an actionable message and zero actions,
+and the task result still names the goal (so the user can retry) while the stored run folder does not; a stop during a correction (a re-decision) dispatches nothing; an interrupted write is read
 back once and never replayed; stopping mid-typing releases the key and types no further character.
 """
 
@@ -12,14 +12,14 @@ from types import SimpleNamespace
 import pytest
 from world import FakeTypeSafe, FakeWriter, Page, World, scripted
 
-from glide.assistant.tasks import STOPPED_BY_USER, abort_on
+from glide.assistant.tasks import STOPPED_BY_USER, ComputerTask, abort_on
 from glide.computer import macos, runner, windows
 from glide.computer.actions import Context
 from glide.computer.config import DEFAULT_READINESS_TIMEOUT
 from glide.computer.control import RunControl, checkpoint, controlled, dispatch
 from glide.computer.models import Abort, BrowserConnectionError, DesktopPermissionError
 from glide.computer.platform_adapter import desktop
-from glide.computer.runner import RunConfig
+from glide.computer.runner import RunConfig, RunState
 
 
 def one_page() -> World:
@@ -49,6 +49,25 @@ def test_stop_during_classification_never_dispatches(monkeypatch, tmp_path):
 
     world, state = run_with(monkeypatch, tmp_path, policy, control)
     assert state.outcome == "aborted (stopped by the user)" and not state.uncertain and not world.typed
+
+
+def test_a_stop_during_a_re_decision_after_a_writer_focus_dispatches_nothing_more(monkeypatch, tmp_path):
+    control = RunControl("task")
+    calls = []
+
+    def policy(state, questions):
+        calls.append(state)
+        if len(calls) == 1:
+            return ("done", None)
+        control.cancel("stopped by the user")  # the classifier was sent back with a focus and is being asked again
+        return ("type_text", None)
+
+    writer = FakeWriter(reviews=[{"focus": "look at the search box", "achieved": False}])
+    world, state = run_with(monkeypatch, tmp_path, policy, control, writer=writer)
+    assert len(calls) == 2  # the focus really did send the classifier back
+    assert state.handoffs and state.handoffs[0].focus == "look at the search box"
+    assert state.outcome == "aborted (stopped by the user)" and not state.uncertain
+    assert world.log == [] and not world.typed  # nothing was dispatched, before or after the focus
 
 
 def test_interrupted_dispatch_gets_one_readback_and_is_never_replayed(monkeypatch, tmp_path):
@@ -107,6 +126,7 @@ def test_capture_permission_loss_blocks_without_retry_or_claiming_success(monkey
 
 def test_a_dead_browser_endpoint_stops_with_an_actionable_message_zero_actions_and_the_goal_kept(monkeypatch, tmp_path):
     events, writer = [], FakeWriter()
+    goal = "Search Google for HKU"
     refused = BrowserConnectionError("cdp", "http://127.0.0.1:9222", ConnectionRefusedError(61, "refused"))
 
     def capture(*a, **kw):
@@ -118,8 +138,8 @@ def test_a_dead_browser_endpoint_stops_with_an_actionable_message_zero_actions_a
     performed = []
     monkeypatch.setattr(runner, "perform", lambda *a: performed.append(a))
     state = runner.run(
-        RunConfig("Search Google for HKU", tmp_path, act=True, delay=0),
-        lambda client, history: Context("Search Google for HKU", "Google Chrome", None, client, writer, history),
+        RunConfig(goal, tmp_path, act=True, delay=0),
+        lambda client, history: Context(goal, "Google Chrome", None, client, writer, history),
         classifier_factory=lambda: FakeTypeSafe(scripted(("done", None))),
         control=RunControl("task", events.append),
     )
@@ -128,7 +148,18 @@ def test_a_dead_browser_endpoint_stops_with_an_actionable_message_zero_actions_a
     assert "Start or reconnect the selected debugging browser" in state.failure
     assert events[-1].kind == "blocked" and events[-1].text == state.failure
     stored = json.loads((tmp_path / "run.json").read_text())
-    assert stored["failure"] and "HKU" not in json.dumps(stored)  # the goal is not kept in storage; the failure is
+    assert stored["failure"] and "HKU" not in json.dumps(stored)  # storage keeps the failure, not the goal (D3)
+
+    # the user-facing task keeps the goal in memory, says what to do, and does not call this a crash
+    monkeypatch.setattr(desktop, "accessibility_trusted", lambda: True)
+    config = SimpleNamespace(
+        writer=lambda: writer, classifier=lambda: FakeTypeSafe(scripted(("done", None))), record_content=False
+    )
+    task = ComputerTask(goal, act=True, config=config, folder=tmp_path / "task")
+    result = task._execute()
+    assert result.goal == goal and result.outcome == "desktop unavailable" and goal in result.summary()
+    assert "debugging browser" in result.failure
+    assert "debugging browser" in result.spoken("en") and "went wrong" not in result.spoken("en")
 
 
 def test_a_stop_before_the_first_step_dispatches_nothing_and_says_why(monkeypatch, tmp_path):
@@ -206,9 +237,17 @@ def test_the_default_engine_is_the_legacy_loop_and_structured_is_refused_until_i
         runner.run(RunConfig("goal", tmp_path, engine="nope"), lambda *a: None)
 
 
-def test_a_replay_never_uses_the_structured_engine(tmp_path):
-    cfg = RunConfig("goal", tmp_path, engine="structured", image=tmp_path / "x.png")
-    assert cfg.replay  # run() downgrades it to legacy before looking at the engine
+def test_a_replay_runs_the_legacy_loop_even_when_structured_is_asked_for(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(cfg, ctx_factory, classifier_factory):
+        seen.append(cfg.engine)
+        return RunState(outcome="done")
+
+    monkeypatch.setattr(runner, "_run", fake_run)
+    runner.run(RunConfig("goal", tmp_path, engine="structured", image=tmp_path / "x.png"), lambda *a: None)
+    runner.run(RunConfig("goal", tmp_path, engine="legacy"), lambda *a: None)
+    assert seen == ["legacy", "legacy"]  # run() never asked for the structured engine on a replay
 
 
 # -- how the stop hook and the control compose --------------------------------------------------------
@@ -230,8 +269,6 @@ def test_abort_on_and_the_control_give_the_same_reason_whichever_fires_first(mon
 
 
 def test_computer_task_stop_cancels_the_control_and_the_event(tmp_path):
-    from glide.assistant.tasks import ComputerTask
-
     task = ComputerTask("goal", act=False, config=SimpleNamespace(), folder=tmp_path)
     task.stop()
     assert task.stop_requested and task.control.cancelled.is_set() and task.control.reason == STOPPED_BY_USER

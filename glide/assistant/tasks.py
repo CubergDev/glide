@@ -126,6 +126,8 @@ OUTCOME_PHRASES = {
     "stuck": "stalled",
     "step limit": "limit",
     "provider failure": "provider",
+    "generation unavailable": "provider",
+    "desktop unavailable": "desktop",
     "crashed": "crashed",
     "not permitted": "no_permission",
     "not configured": "not_configured",
