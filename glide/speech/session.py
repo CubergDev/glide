@@ -1,21 +1,25 @@
 """Putting the voice stack together from `[speech]` settings. This is the only module that builds real hardware.
 
-`build_voice(config, settings)` makes the device, the voice detector, an `Assistant` that speaks through the
-device, and a `VoiceLoop` over them. Each part can be passed in, which is how tests (and any other front end)
-use it without a sound card.
+`build_voice(config, settings)` makes the device (with an echo canceller in speaker mode, so the person can talk
+over Glide), the voice detector, an `Assistant` that speaks through the device, and a `VoiceLoop` over them. Each
+part can be passed in, which is how tests (and any other front end) use it without a sound card.
 
 Voice detector choice is visible: `vad = "silero"` that cannot be built is an error, and `vad = "auto"` that
-falls back to loudness says so through `io.warn` instead of quietly listening worse.
+falls back to loudness says so through `io.warn` instead of quietly listening worse. The echo canceller is chosen
+the same way (`echo_canceller`, see echo.py): a named one that cannot be built is an error, and `auto` says which
+fallback it took, or that speaker mode stays half duplex. A headset gets none: it hears no echo.
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from ..assistant.core import IO, Assistant
 from .audio import FullDuplexDevice
+from .echo import make_canceller
 from .settings import SpeechSettings
-from .turns import VoiceLoop
+from .turns import VoiceLoop, format_status
 from .vad import EnergyProbability, Probability, Silero, VadError
 
 
@@ -53,9 +57,10 @@ def build_voice(
         echo_tail_s=settings.echo_tail_s,
         input_device=settings.input_device,
         output_device=settings.output_device,
+        canceller=None if settings.headset else make_canceller(settings.echo_canceller, io.warn),
     )
     io.player = device
-    assistant = Assistant(config, io=io)
+    assistant = Assistant(config, io=io, extra_stop_phrases=settings.stop_phrases)
     try:
         loop = VoiceLoop(
             assistant,
@@ -67,6 +72,9 @@ def build_voice(
             language=settings.language,
             act=act,
             on_idle=on_idle,
+            barge_min_voiced_ms=settings.barge_min_voiced_ms,
+            barge_margin_db=settings.barge_margin_db,
+            barge_min_erle_db=settings.barge_min_erle_db,
         )
         if owned:
             device.start()
@@ -74,3 +82,12 @@ def build_voice(
         assistant.close()  # closes the Speaker or, with none yet, the device through io.player
         raise
     return loop
+
+
+def watch(loop: VoiceLoop, *, show=print, interval_s: float = 1.0, sleep=time.sleep, running=lambda: True) -> None:
+    """Show `format_status(loop.status())` every `interval_s` while the loop runs and `running()` says so. For the live
+    checks in docs/live-checks/voice.md: numbers and thresholds, never what was said. Ends when the loop's thread ends."""
+    thread = getattr(loop, "_thread", None)
+    while running() and (thread is None or thread.is_alive()):
+        show(format_status(loop.status()))
+        sleep(interval_s)

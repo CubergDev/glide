@@ -125,3 +125,61 @@ def test_the_speech_package_names_no_endpoint_hash_model_or_voice(path):
     text = path.read_text()
     for what, pattern in FORBIDDEN.items():
         assert not pattern.search(text), f"{path.name} contains {what}: {pattern.search(text).group(0)!r}"
+
+
+# -- echo cancellation and barge-in wiring ----------------------------------------------------------
+
+
+def test_build_voice_hands_the_barge_in_and_stop_settings_to_the_loop_and_the_assistant():
+    settings = SpeechSettings(barge_min_voiced_ms=250, barge_margin_db=10, barge_min_erle_db=9, stop_phrases=("hold on please",))
+    loop = build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), settings, device=fake_device(), vad=lambda f: 0.0)
+    thresholds = loop.status()["barge_in"]["thresholds"]
+    assert thresholds["min_voiced_ms"] == 256 and thresholds["margin_db"] == 10 and thresholds["min_erle_db"] == 9
+    assert loop.assistant.handle_text("hold on please").route == "stop"
+    loop.assistant.close()
+
+
+def test_build_voice_gives_a_speaker_device_a_canceller_and_a_headset_none(monkeypatch):
+    import glide.speech.session as session
+
+    built = []
+
+    class Marker:
+        hold = False
+        stats = None
+
+        def close(self): ...
+
+    monkeypatch.setattr(session, "make_canceller", lambda name, warn: built.append(name) or Marker())
+    monkeypatch.setattr(FullDuplexDevice, "start", lambda self: None)
+    speakers = build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), SpeechSettings(echo_canceller="nlms"), vad=lambda f: 0.0)
+    assert built == ["nlms"] and speakers.assistant.io.player._canceller is not None
+    speakers.assistant.close()
+    built.clear()
+    headset = build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), SpeechSettings(headset=True), vad=lambda f: 0.0)
+    assert built == [] and headset.assistant.io.player._canceller is None
+    headset.assistant.close()
+
+
+def test_a_named_canceller_that_cannot_be_built_is_an_error_not_a_quiet_half_duplex(monkeypatch):
+    import glide.speech.echo as echo
+
+    class Missing:
+        def __init__(self):
+            raise echo.EchoError("not installed")
+
+    monkeypatch.setattr(echo, "CANCELLERS", {"webrtc": Missing, "nlms": Missing})
+    monkeypatch.setattr(FullDuplexDevice, "start", lambda self: None)
+    with pytest.raises(echo.EchoError):
+        build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), SpeechSettings(echo_canceller="webrtc"), vad=lambda f: 0.0)
+    warned = []
+    from glide.assistant.core import IO
+
+    loop = build_voice(
+        FakeConfig(llm=FakeLLM(), tts=FakeTTS()),
+        SpeechSettings(echo_canceller="auto"),
+        io=IO(warn=warned.append),
+        vad=lambda f: 0.0,
+    )
+    assert len(warned) == 1 and "half duplex" in warned[0]
+    loop.assistant.close()
