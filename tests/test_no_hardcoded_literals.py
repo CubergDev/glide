@@ -354,6 +354,48 @@ ALLOWLIST: tuple[Exception_, ...] = (
         "https://console.typesafe.ai/",
         "A web page the SITES catalog lets the classifier open by name, a destination the person sees, not an API endpoint.",
     ),
+    Exception_(
+        "glide/webhooks/trust_anchors.py",
+        "endpoint",
+        "https://www.googleapis.com/oauth2/v3/certs",
+        "Fixed trust anchor: the key set that verifies Google push-delivery JWTs. It must be a constant, not configuration.",
+    ),
+    Exception_(
+        "glide/webhooks/trust_anchors.py",
+        "oauth",
+        "/oauth2",
+        "The path of the fixed Google key-set trust anchor above, matched separately by the oauth rule.",
+    ),
+    Exception_(
+        "glide/webhooks/trust_anchors.py",
+        "oauth",
+        "GOOGLE_PUSH_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs'",
+        "The named constant that holds the fixed Google key-set trust anchor; the one place the URL may live.",
+    ),
+    Exception_(
+        "glide/webhooks/trust_anchors.py",
+        "endpoint",
+        "accounts.google.com",
+        "Fixed trust anchor: the issuer name Google puts in push-delivery JWTs, compared against the token claim.",
+    ),
+    Exception_(
+        "glide/webhooks/trust_anchors.py",
+        "endpoint",
+        "https://accounts.google.com",
+        "Fixed trust anchor: the other spelling of Google's issuer claim, compared against the token claim.",
+    ),
+    Exception_(
+        "glide/webhooks/app.py",
+        "oauth",
+        "WORKER_SCOPES = 'agent:claim'",
+        "The webhook service's own worker permission names (claim), not an OAuth provider scope or endpoint.",
+    ),
+    Exception_(
+        "glide/webhooks/app.py",
+        "oauth",
+        "WORKER_SCOPES = 'agent:report'",
+        "The webhook service's own worker permission names (report), not an OAuth provider scope or endpoint.",
+    ),
 )
 
 # Real violations found in the tree when this test was written (4 Oct 2026). Each is something D6 says to move into
