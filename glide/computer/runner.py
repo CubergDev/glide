@@ -177,7 +177,11 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunContro
 def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
     """Drive the loop. ctx_factory(typesafe, history) builds the action Context."""
     if cfg.engine == "structured":
-        if importlib.util.find_spec(f"{__package__}.execution.engine") is None:
+        try:
+            present = importlib.util.find_spec(f"{__package__}.execution.engine") is not None
+        except ModuleNotFoundError:  # the whole execution package is absent
+            present = False
+        if not present:
             raise ValueError("the structured engine is not part of this build; use engine='legacy'")
         from .execution.engine import run_execution
 
