@@ -353,9 +353,10 @@ class Supervisor:
 
     def check_addresses(self, passages):
         """A research answer may name only addresses of pages that were read, or links seen on them."""
-        known = self.read_urls() | {link["url"] for s in self.sources for link in s["links"]}
-        # A prefix is enough: a pattern that stops at a closing bracket cuts such an address short.
-        named = (address.rstrip(".,;:!?") for passage in passages for address in ADDRESS.findall(passage))
+        known = {url.casefold() for url in self.read_urls() | {link["url"] for s in self.sources for link in s["links"]}}
+        # Letter case is not a different address, and a prefix is enough: a pattern that stops at a closing bracket
+        # cuts such an address short. A different scheme or host is still a different address.
+        named = (address.rstrip(".,;:!?").casefold() for passage in passages for address in ADDRESS.findall(passage))
         if any(not any(url.startswith(address) for url in known) for address in named):
             raise InvalidAction("The research answer named an address that was not read.")
 

@@ -1,8 +1,8 @@
 # Research: live verification checklist
 
 **The full research pipeline has never been validated live.** Not in variant-6 (its 72.1 s museum comparison
-predates the provider and readiness changes), and not in this tree. Only the CDP browser was ever qualified live,
-and only for ordinary actions. Nothing below can be proven offline: the test suite drives the supervisor with a
+predates the provider and readiness changes), and not in this tree. Only the CDP browser was reportedly qualified
+live (a report, not a validation), and only for ordinary actions. Nothing below can be proven offline: the test suite drives the supervisor with a
 scripted model and a fake browser, so it shows the logic is right, not that a vendor, a browser or a real web page
 behaves. Do these once on the Mac you will use. A failed box is a bug to report, not something to tune around.
 

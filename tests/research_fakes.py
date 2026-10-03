@@ -15,6 +15,7 @@ from glide.computer.execution.research import Supervisor, Tools
 from glide.computer.generation import GenerationResult
 from glide.computer.models import Abort
 from glide.computer.writer import WriterError
+from glide.providers.base import ChatResult, Usage
 
 SEARCH = "https://search.example.test"
 A = "https://reviews.example.test/place"
@@ -56,6 +57,25 @@ class Reasoner:
 
     def roles(self):
         return [r.role for r in self.requests]
+
+
+class Facade:
+    """An LLM facade of glide.toml (fast, smart, planner or research) that answers from a script and counts its calls."""
+
+    def __init__(self, script=()):
+        self.script, self.calls = list(script), []
+
+    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, timeout=None):
+        self.calls.append({"messages": list(messages), "schema": schema, "timeout": timeout})
+        assert self.script, "this facade was not expected to be called"
+        return ChatResult(
+            text=json.dumps(self.script.pop(0)),
+            usage=Usage(),
+            provider="slot:model",
+            model="model",
+            latency_s=0.0,
+            finish_reason="stop",
+        )
 
 
 class Pages:

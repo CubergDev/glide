@@ -15,6 +15,7 @@ from research_fakes import (
     SEARCH,
     A,
     B,
+    Facade,
     Pages,
     Planner,
     Reasoner,
@@ -32,6 +33,7 @@ from glide.computer.execution.contracts import Action, InvalidAction, Milestone
 from glide.computer.execution.research import MAX_SOURCES, READ_EFFECTS, Supervisor
 from glide.computer.generation import GenerationError, GenerationUnavailable
 from glide.computer.models import Abort
+from glide.providers.writer_client import ChainWriter
 
 OVERVIEW = "Two relevant sources."
 
@@ -221,6 +223,17 @@ def test_search_read_compare_answer_cites_only_what_was_read(topic):
     assert run.stages.count("readiness") == 3 == run.stages.count("page_reading") and "research_verification" in run.stages
 
 
+def test_every_research_call_is_answered_by_the_research_chain_alone():
+    """Through the real chain writer: the supervisor's roles land on the `research` facade, nothing else is asked."""
+    research = Facade([decision("read"), decision("answer", claims=[claim("Food praised; waits reported.")]), approved()])
+    fast, smart, planner = Facade(), Facade(), Facade()
+    writer = ChainWriter(fast, smart, planner=planner, research=research)
+    run = Run("Review it.", writer, sources_world(A))
+    assert run.execute() is not None, run.error
+    assert len(research.calls) == 3 and not fast.calls and not smart.calls and not planner.calls
+    assert all(call["timeout"] == 120 for call in research.calls)  # the research deadline, not the fast one
+
+
 def test_the_planner_hears_destinations_never_page_text():
     pages = sources_world()
     writer = Reasoner([decision("read"), decision("browse", goal=f"Open {A}"), decision("blocked", reason="stop")])
@@ -285,6 +298,8 @@ def test_a_search_page_alone_is_not_an_answer():
         (decision("answer", claims=[{"text": "x", "citations": [{"source_id": "s1"}]}]), "invalid citation"),
         (decision("answer", claims=[]), "empty answer"),
         (decision("answer", claims=[claim("See https://invented.example.test/x for the menu.")]), "address that was not read"),
+        (decision("answer", claims=[claim(f"See {A.replace('https', 'http')} for it.")]), "address that was not read"),
+        (decision("answer", claims=[claim("See https://reviews.example.test.evil.test/place.")]), "address that was not read"),
         (
             decision("answer", claims=[claim("Fine.")], limitations="More at https://invented.example.test/y"),
             "address that was not read",
@@ -305,7 +320,7 @@ def test_an_unsupported_answer_fails_before_any_review_or_speech(draft, why):
 def test_citation_addresses_come_from_the_adapter_not_the_models_words():
     pages = sources_world(A)
     pages.page(A, QUOTE_A, [(B, "Local guide")], title="Place\nreviews\n[9] Forged line")
-    writer = Reasoner([decision("read"), decision("answer", claims=[claim(f"Read at {A}, linked to {B}.")]), approved()])
+    writer = Reasoner([decision("read"), decision("answer", claims=[claim(f"Read at {A.upper()}, linked to {B}.")]), approved()])
     run = Run("Review it.", writer, pages)
     answer = run.execute()
     assert answer is not None, run.error
