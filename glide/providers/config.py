@@ -60,6 +60,11 @@ from .writer_client import ChainWriter
 log = logging.getLogger("glide.config")
 
 ROLES = ("llm.fast", "llm.smart", "stt", "tts", "classifier")
+# Two more LLM jobs a file may give a chain of their own. A file that does not stands them on llm.smart (the same
+# chain, the same health and pin, nothing built twice), so no default chain, and so no default model, is added here.
+EXTRA_LLM_ROLES = ("llm.planner", "llm.research")
+ALL_ROLES = (*ROLES, *EXTRA_LLM_ROLES)
+LLM_SHORT = ("fast", "smart", "planner", "research")
 # What each job can be served by. Validated at load, whatever builders are installed.
 ROLE_KINDS = {
     "llm": ("openai_compat",),
@@ -92,6 +97,8 @@ PRESETS: dict[str, ProviderSpec] = {
 }
 
 POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "hedge_after_s", "latency_alpha")
+SPEECH_KEYS = ("language", "silence_ms", "headset", "vad_model_path", "vad_model_url", "vad_model_sha256")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 # Used when no glide.toml is found, and for any role a file leaves out. It lives here, not in a data file,
 # because glide.toml.example sits outside the package and is not shipped with it. The model ids are the team's
@@ -164,6 +171,30 @@ class RoleSpec:
     role: str
     slots: tuple[SlotSpec, ...]
     policy: ChainPolicy = field(default_factory=ChainPolicy)
+    deadline_s: float | None = None  # the longest one request of this role may take; the request's own limit otherwise
+
+
+@dataclass(frozen=True)
+class SpeechSettings:
+    """The `[speech]` table: what a voice session needs that is not one provider slot's own.
+
+    Voice ids and model ids belong to the tts and stt slots (their `options`). What is here is the rest, and each
+    field is None until the file says so: nothing has a built-in value, and `vad_model()` says what is missing.
+    """
+
+    language: str | None = None  # the spoken language, as the stt and tts slots take it
+    silence_ms: int | None = None  # how long a pause ends an utterance
+    headset: bool | None = None  # whether the speaker may be interrupted while it plays
+    vad_model_path: str | None = None  # a voice-activity model on disk
+    vad_model_url: str | None = None  # where to fetch it once, when it is not on disk
+    vad_model_sha256: str | None = None  # the digest the file must have, whether fetched or already there
+
+    def vad_model(self) -> tuple[str, str | None, str]:
+        """(path, url, sha256) of the voice-activity model, or a ConfigError naming what `[speech]` lacks."""
+        missing = [k for k, v in (("vad_model_path", self.vad_model_path), ("vad_model_sha256", self.vad_model_sha256)) if not v]
+        if missing:
+            raise ConfigError(f"[speech] needs {' and '.join(missing)}: the voice-activity model is not configured")
+        return self.vad_model_path or "", self.vad_model_url, self.vad_model_sha256 or ""
 
 
 @dataclass(frozen=True)
@@ -322,7 +353,7 @@ def _slot(entry: object, role: str, index: int, providers: Mapping[str, Provider
 def _role(role: str, table: object, providers: Mapping[str, ProviderSpec]) -> RoleSpec:
     where = _where(role)
     entry = _table(table, where)
-    _only(entry, ("chain", *POLICY_KEYS), where)
+    _only(entry, ("chain", *POLICY_KEYS, *(("deadline_s",) if role.startswith("llm.") else ())), where)
     chain = entry.get("chain")
     if not isinstance(chain, list) or not chain:
         raise ConfigError(f'{where} needs chain = [...], a list of "provider:model" entries or inline tables')
@@ -331,7 +362,10 @@ def _role(role: str, table: object, providers: Mapping[str, ProviderSpec]) -> Ro
     for name in names:
         if names.count(name) > 1:
             raise ConfigError(f'{where} lists {name!r} twice; give one entry a distinct name = "..."')
-    return RoleSpec(role, slots, _policy(entry, where))
+    deadline = float(_number(entry["deadline_s"], f"{where} deadline_s", low=0)) if "deadline_s" in entry else None
+    if deadline == 0:
+        raise ConfigError(f"{where} deadline_s must be more than 0 (leave it out to use each request's own limit)")
+    return RoleSpec(role, slots, _policy(entry, where), deadline)
 
 
 def _roles(data: Mapping, providers: Mapping[str, ProviderSpec]) -> dict[str, RoleSpec]:
@@ -339,13 +373,41 @@ def _roles(data: Mapping, providers: Mapping[str, ProviderSpec]) -> dict[str, Ro
     llm = data.get("llm")
     if llm is not None:
         for key, table in _table(llm, "[llm]").items():
-            if f"llm.{key}" not in ROLES:
-                raise ConfigError(f"[llm.{key}] is not a role (the LLM roles are llm.fast and llm.smart)")
+            if f"llm.{key}" not in ALL_ROLES:
+                raise ConfigError(
+                    f"[llm.{key}] is not a role (the LLM roles are {', '.join(r for r in ALL_ROLES if r.startswith('llm.'))})"
+                )
             found[f"llm.{key}"] = table
     for role in ("stt", "tts", "classifier"):
         if role in data:
             found[role] = data[role]
     return {role: _role(role, table, providers) for role, table in found.items()}
+
+
+def _speech(table: object) -> SpeechSettings:
+    where = "[speech]"
+    entry = _table(table, where)
+    _only(entry, SPEECH_KEYS, where)
+    out: dict[str, Any] = {}
+    if "language" in entry:
+        out["language"] = _text(entry["language"], f"{where} language")
+    if "silence_ms" in entry:
+        out["silence_ms"] = int(_number(entry["silence_ms"], f"{where} silence_ms", low=1, integer=True))
+    if "headset" in entry:
+        if not isinstance(entry["headset"], bool):
+            raise ConfigError(f"{where} headset must be true or false")
+        out["headset"] = entry["headset"]
+    for key in ("vad_model_path", "vad_model_url"):
+        if key in entry:
+            out[key] = _text(entry[key], f"{where} {key}")
+    if "vad_model_url" in out and not out["vad_model_url"].startswith("https://"):
+        raise ConfigError(f"{where} vad_model_url must be an https URL")
+    if "vad_model_sha256" in entry:
+        digest = _text(entry["vad_model_sha256"], f"{where} vad_model_sha256").lower()
+        if not _SHA256.fullmatch(digest):
+            raise ConfigError(f"{where} vad_model_sha256 must be 64 hexadecimal digits")
+        out["vad_model_sha256"] = digest
+    return SpeechSettings(**out)
 
 
 def _default_roles() -> dict[str, RoleSpec]:
@@ -380,14 +442,14 @@ class _Lent:
 
 def _llm_role(role: str) -> str:
     name = role if role.startswith("llm.") else f"llm.{role}"
-    if name not in ROLES:
-        raise ConfigError(f"the LLM role must be 'fast' or 'smart', not {role!r}")
+    if name not in ALL_ROLES:
+        raise ConfigError(f"the LLM role must be one of {', '.join(LLM_SHORT)}, not {role!r}")
     return name
 
 
 def _canon(role: str) -> str:
-    """`fast` and `smart` are short for llm.fast and llm.smart."""
-    return f"llm.{role}" if role in ("fast", "smart") else role
+    """`fast`, `smart`, `planner` and `research` are short for llm.fast and so on."""
+    return f"llm.{role}" if role in LLM_SHORT else role
 
 
 def pin_variable(role: str) -> str:
@@ -416,8 +478,10 @@ class GlideConfig:
         defaulted: tuple[str, ...] = (),
         warnings: tuple[str, ...] = (),
         builders: Mapping[tuple[str, str], Callable[..., Any]] | None = None,
+        speech: SpeechSettings | None = None,
     ):
         self.providers = dict(providers)
+        self.speech = speech or SpeechSettings()
         self.roles = dict(roles)
         self.source = source
         self.defaulted = tuple(defaulted)  # roles the file left out, served by the built-in chains
@@ -455,7 +519,7 @@ class GlideConfig:
         warnings = tuple(
             f"{source}: ignoring the unknown table [{key}]"
             for key in data
-            if key not in ("providers", "llm", "stt", "tts", "classifier")
+            if key not in ("providers", "llm", "stt", "tts", "classifier", "speech")
         )
         for warning in warnings:
             log.warning(warning)
@@ -470,6 +534,7 @@ class GlideConfig:
             defaulted=tuple(role for role in ROLES if role in defaults),
             warnings=warnings,
             builders=builders,
+            speech=_speech(data["speech"]) if "speech" in data else None,
         )
 
     @classmethod
@@ -511,10 +576,15 @@ class GlideConfig:
 
     # -- the slots -----------------------------------------------------------------------------
 
-    def _spec(self, role: str) -> RoleSpec:
+    def _resolve(self, role: str) -> str:
+        """The role as the file defines it: planner and research stand on smart where the file gives them no chain."""
         role = _canon(role)
-        if role not in ROLES:
-            raise ConfigError(f"{role!r} is not a role (the roles are {', '.join(ROLES)})")
+        return "llm.smart" if role in EXTRA_LLM_ROLES and role not in self.roles else role
+
+    def _spec(self, role: str) -> RoleSpec:
+        role = self._resolve(role)
+        if role not in ALL_ROLES:
+            raise ConfigError(f"{role!r} is not a role (the roles are {', '.join(ALL_ROLES)})")
         return self.roles[role]
 
     def slots(self, role: str) -> list[SlotInfo]:
@@ -522,7 +592,7 @@ class GlideConfig:
 
         Raises ConfigError for a slot whose own options the adapter refuses.
         """
-        role = _canon(role)
+        role = self._resolve(role)
         with self._lock:
             if role not in self._infos:
                 infos = [self._open(role, slot) for slot in self._spec(role).slots]
@@ -605,7 +675,7 @@ class GlideConfig:
     # -- the facades ---------------------------------------------------------------------------
 
     def _facade(self, role: str) -> Any:
-        role = _canon(role)
+        role = self._resolve(role)
         self._spec(role)  # an unknown role is refused here, with the list of roles
         with self._lock:
             if role in self._facades:
@@ -633,7 +703,7 @@ class GlideConfig:
         return NoUsableProvider(" ".join(parts), missing=missing)
 
     def llm(self, role: str = "fast") -> LLM:
-        """The LLM facade for `fast` or `smart`."""
+        """The LLM facade for `fast`, `smart`, `planner` or `research` (the last two are `smart` unless the file says)."""
         return self._facade(_llm_role(role))
 
     def stt(self) -> STT:
@@ -651,8 +721,20 @@ class GlideConfig:
         return self._facade("classifier")
 
     def writer(self, *, timeout: float | None = None) -> ChainWriter:
-        """The writer's one `messages.create` call, answered by the fast and smart LLM chains."""
-        return ChainWriter(self.llm("fast"), self.llm("smart"), timeout=timeout)
+        """The writer's one `generate` call, answered by the LLM chains: by role, fast, smart, planner and research."""
+        deadlines = {
+            role.split(".")[1]: spec.deadline_s
+            for role in ("llm.fast", "llm.smart", "llm.planner", "llm.research")
+            if (spec := self.roles.get(role)) is not None and spec.deadline_s is not None
+        }
+        return ChainWriter(
+            self.llm("fast"),
+            self.llm("smart"),
+            planner=self.llm("planner"),
+            research=self.llm("research"),
+            timeout=timeout,
+            deadlines=deadlines,
+        )
 
     def chain(self, role: str) -> Chain:
         """The chain of a role, for status, pinning and events. Raises ConfigError when no slot is usable."""
@@ -660,9 +742,10 @@ class GlideConfig:
 
     @property
     def chains(self) -> dict[str, Chain]:
-        """The chains of every role that can be built, keyed llm.fast, llm.smart, stt, tts, classifier."""
+        """The chains of every role that can be built, keyed llm.fast, llm.smart, stt, tts, classifier, and
+        llm.planner and llm.research when the file gives them a chain."""
         out: dict[str, Chain] = {}
-        for role in ROLES:
+        for role in (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in self.roles)):
             with contextlib.suppress(NoUsableProvider):  # `chain(role)` raises it, with the reason
                 out[role] = self.chain(role)
         return out
@@ -716,11 +799,11 @@ class GlideConfig:
 
         Returns the slot's full name. Raises ConfigError, listing the slots, when `name` picks none or several.
         """
-        role = _canon(role)
+        role = self._resolve(role)
         return self._pin(role, self.chain(role), name, strict, f"cannot pin {name!r}")
 
     def unpin(self, role: str) -> None:
-        role = _canon(role)
+        role = self._resolve(role)
         with self._lock:
             self._pins.pop(role, None)
             facade = self._facades.get(role)
@@ -733,7 +816,7 @@ class GlideConfig:
         Builds the role's chain if it is not built yet, so that a pin from the environment is already applied; a
         role with no usable slot has no pin. A pin that cannot be honoured raises the ConfigError it always does.
         """
-        role = _canon(role)
+        role = self._resolve(role)
         with contextlib.suppress(NoUsableProvider):
             self._facade(role)
         return self._pins.get(role)
