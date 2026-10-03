@@ -365,9 +365,13 @@ def test_a_stop_that_is_still_being_said_silences_the_voice_at_once():
 
 def test_anything_else_a_probe_hears_is_dropped_unheard():
     stt = StopSTT(["what is the weather"], partials={0: "what is"})
-    r = run(rig(quiet(320) + [WEAK] * 8 + quiet(700), stt, stats=WEAK_ECHO))
+    r = rig(quiet(320) + [WEAK] * 8 + quiet(700), stt, stats=WEAK_ECHO)
+    interim = []
+    r.assistant.io.partial = interim.append
+    run(r)
     assert stt.count == 1  # it was listened to
-    assert r.heard == [] and r.device.cancels == 0 and r.assistant._epoch == 0
+    assert r.heard == [] and interim == []  # not shown as it was being heard either
+    assert r.device.cancels == 0 and r.assistant._epoch == 0
     assert r.config.calls.llm == 0 and r.config.calls.tts == 0  # not routed, not answered, not spoken
 
 

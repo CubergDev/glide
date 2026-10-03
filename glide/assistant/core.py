@@ -214,7 +214,8 @@ class Assistant:
                 if not transcript.partial:
                     final = transcript
                     continue
-                self.io.partial(transcript.text)
+                if not stop_only:
+                    self.io.partial(transcript.text)  # a probe's interim text, Glide's own echo among it, is never shown
                 if is_stop(transcript.text, self._stops):
                     self._silence()  # a stop that is still being said already silences the voice
         except ProviderError as exc:

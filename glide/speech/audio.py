@@ -61,7 +61,7 @@ from .vad import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE
 SAMPLE_BYTES = 2
 MAX_QUEUED_FRAMES = 100  # about 3 s of unread microphone audio: more than that means the loop has stopped reading
 READ_POLL_S = 0.05
-REF_MAX_FRAMES = 16  # reference kept this long (512 ms): whatever is older cannot be paired with a frame still waiting
+REF_MAX_FRAMES = MAX_QUEUED_FRAMES + 8  # reference kept as long as a frame can wait in the queue: none is paired with zeros
 REF_STALL_S = 0.25  # a frame whose reference has still not come after this long goes on without it (and is counted)
 
 
@@ -323,8 +323,8 @@ class FullDuplexDevice:
 
     def _reference_for(self, number: int) -> bytes:
         """The 32 ms of reference that starts at sample `number`, zero-filled where it is not there."""
-        start = (number - self._reference_origin) * SAMPLE_BYTES
-        with self._cond:
+        with self._cond:  # the origin moves on the speaker's thread, so the offset is taken under the same lock
+            start = (number - self._reference_origin) * SAMPLE_BYTES
             if start >= 0:
                 piece = bytes(self._reference[start : start + FRAME_BYTES])
             else:  # older than anything kept: the frame waited far too long

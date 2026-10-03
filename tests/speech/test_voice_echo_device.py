@@ -136,6 +136,23 @@ def test_a_frame_waits_for_its_reference_and_a_stalled_speaker_is_counted_not_wa
     assert rig.device.reference_underruns == 1 and rig.canceller.pairs[-1][1] == bytes(FRAME_BYTES)
 
 
+def test_a_loop_that_falls_far_behind_still_gets_every_frame_with_its_own_reference():
+    """Frames queue up while the loop is busy (a pause, a busy CPU) and are paired with their reference later, however late."""
+    rig = Rig()
+    far = [frame_of(1000 + i) for i in range(100)]
+    rig.device.play(b"".join(far), 16000)
+    mics = [frame_of(5 + i) for i in range(90)]
+    given = [rig.pull()]
+    for mic in mics:  # the speaker and microphone callbacks go on; nothing reads
+        rig.on_input(mic, False)
+        given.append(rig.pull())
+    got = []
+    while (out := rig.device.read(timeout=None)) is not None:
+        got.append(out)
+    assert got == mics and rig.device.reference_underruns == 0
+    assert [pair[1] for pair in rig.canceller.pairs] == given[1 : 1 + len(mics)]
+
+
 def test_the_reference_of_a_24_khz_speaker_is_one_continuous_16_khz_signal():
     rig = Rig(rate=24000)
     ramp = array("h", range(0, 24000)).tobytes()  # sample i has the value i, so 16 kHz samples step by 1.5
