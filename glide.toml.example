@@ -153,9 +153,9 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 # fallback = ["obscura"]
 #
 # [browser.cdp]
-# endpoint = "http://127.0.0.1:9222"
+# endpoint = "<loopback address and port of the browser's debugging port>"
 # [browser.obscura]
-# endpoint = "http://127.0.0.1:9333"
+# endpoint = "<loopback address and port of Obscura>"
 # [browser.playwright]
 # session = "glide"                       # an already opened Playwright CLI session
 # cli = "/path/to/playwright-cli"         # optional; the default is playwright-cli on PATH
