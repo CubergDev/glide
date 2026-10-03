@@ -278,3 +278,25 @@ def test_a_cancelled_wait_exits_without_sleeping(monkeypatch, adapter):
     monkeypatch.setattr(adapter.time, "sleep", lambda _: pytest.fail("slept after cancellation"))
     with controlled(control), pytest.raises(Abort):
         adapter.sleep_watching(20)
+
+
+# -- the command line --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("flags", "recorded"), [([], False), (["--record-content"], True)])
+def test_the_command_line_records_content_only_when_asked(monkeypatch, tmp_path, flags, recorded):
+    from glide.computer import cli
+
+    seen = {}
+    monkeypatch.setattr(cli.config, "load_dotenv", lambda _: None)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fixture-key")
+    monkeypatch.setattr(cli, "make_writer", lambda: None)
+    monkeypatch.setattr(cli.config, "writer_vision", lambda: True)
+
+    def fake_run(cfg, ctx_factory, **kwargs):
+        seen.update(cfg=cfg, control=kwargs.get("control"))
+        return SimpleNamespace(outcome="done")
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    cli.main(["a goal", "--out", str(tmp_path), *flags])
+    assert seen["cfg"].record_content is recorded and isinstance(seen["control"], RunControl)
