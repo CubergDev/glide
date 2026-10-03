@@ -14,6 +14,11 @@ import httpx
 # request fails everywhere), so it is raised at once instead of being tried on the next provider.
 FAILOVER_KINDS = frozenset({"auth", "rate_limit", "timeout", "transport", "server", "unsupported", "content"})
 SNIPPET = 300
+# What a provider says when the account behind a key has nothing left to spend. The words are the providers' own
+# error codes, not claims about any model. Billing is its own failure: it is not a rate limit that clears in
+# seconds, and nothing the server said is worth repeating.
+SPENT_WORDS = ("credit_balance_exhausted", "insufficient_quota", "insufficient_credits", "billing_hard_limit_reached")
+SPENT_STATUS = 402
 
 
 class ProviderError(Exception):
@@ -51,8 +56,28 @@ def snippet(body: object) -> str:
     return " ".join(text.split())[:SNIPPET]
 
 
+def spent(status: int, body: object = "") -> bool:
+    """Whether a refusal says the account has no credit or quota left (a 402, or a 429 that names it)."""
+    if status == SPENT_STATUS:
+        return True
+    text = body if isinstance(body, str) else repr(body)
+    return status in (400, 403, 429) and any(word in text.lower() for word in SPENT_WORDS)
+
+
 def from_status(status: int, body: object = "", *, provider: str = "", retry_after: float | None = None) -> ProviderError:
-    """The error for an HTTP status."""
+    """The error for an HTTP status.
+
+    A spent account is `auth`: this key will not work again for a long while, so the chain rests the slot and
+    another provider may answer. Its message is fixed text, with none of the reply in it.
+    """
+    if spent(status, body):
+        who = provider or "provider"
+        return ProviderError(
+            f"{who} has no credit or quota left (HTTP {status}); add credit to that account or use another provider",
+            kind="auth",
+            provider=provider,
+            status=status,
+        )
     detail = f"{provider or 'provider'} answered {status}: {snippet(body)}".rstrip(": ")
     if status in (401, 403):
         kind = "auth"
