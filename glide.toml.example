@@ -1,0 +1,79 @@
+# Glide configuration. Copy this file to glide.toml (or ~/.config/glide/glide.toml, or point GLIDE_CONFIG at it).
+#
+# EVERY MODEL ID BELOW IS UNVERIFIED until `glide doctor --live` has run with real keys. Model ids come and go,
+# and the ones here are the team's starting point, not a promise that they exist or are good. Doctor sends each
+# slot one tiny request and tells you which ones answered.
+#
+# Keys are never written here. Set the environment variable a provider names (OPENAI_API_KEY, ...) in your shell
+# or in .env. A slot whose variable is not set is skipped with a warning, so a partial setup still runs. A role
+# with no usable slot at all is an error that names the variables to set.
+#
+# A chain is tried in order. A slot that fails is skipped and the next one answers; the switch is reported, never
+# silent. A chain entry is "provider:model" (split at the first colon) or an inline table:
+#   { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } }
+# `options` are per slot and sit over the provider's own options. Roles this file leaves out use the built-in
+# chains. Their slots are the ones below (a test keeps them identical); the policy lines, such as the hedge example
+# under [llm.fast], are only in this file.
+
+# ---------------------------------------------------------------------------------------------------------------
+# Providers. These are built in, so you only write a table to change one: for example another key variable, or
+# a server of your own (any OpenAI-style endpoint is kind = "openai_compat"; a key variable is optional for a
+# local one). Kinds: openai_compat, elevenlabs, typesafe, macos_say.
+#
+# [providers.openai]
+# api_key_env = "MY_OPENAI_KEY"
+#
+# [providers.local]
+# kind = "openai_compat"
+# base_url = "http://localhost:11434/v1"
+# ---------------------------------------------------------------------------------------------------------------
+
+# The fast LLM: short replies that should start quickly.
+# `hedge_after_s` is an example of a policy key: when the first slot has not answered in that many seconds the
+# next one is asked as well, and the first answer wins. It costs a second request when it fires.
+# The other policy keys, all optional: order = "priority" (as listed) or "latency" (fastest healthy slot first),
+# fail_threshold (failures in a row before a slot rests), cooldown_s (how long it rests).
+[llm.fast]
+chain = [
+  { provider = "openrouter", model = "deepseek/deepseek-v4.1-flash", options = { reasoning_effort = "low" } },
+  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
+  { provider = "gemini", model = "gemini-3.5-flash-lite", options = { reasoning_effort = "low" } },
+]
+hedge_after_s = 2.0
+
+# The smart LLM: answers that read a screen or take more care. Raise reasoning_effort here if answers are poor.
+[llm.smart]
+chain = [
+  { provider = "openai", model = "gpt-6.1-sol", options = { reasoning_effort = "low" } },
+  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
+]
+
+# Speech to text. The "openai" provider is any OpenAI-style /audio/transcriptions endpoint.
+[stt]
+chain = [
+  { provider = "elevenlabs", model = "scribe_v2_realtime" },
+  { provider = "openai", model = "gpt-transcribe" },
+]
+
+# Text to speech. ElevenLabs needs a voice ID (from your ElevenLabs voice library, not a voice name). Until you add
+# one, as in  options = { voice = "<your voice id>", timeout = 8 }  or per language with  voices = { en = "<id>" },
+# that slot is skipped and macOS `say` speaks. Keep the timeout low: a hung slot is silence until it gives up.
+[tts]
+chain = [
+  { provider = "elevenlabs", model = "eleven_v4_turbo", options = { timeout = 8 } },
+  "macos_say",
+]
+
+# The classifier that picks the next screen action. "llm.fast" runs the classifier prompt over the fast LLM chain
+# above, so it works with any chat model when the TypeSafe server is not reachable.
+[classifier]
+chain = ["typesafe:jev-latest", "llm.fast"]
+
+# ---------------------------------------------------------------------------------------------------------------
+# Pinning, from the environment and with no edit to this file. The value is a slot name or a prefix that names one;
+# a trailing ! means only that slot is ever used and its failure is yours to see:
+#   GLIDE_PIN_LLM_FAST=openai            GLIDE_PIN_LLM_SMART=openai:gpt-6.1-sol!
+#   GLIDE_PIN_STT=elevenlabs             GLIDE_PIN_TTS=macos_say!
+#   GLIDE_PIN_CLASSIFIER=typesafe
+# A pin that names no usable slot is an error that lists the slots there are.
+# ---------------------------------------------------------------------------------------------------------------

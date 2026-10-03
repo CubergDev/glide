@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+runs/
+.pytest_cache/
+.ruff_cache/
+config.toml
+*.wav
+*.db
+
+# Review-session material: private, never commit or push
+consolidation-inputs/
+.remember/
+.claude/settings.local.json
+CONSOLIDATION_SESSION.json
+REVIEW_COVERAGE.json
+review-evidence/
