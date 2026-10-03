@@ -10,7 +10,7 @@ from execution_world import SCENARIOS, Computer, Jev, Reasoner, drive, response
 
 from glide.computer import runner
 from glide.computer.control import RunControl
-from glide.computer.execution import engine
+from glide.computer.execution import engine, providers
 from glide.computer.execution.contracts import Milestone
 from glide.computer.generation import GenerationError
 from glide.computer.models import BrowserConnectionError
@@ -232,7 +232,7 @@ def test_a_configuration_error_is_left_to_the_caller_but_the_run_folder_is_still
     def unconfigured():
         raise ConfigError("no usable provider for the classifier; set EXAMPLE_KEY")
 
-    monkeypatch.setattr(engine, "make_backend", lambda _: pytest.fail("no browser before the classifier"))
+    monkeypatch.setattr(providers, "make_backend", lambda *a, **kw: pytest.fail("no browser before the classifier"))
     cfg = runner.RunConfig("Task", tmp_path, act=True, engine="structured", readiness_timeout=0)
     with pytest.raises(ConfigError, match="EXAMPLE_KEY"):
         runner.run(cfg, lambda *a: None, classifier_factory=unconfigured, control=RunControl("offline"))

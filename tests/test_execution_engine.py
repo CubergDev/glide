@@ -7,11 +7,15 @@ import stat
 import pytest
 from execution_world import Computer, Jev, Reasoner, drive, response
 
+from glide.computer import browser_settings
 from glide.computer.actions import Context
 from glide.computer.control import RunControl
-from glide.computer.execution import engine
+from glide.computer.execution import providers
 from glide.computer.execution.contracts import Element, Milestone
+from glide.computer.models import BrowserConnectionError
 from glide.computer.runner import RunConfig, RunState, run, spoken_failure
+
+REAL_MAKE_BACKEND = providers.make_backend  # taken at import, before the autouse guard replaces it
 
 
 def collect(**kwargs):
@@ -22,9 +26,47 @@ def collect(**kwargs):
 def test_a_dry_run_proposes_one_action_and_takes_none(monkeypatch, tmp_path):
     events, kwargs = collect()
     computer = Computer()
-    monkeypatch.setattr(engine, "make_backend", lambda _: computer)
     step = Milestone("name", "Set the name", "field_value", target="Name", value="Quarterly report")
-    cfg = RunConfig("Set the name", tmp_path, act=False, engine="structured", readiness_timeout=0)  # drive() always acts
+    state = drive(monkeypatch, tmp_path, computer, Reasoner([response(step)]), Jev("plan"), act=False, **kwargs)
+    assert state.outcome == "dry run" and not computer.actions and not state.history and not state.failure
+    assert state.would_do == "type 'Quarterly report' in 'Name'"
+    assert [e.kind for e in events][-1] == "dry_run" and events[-1].text == state.would_do
+    assert "Quarterly report" not in (tmp_path / "run.json").read_text()  # words about the page stay in memory (D3)
+
+
+class Unreachable(Computer):
+    transport = "cdp"
+
+    def check(self):
+        raise BrowserConnectionError("cdp", "http://127.0.0.1:9222/devtools?secret=1", ConnectionRefusedError(61, "refused"))
+
+
+class Reachable(Computer):
+    transport = "obscura"
+
+    def check(self):
+        pass
+
+
+@pytest.mark.parametrize("record_content", [False, True])
+def test_a_browser_fallback_is_said_on_the_runs_channel_and_kept_in_the_report(monkeypatch, tmp_path, record_content):
+    """The real provider door over a two-provider chain whose first provider is down: the run goes on with the second,
+    and the switch is announced and recorded, with its reason only when content is recorded."""
+    monkeypatch.setattr(browser_settings, "_table", {})
+    browser_settings.use(
+        {
+            "provider": "cdp",
+            "fallback": ["obscura"],
+            "cdp": {"endpoint": "http://127.0.0.1:9222"},
+            "obscura": {"endpoint": "http://127.0.0.1:9333"},
+        }
+    )
+    monkeypatch.setattr(providers, "make_backend", REAL_MAKE_BACKEND)
+    first, second = Unreachable(), Reachable()
+    monkeypatch.setattr(providers, "_build", lambda provider, settings, browser, act: first if provider == "cdp" else second)
+    events, kwargs = collect()
+    step = Milestone("open", "Open the page", "url", value="https://example.net")
+    cfg = RunConfig("Open the page", tmp_path, act=True, engine="structured", readiness_timeout=0, record_content=record_content)
     writer, jev = Reasoner([response(step)]), Jev("plan")
     state = run(
         cfg,
@@ -32,10 +74,21 @@ def test_a_dry_run_proposes_one_action_and_takes_none(monkeypatch, tmp_path):
         classifier_factory=lambda: jev,
         **kwargs,
     )
-    assert state.outcome == "dry run" and not computer.actions and not state.history and not state.failure
-    assert state.would_do == "type 'Quarterly report' in 'Name'"
-    assert [e.kind for e in events][-1] == "dry_run" and events[-1].text == state.would_do
-    assert "Quarterly report" not in (tmp_path / "run.json").read_text()  # words about the page stay in memory (D3)
+    assert state.outcome == "done" and [a.kind for a in second.actions] == ["navigate"] and not first.actions
+    assert first.closed and second.closed
+    (switch,) = [e for e in events if e.kind == "switch"]
+    assert switch.text == "fallback: browser cdp -> obscura (BrowserConnectionError)"
+    assert "secret" not in switch.text and "127.0.0.1" not in switch.text
+    (kept,) = json.loads((tmp_path / "run.json").read_text())["browser_switches"]
+    assert {k: kept[k] for k in ("from", "to", "kind")} == {"from": "cdp", "to": "obscura", "kind": "BrowserConnectionError"}
+    assert ("reason" in kept) is record_content
+    assert "secret=1" not in (tmp_path / "run.json").read_text()  # whatever is kept, a credential in an address is not
+
+
+def test_a_run_with_no_fallback_reports_no_switch(monkeypatch, tmp_path):
+    step = Milestone("open", "Open the page", "url", value="https://example.net")
+    state = drive(monkeypatch, tmp_path, Computer(), Reasoner([response(step)]), Jev("plan"))
+    assert state.outcome == "done" and state.summary["browser_switches"] == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")

@@ -27,6 +27,7 @@ import time
 import uuid
 from dataclasses import asdict, replace
 
+from ...providers.chain import SwitchEvent
 from ...providers.config import ConfigError
 from ...providers.errors import AllProvidersFailed, ProviderError
 from .. import browser_settings, diagnostics
@@ -35,7 +36,7 @@ from ..control import CANCELLED, checkpoint, controlled, current_control, dispat
 from ..models import Abort, BrowserConnectionError, DesktopError
 from ..runner import FAILURE_CHARS, MAX_QUESTIONS, WOULD_DO_CHARS, RunState, metered
 from ..writer import Answer
-from . import grounding, planning, policy, query, research, routing
+from . import grounding, planning, policy, providers, query, research, routing
 from .contracts import InvalidAction, Observation, UnsupportedCapability, effect, primitive_effect, rebind, validate
 from .progress import Ledger, observe, wait_effect, wait_ready
 
@@ -69,13 +70,6 @@ NO_REPLAY = "No action was repeated."
 
 # What the research supervisor borrows from the executor, so that it imports none of the engine's modules.
 RESEARCH_TOOLS = research.Tools(planning.plan, wait_ready, lambda text: grounding.extract(text).urls, query.is_search_action)
-
-
-def make_backend(browser: str):
-    """The browser or desktop adapter for this run (contracts.Backend); `native.make_backend` picks the provider."""
-    from . import native
-
-    return native.make_backend(browser)
 
 
 def provider_error(error: BaseException) -> ProviderError | None:
@@ -172,6 +166,7 @@ class Execution:
         self.phases = Phases()
         self.started = time.perf_counter()
         self.ledger = self.backend = self.supervisor = None
+        self.switches: list[SwitchEvent] = []  # browser providers replaced before the first action, in order
         # The plan and what has been used of the budgets.
         self.steps, self.revision, self.recoveries, self.questions = [], 0, 0, 0
         self.clarifications, self.routes, self.bindings = [], [], {}
@@ -239,14 +234,18 @@ class Execution:
             # Analysis and authoring need no browser, CDP or desktop capture.
             observed = no_browser()
             if scope.workflow != "reason":
-                self.backend = make_backend(cfg.execution_browser or ctx.browser)
-                if hasattr(self.backend, "configure_permissions"):  # optional: a session that asks before it writes
-                    self.backend.configure_permissions(cfg.act)
+                self.backend = providers.make_backend(cfg.execution_browser or ctx.browser, act=cfg.act, on_switch=self._switched)
                 observed = phases("initial_observation", self.backend.inspect)
             self.action_source = observed
             checkpoint()
             self._plan(ctx, scope, goal, observed)
             self._loop(ctx, goal)
+
+    def _switched(self, switch: SwitchEvent):
+        """A browser provider was unavailable and the next one on the `[browser] fallback` list took its place. It is
+        said on the run's own channel and kept for the report; the reason stays out of both unless content is recorded."""
+        self.switches.append(switch)
+        self.control.event("switch", f"fallback: browser {switch.from_slot} -> {switch.to_slot} ({switch.kind})")
 
     def _ask(self, ctx, question) -> str:
         """Put one question to the user and keep the exchange. A reply that arrives after a stop is dropped, unrecorded."""
@@ -715,6 +714,10 @@ class Execution:
         summary = {
             "engine": "structured",
             "transport": getattr(self.backend, "transport", "scripted") if self.backend is not None else "none",
+            "browser_switches": [
+                {"from": s.from_slot, "to": s.to_slot, "kind": s.kind, **({"reason": s.reason} if cfg.record_content else {})}
+                for s in self.switches
+            ],
             "routing": self.routes,
             "task_id": self.control.task_id,
             "outcome": state.outcome,

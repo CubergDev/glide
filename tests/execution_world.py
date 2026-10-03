@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 
 from glide.computer.actions import Context
 from glide.computer.control import RunControl
-from glide.computer.execution import engine, research
+from glide.computer.execution import providers, research
 from glide.computer.execution.contracts import EFFECTS, Container, Element, Milestone, Observation, validate
 from glide.computer.generation import GenerationResult
 from glide.computer.runner import RunConfig, run
@@ -255,12 +255,25 @@ def response(*steps, question="", unsupported=()):
     return {"question": question, "steps": [asdict(s) for s in steps], "unsupported": list(unsupported)}
 
 
+def give_backend(monkeypatch, computer, calls=None):
+    """The engine's one way to a backend is `providers.make_backend`: hand it `computer`. The calls it gets are
+    appended to `calls` (a new list when none is given), which is returned."""
+    calls = [] if calls is None else calls
+
+    def make_backend(browser="", *, act=False, on_switch=None):
+        calls.append({"browser": browser, "act": act, "on_switch": on_switch})
+        return computer
+
+    monkeypatch.setattr(providers, "make_backend", make_backend)
+    return calls
+
+
 def drive(monkeypatch, tmp_path, computer, reasoner, jev=None, control=None, supervisor=None, **kwargs):
     """Run the structured engine on the fake computer, with Jev as the run's classifier (D7: `classifier_factory`)
-    and the scripted reasoner as the writer. Only the backend factory is replaced; the supervisor is the caller's, or
+    and the scripted reasoner as the writer. Only the backend door is replaced; the supervisor is the caller's, or
     the real one."""
     jev = jev or Jev()
-    monkeypatch.setattr(engine, "make_backend", lambda _: computer)
+    give_backend(monkeypatch, computer, kwargs.pop("calls", None))
     if supervisor is not None:
         monkeypatch.setattr(research, "Supervisor", supervisor)
     ask = kwargs.pop("ask", None)
@@ -268,7 +281,7 @@ def drive(monkeypatch, tmp_path, computer, reasoner, jev=None, control=None, sup
     cfg = RunConfig(
         kwargs.pop("goal", "Task"),
         tmp_path,
-        act=True,
+        act=kwargs.pop("act", True),
         engine="structured",
         execution_browser="Brave Browser",
         **({} if readiness == "default" else {"readiness_timeout": readiness}),

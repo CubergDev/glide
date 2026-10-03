@@ -3,10 +3,9 @@
 from types import SimpleNamespace
 
 import pytest
-from execution_world import Computer, Jev, Reasoner, drive, response
+from execution_world import Computer, Jev, Reasoner, drive, give_backend, response
 
 from glide.computer import browser_settings, cli
-from glide.computer.execution import engine
 from glide.computer.execution.contracts import Milestone
 from glide.computer.models import BrowserConnectionError
 
@@ -106,7 +105,7 @@ def run_structured(monkeypatch, tmp_path, computer, writer, jev, *flags):
     Returns the exit code."""
     monkeypatch.setattr(cli, "make_writer", lambda config=None: writer)
     monkeypatch.setattr(cli, "provider", lambda _: "offline fixture")
-    monkeypatch.setattr(engine, "make_backend", lambda _: computer)
+    give_backend(monkeypatch, computer)
     argv = ["Open the page", "--engine", "structured", "--act", "--readiness-timeout", "0", "--out", str(tmp_path), *flags]
     return cli.main(argv, chains(jev))
 

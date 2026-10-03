@@ -28,6 +28,7 @@ ENV_NAMES = (
     "GLIDE_PLAYWRIGHT_SESSION",
     "GLIDE_PLAYWRIGHT_CLI",
 )
+REAL_MAKE_BACKEND = providers.make_backend  # taken at import, before the autouse guard replaces it
 CDP = "http://127.0.0.1:9415"
 OBSCURA = "http://127.0.0.1:9742"
 
@@ -38,6 +39,7 @@ def clean_settings(monkeypatch):
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
     monkeypatch.setattr(browser_settings, "_table", {})
+    monkeypatch.setattr(providers, "make_backend", REAL_MAKE_BACKEND)  # this file tests the door the guard shuts
 
 
 def configure(**table):
