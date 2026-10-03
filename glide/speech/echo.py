@@ -15,8 +15,8 @@ hundred milliseconds). The cleaned frame has the same length, and may lag the in
 Two implementations, chosen by `[speech] echo_canceller`:
 
 - `webrtc`: the WebRTC audio-processing module (AEC3) through the `livekit` package (the `aec` extra). Its
-  delay search, double-talk handling and residual suppression are the best of the candidates measured. It needs
-  no numpy: frames are bytes.
+  delay search, double-talk handling and residual suppression are the best of the candidates measured. The wrapper
+  itself uses no numpy (frames are bytes), though the livekit package installs it.
 - `nlms`: a partitioned-block frequency-domain adaptive filter in numpy (the `speech` extra), kept as the
   fallback with no further dependency. A foreground filter produces the output and a background filter adapts
   freely; the foreground is replaced only when the background is measurably better, so a burst of the person's
@@ -30,11 +30,13 @@ here: see docs/voice-echo-cancellation.md.
 
 What `stats` means. `erle_db` is the long-run echo return loss enhancement: how much quieter the cleaned signal
 is than the microphone, over the frames where the speaker was sounding. It starts unmeasured and settles over
-seconds, so a barge-in policy must not trust it earlier (`EchoStats.measured`). `expected_residual_rms` is what
-the echo that is *left* in this frame should measure, from the echo level just removed and that ERLE: the
-barge-in policy compares the cleaned level against it. Statistics are frozen while `hold` is set, which the
-policy does while it is judging whether a sound is the person: the person's own voice must not teach the
-canceller that echo is louder than it is.
+seconds, so a barge-in policy must not trust it earlier (`EchoStats.measured`). `expected_residual_rms` is the cleaned
+level this frame would have if it held only echo: the larger of the reference's recent loudness times the 95th
+percentile of residual-over-reference seen in the last 1.5 s, and the 90th percentile of the cleaned level itself over
+the same time. High percentiles, not averages, because a canceller's residual comes in bursts and Glide's own echo
+must never be louder than what is expected of it. The barge-in policy compares the cleaned level against it.
+Statistics are frozen while `hold` is set, which the policy does while it is judging whether a sound is the person:
+the person's own voice must not teach the canceller that echo is louder than it is.
 
 Importing this module never loads numpy or livekit; building a canceller does, and fails with `EchoError`.
 """
