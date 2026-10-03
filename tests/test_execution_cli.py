@@ -3,9 +3,9 @@
 from types import SimpleNamespace
 
 import pytest
-from execution_world import Computer, Jev, Reasoner, response
+from execution_world import Computer, Jev, Reasoner, drive, response
 
-from glide.computer import cli
+from glide.computer import browser_settings, cli
 from glide.computer.execution import engine
 from glide.computer.execution.contracts import Milestone
 from glide.computer.models import BrowserConnectionError
@@ -17,6 +17,32 @@ def offline(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "fixture-key")
     monkeypatch.setattr(cli.config, "writer_vision", lambda: True)
     monkeypatch.setattr(cli, "desktop", SimpleNamespace(accessibility_trusted=lambda: True, abort_hint=lambda: "corner"))
+
+
+BROWSER_ENV = (
+    "GLIDE_BROWSER_PROVIDER",
+    "GLIDE_BROWSER_ENDPOINT",
+    "GLIDE_BROWSER_TARGET",
+    "GLIDE_PLAYWRIGHT_SESSION",
+    "GLIDE_SEARCH_URL",
+    "GLIDE_RESEARCH_CALLS",
+)
+
+
+@pytest.fixture
+def settings(monkeypatch, tmp_path):
+    """A clean environment for the settings `main` installs, put back after the test (the installed table included)."""
+    for name in BROWSER_ENV:
+        monkeypatch.setenv(name, "")  # so the undo removes whatever a flag sets
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(browser_settings, "_table", {})
+
+    def write(text):
+        path = tmp_path / "glide.toml"
+        path.write_text(text)
+        return SimpleNamespace(classifier=lambda: "the chain classifier", scrub=lambda text: text, source=str(path))
+
+    return write
 
 
 def state(outcome, failure=""):
@@ -107,3 +133,77 @@ def test_a_structured_run_that_is_unsupported_exits_one(monkeypatch, tmp_path, o
     computer = Computer()
     assert run_structured(monkeypatch, tmp_path, computer, Reasoner([response(unsupported=["drag"])]), Jev("plan")) == 1
     assert not computer.actions
+
+
+# -- the [browser] and [research] tables of glide.toml, under the environment and the flags -----------------------
+
+
+def seen_run(monkeypatch, config, *flags):
+    seen = {}
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", lambda cfg, ctx_factory, **kw: seen.update(cfg=cfg) or state("done"))
+    return cli.main(["a goal", "--engine", "structured", "--out", "unused", *flags], config), seen
+
+
+def test_the_browser_and_research_tables_of_glide_toml_reach_the_run(monkeypatch, settings, offline, capsys):
+    config = settings(
+        '[browser]\nprovider = "obscura"\nsearch_url = "https://search.example.test/"\n'
+        '[browser.obscura]\nendpoint = "http://127.0.0.1:9333"\n[research]\ncalls = 7\n'
+    )
+    code, seen = seen_run(monkeypatch, config)
+    now = browser_settings.current()
+    assert code == 0 and seen["cfg"].research_calls == 7
+    assert (now.provider, now.search_url, now.endpoints["obscura"]) == (
+        "obscura",
+        "https://search.example.test/",
+        "http://127.0.0.1:9333",
+    )
+    assert "browser: Obscura" in capsys.readouterr().out
+
+
+def test_the_environment_and_the_flags_beat_the_file(monkeypatch, settings, offline):
+    config = settings('[browser]\nprovider = "native"\n[research]\ncalls = 7\n')
+    monkeypatch.setenv("GLIDE_RESEARCH_CALLS", "9")
+    code, seen = seen_run(monkeypatch, config, "--browser-provider", "cdp", "--browser-endpoint", "http://127.0.0.1:9222")
+    assert code == 0 and seen["cfg"].research_calls == 9
+    assert browser_settings.current().provider == "cdp" and browser_settings.current().endpoints["cdp"] == "http://127.0.0.1:9222"
+
+
+def test_no_tables_means_the_defaults_and_no_search_engine(monkeypatch, settings, offline):
+    code, seen = seen_run(monkeypatch, settings(""))
+    assert code == 0 and seen["cfg"].research_calls == 24
+    assert browser_settings.current().provider == "native" and browser_settings.current().search_url == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[browser]\nprovider = "nope"\n',
+        '[browser]\nprovider = "cdp"\n',  # no endpoint
+        '[browser]\nsearch_url = "ftp://search.example.test"\n',
+        "[research]\ncalls = 0\n",
+        "[research]\ncalls = 33\n",
+        '[research]\ncalls = "many"\n',
+        "[research]\ncalls = 2.5\n",
+        "[research]\ncalls = true\n",
+        "[research]\nrounds = 3\n",
+    ],
+)
+def test_a_bad_table_stops_the_run_before_anything_starts(monkeypatch, settings, offline, capsys, text):
+    code, seen = seen_run(monkeypatch, settings(text))
+    assert code == 2 and seen == {}
+    assert "search.example.test" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "33", "-1", "many", "2.5"])
+def test_a_bad_budget_in_the_environment_stops_the_run_too(monkeypatch, settings, offline, value):
+    monkeypatch.setenv("GLIDE_RESEARCH_CALLS", value)
+    code, seen = seen_run(monkeypatch, settings("[research]\ncalls = 7\n"))
+    assert code == 2 and seen == {}
+
+
+@pytest.mark.parametrize("calls", [0, 33, True, 2.5, "7"])
+def test_the_engine_refuses_a_research_budget_outside_its_bounds_before_any_action(monkeypatch, tmp_path, calls):
+    computer = Computer()
+    state_ = drive(monkeypatch, tmp_path, computer, Reasoner([]), Jev("plan"), research_calls=calls)
+    assert state_.outcome == "blocked" and "Invalid execution budget" in state_.failure and not computer.actions

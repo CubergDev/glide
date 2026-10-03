@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 
 from glide.computer.actions import Context
 from glide.computer.control import RunControl
-from glide.computer.execution import engine
+from glide.computer.execution import engine, research
 from glide.computer.execution.contracts import EFFECTS, Container, Element, Milestone, Observation, validate
 from glide.computer.generation import GenerationResult
 from glide.computer.runner import RunConfig, run
@@ -183,23 +183,26 @@ class Reasoner:
 
 
 class FakeSupervisor:
-    """A scripted stand-in for `research.Supervisor`, behind `engine.make_supervisor`.
+    """A scripted stand-in for `research.Supervisor`, which `drive(..., supervisor=...)` puts in its place.
 
-    It has what the engine relies on from the real one and nothing else (research.py is another port): `advance`
-    returns the next browser batch (or sets `answer`), and the attributes the recovery path reads. `script` is a
-    list of `("browse", [Milestone, ...])`, `("answer", Answer)` or `("raise", exception)`.
+    It has what the engine relies on from the real one and nothing else: `advance` returns the next browser batch (or
+    sets `answer`), and the attributes the recovery path reads. `script` is a list of `("browse", [Milestone, ...])`,
+    `("answer", Answer)` or `("raise", exception)`. Calling it is the engine constructing the supervisor; the
+    arguments it was given are kept in `built`.
     """
 
     def __init__(self, script=()):
         self.script = list(script)
         self.goal = self.route = None
+        self.built = {}
         self.replies, self.questions, self.sources = [], 0, []
         self.batch, self.batch_ids, self.browser_goal = 0, set(), ""
         self.answer = None
         self.advances = []
 
-    def __call__(self, goal, route):
+    def __call__(self, goal, route, budget, *, tools, search_url=""):
         self.goal, self.route = goal, route
+        self.built = {"budget": budget, "tools": tools, "search_url": search_url}
         return self
 
     def advance(self, ctx, backend, observed, steps, ledger, measured, readiness_timeout):
@@ -254,11 +257,12 @@ def response(*steps, question="", unsupported=()):
 
 def drive(monkeypatch, tmp_path, computer, reasoner, jev=None, control=None, supervisor=None, **kwargs):
     """Run the structured engine on the fake computer, with Jev as the run's classifier (D7: `classifier_factory`)
-    and the scripted reasoner as the writer. Only the backend factory is replaced; the supervisor is the caller's."""
+    and the scripted reasoner as the writer. Only the backend factory is replaced; the supervisor is the caller's, or
+    the real one."""
     jev = jev or Jev()
     monkeypatch.setattr(engine, "make_backend", lambda _: computer)
     if supervisor is not None:
-        monkeypatch.setattr(engine, "make_supervisor", supervisor)
+        monkeypatch.setattr(research, "Supervisor", supervisor)
     ask = kwargs.pop("ask", None)
     readiness = kwargs.pop("readiness_timeout", 0)  # "default" leaves it to RunConfig's own default
     cfg = RunConfig(

@@ -16,7 +16,15 @@ from ..providers.errors import AllProvidersFailed, ProviderError
 from . import diagnostics
 from .actions import Context, perform
 from .calls import Calls, MeteredClassifier, MeteredWriter
-from .config import DEFAULT_DELAY, DEFAULT_HANDOFFS, DEFAULT_MIN_CONFIDENCE, DEFAULT_READINESS_TIMEOUT, DEFAULT_STEPS, MAX_OPTIONS
+from .config import (
+    DEFAULT_DELAY,
+    DEFAULT_HANDOFFS,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_READINESS_TIMEOUT,
+    DEFAULT_RESEARCH_CALLS,
+    DEFAULT_STEPS,
+    MAX_OPTIONS,
+)
 from .control import RunControl, checkpoint, controlled, current_control
 from .decide import OFFSCREEN_PREFIX, Decision, decide, offscreen_records
 from .generation import GenerationUnavailable
@@ -73,6 +81,7 @@ class RunConfig:
     engine: str = "legacy"  # "structured" is the execution engine (execution/engine.py)
     execution_browser: str = ""
     readiness_timeout: float = DEFAULT_READINESS_TIMEOUT
+    research_calls: int = DEFAULT_RESEARCH_CALLS  # structured engine: the most model calls a research task may use
 
     @property
     def replay(self) -> bool:

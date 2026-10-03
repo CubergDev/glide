@@ -1,8 +1,8 @@
 """Who owns a task: `routing.decide` as a pure function, and the engine's use of its answer.
 
-The research supervisor is another port (research.py); the engine reaches it through `engine.make_supervisor`, so the
-frontier routes here run against `FakeSupervisor` (execution_world.py). What is asserted is what the engine owns:
-which route was taken, who was asked, what was never touched.
+The frontier routes here run against `FakeSupervisor` (execution_world.py), put where `research.Supervisor` is; the real
+one runs in test_engine_research.py. What is asserted is what the engine owns: which route was taken, who was asked,
+what was never touched.
 """
 
 import json

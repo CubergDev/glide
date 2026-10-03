@@ -12,9 +12,10 @@
 4. Report: run.json (counts, timings, the outcome; goal, plan and history only when content recording is on, D3).
 
 Nothing here talks to a vendor. The classifier is the one the caller's `classifier_factory` returns (a provider
-chain, D7), model calls go through `writer.generate` (D1), and every input action passes `RunControl` (D2). Browser
-and desktop adapters arrive through `make_backend`, and the research supervisor through `make_supervisor`; tests
-replace those two names.
+chain, D7), model calls go through `writer.generate` (D1), and every input action passes `RunControl` (D2). The
+browser or desktop adapter comes from `providers.make_backend`, which picks it from the `[browser]` settings, and the
+research supervisor is `research.Supervisor`, given the budget and search address of the settings; tests replace those
+two names.
 """
 
 from __future__ import annotations
@@ -28,12 +29,13 @@ from dataclasses import asdict, replace
 
 from ...providers.config import ConfigError
 from ...providers.errors import AllProvidersFailed, ProviderError
-from .. import config, diagnostics
+from .. import browser_settings, diagnostics
+from ..config import MAX_RESEARCH_CALLS
 from ..control import CANCELLED, checkpoint, controlled, current_control, dispatch
 from ..models import Abort, BrowserConnectionError, DesktopError
 from ..runner import FAILURE_CHARS, MAX_QUESTIONS, WOULD_DO_CHARS, RunState, metered
 from ..writer import Answer
-from . import planning, policy, query, routing
+from . import grounding, planning, policy, query, research, routing
 from .contracts import InvalidAction, Observation, UnsupportedCapability, effect, primitive_effect, rebind, validate
 from .progress import Ledger, observe, wait_effect, wait_ready
 
@@ -65,19 +67,15 @@ PROVIDER_SENTENCES = {
 GENERIC_PROVIDER_SENTENCE = "A model provider failed."
 NO_REPLAY = "No action was repeated."
 
+# What the research supervisor borrows from the executor, so that it imports none of the engine's modules.
+RESEARCH_TOOLS = research.Tools(planning.plan, wait_ready, lambda text: grounding.extract(text).urls, query.is_search_action)
+
 
 def make_backend(browser: str):
     """The browser or desktop adapter for this run (contracts.Backend); `native.make_backend` picks the provider."""
     from . import native
 
     return native.make_backend(browser)
-
-
-def make_supervisor(goal: str, route: str):
-    """The research supervisor for the `research` and `reason` routes (research.Supervisor)."""
-    from . import research
-
-    return research.Supervisor(goal, route, config.research_calls())
 
 
 def provider_error(error: BaseException) -> ProviderError | None:
@@ -200,6 +198,8 @@ class Execution:
             or type(cfg.steps) is not int
             or not 1 <= cfg.steps <= MAX_STEPS
             or cfg.handoffs < 0
+            or type(cfg.research_calls) is not int
+            or not 1 <= cfg.research_calls <= MAX_RESEARCH_CALLS
             or not 0 <= cfg.min_confidence <= 1
         ):
             return self._blocked_early("Invalid execution budget or readiness deadline; no action was issued.")
@@ -296,9 +296,13 @@ class Execution:
         if route == "query":
             if "query_form" not in observed.capabilities:
                 raise UnsupportedCapability(["query_form (connect the approved browser in pet settings)"], observed.capabilities)
-            quick, question = phases("query_extraction", query.intent, ctx.writer, goal, observed, config.search_url())
+            quick, question = phases(
+                "query_extraction", query.intent, ctx.writer, goal, observed, browser_settings.current().search_url
+            )
         if route in {"research", "reason"}:
-            self.supervisor = make_supervisor(cfg.goal, route)
+            self.supervisor = research.Supervisor(
+                cfg.goal, route, cfg.research_calls, tools=RESEARCH_TOOLS, search_url=browser_settings.current().search_url
+            )
             self.supervisor.replies = list(self.clarifications)
             self.supervisor.questions = self.questions
         elif quick and not question:

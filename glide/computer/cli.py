@@ -14,7 +14,8 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config
+from .. import features
+from . import browser_settings, config
 from .actions import Context
 from .control import RunControl
 from .perception import capture, perceive
@@ -74,6 +75,7 @@ def main(argv: list[str] | None, glide_config) -> int:
         default=config.DEFAULT_READINESS_TIMEOUT,
         help="structured engine: seconds a page or an effect may take to show before the run reports it (0-30)",
     )
+    browser_settings.add_arguments(parser)
     parser.add_argument("--steps", type=int, default=config.DEFAULT_STEPS, help="max actions before stopping")
     parser.add_argument("--min-confidence", type=float, default=config.DEFAULT_MIN_CONFIDENCE, help="stop below this confidence")
     parser.add_argument("--delay", type=float, default=config.DEFAULT_DELAY, help="seconds to wait after each action")
@@ -97,6 +99,11 @@ def main(argv: list[str] | None, glide_config) -> int:
     if args.act and not desktop.accessibility_trusted():
         return _fail("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     try:
+        # glide.toml's [browser] table and [research] budget, under the environment and the flags; a bad one stops the run
+        # here, before anything has been started.
+        browser_settings.use(features.table(glide_config, "browser"))
+        browser_settings.apply_arguments(args)
+        research_calls = config.research_budget(features.table(glide_config, "research"))
         writer = make_writer(glide_config)
         config.writer_vision()  # a bad value stops the run here, not at its first stop
     except ValueError as e:  # a ConfigError is one
@@ -105,6 +112,8 @@ def main(argv: list[str] | None, glide_config) -> int:
         print(WRITER_DISABLED)
     else:
         print(f"writer: {provider(writer)}")
+    if args.engine == "structured":
+        print(f"browser: {browser_settings.description()}")
 
     cfg = RunConfig(
         goal=args.goal,
@@ -121,6 +130,7 @@ def main(argv: list[str] | None, glide_config) -> int:
         engine=args.engine,
         execution_browser=config.browser(),
         readiness_timeout=args.readiness_timeout,
+        research_calls=research_calls,
     )
 
     def ctx_factory(classifier, history):

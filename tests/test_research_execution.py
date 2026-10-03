@@ -27,6 +27,7 @@ from research_fakes import (
 )
 
 from glide.computer import diagnostics
+from glide.computer.config import MAX_RESEARCH_CALLS
 from glide.computer.control import RunControl, controlled
 from glide.computer.execution import research
 from glide.computer.execution.contracts import Action, InvalidAction, Milestone
@@ -135,7 +136,7 @@ def test_no_model_means_no_research():
 
 
 def test_the_budget_is_capped_and_ends_the_run_without_an_answer():
-    assert Supervisor("x", "research", 500, tools=Run("x", None).tools).budget == research.MAX_MODEL_CALLS
+    assert Supervisor("x", "research", 500, tools=Run("x", None).tools).budget == MAX_RESEARCH_CALLS
     pages = Pages(url=A).page(A, "")
     writer = Reasoner([decision("read"), decision("read")])
     run = Run("Review it.", writer, pages, budget=2)

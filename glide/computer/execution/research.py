@@ -24,13 +24,13 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 
 from .. import diagnostics
+from ..config import MAX_RESEARCH_CALLS
 from ..control import checkpoint, current_control
 from ..writer import Answer, compose_research, review_research
 from .contracts import InvalidAction, safe_url
 from .reading import page_record
 
 MAX_SOURCES = 8  # pages read per run, besides the user's own request
-MAX_MODEL_CALLS = 32  # the most any budget may allow
 MAX_QUESTIONS = 3
 READ_EFFECTS = {"url", "tab_created", "tab_active", "scroll", "query_submitted", "disclosure_expanded"}
 READ_ACTIONS = {"inspect", "navigate", "tab_create", "tab_switch", "scroll"}
@@ -69,7 +69,7 @@ def _flat(value):
 class Supervisor:
     def __init__(self, goal, route, budget, *, tools, search_url=""):
         self.goal, self.route, self.tools, self.search_url = goal, route, tools, search_url
-        self.budget = min(budget, MAX_MODEL_CALLS)
+        self.budget = min(budget, MAX_RESEARCH_CALLS)
         self.calls = 0
         self.sources = [{"id": REQUEST, "origin": "request", "title": "User request", "url": "", "text": goal, "links": []}]
         self.completed = []

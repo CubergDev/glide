@@ -92,7 +92,7 @@ def prepare_voice(act, *, cancelled=lambda: False):
     """
     if cancelled():
         raise KeyboardInterrupt
-    provider = browser_settings.connection().provider
+    provider = browser_settings.current().provider
     if provider == "native":
         prepare(act, cancelled=cancelled)
     else:

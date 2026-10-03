@@ -139,18 +139,23 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 # ---------------------------------------------------------------------------------------------------------------
 # Browser provider: which one drives the browser for a computer task. Nothing here is started for you: you start the
 # browser, Obscura or the Playwright CLI session yourself, and Glide only attaches. Endpoints must be loopback.
-#   provider  native (the default: this Mac's own browser), cdp, obscura or playwright
-#   target    a tab id, or "new" for a tab of its own; empty means the one open tab
-#   fallback  optional, default none. Tried in order when the provider is unavailable, only before anything has been
-#             done, and every switch is reported. "native" cannot be a fallback: it takes over this machine.
+#   provider    native (the default: this Mac's own browser), cdp, obscura or playwright
+#   target      a tab id, or "new" for a tab of its own; empty means the one open tab
+#   fallback    optional, default none. Tried in order when the provider is unavailable, only before anything has been
+#               done, and every switch is reported. "native" cannot be a fallback: it takes over this machine.
+#   search_url  optional: the address a search starts from when a task names no site. Glide has no built-in one, so
+#               without it a task that names no site has to say where to go.
 # Per run, the environment wins: GLIDE_BROWSER_PROVIDER, GLIDE_BROWSER_ENDPOINT, GLIDE_BROWSER_TARGET,
-# GLIDE_PLAYWRIGHT_SESSION, GLIDE_PLAYWRIGHT_CLI. A provider that is not installed or not enabled fails with a message
-# that says what to do, and takes no action. What to check live: docs/live-checks/browsers.md.
-#
+# GLIDE_PLAYWRIGHT_SESSION, GLIDE_PLAYWRIGHT_CLI, GLIDE_SEARCH_URL; `glide computer` also takes --browser-provider,
+# --browser-endpoint, --browser-target and --playwright-session. A provider that is not installed or not enabled fails
+# with a message that says what to do, and takes no action. What to check live: docs/live-checks/browsers.md.
+# ---------------------------------------------------------------------------------------------------------------
+
 # [browser]
 # provider = "cdp"
 # target = "new"
 # fallback = ["obscura"]
+# search_url = "<address of the page a search starts from>"
 #
 # [browser.cdp]
 # endpoint = "<loopback address and port of the browser's debugging port>"
@@ -159,4 +164,11 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 # [browser.playwright]
 # session = "glide"                       # an already opened Playwright CLI session
 # cli = "/path/to/playwright-cli"         # optional; the default is playwright-cli on PATH
+
 # ---------------------------------------------------------------------------------------------------------------
+# Research (`glide computer --engine structured`): the model that plans and answers is the [llm.research] chain above.
+#   calls  the most model calls one research task may use, 1 to 32 (default 24). GLIDE_RESEARCH_CALLS overrides it.
+# ---------------------------------------------------------------------------------------------------------------
+
+# [research]
+# calls = 12

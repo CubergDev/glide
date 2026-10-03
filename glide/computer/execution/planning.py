@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, replace
 
-from .. import config, diagnostics
+from .. import browser_settings, diagnostics
 from ..control import checkpoint
 from ..writer import compose_plan
 from .contracts import EFFECTS, MAX_PLAN_STEPS, MAX_REPETITIONS, InvalidAction, Milestone, UnsupportedCapability, safe_url
@@ -15,7 +15,7 @@ def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", con
         "goal": goal,
         "observation": observed.packet(),
         "available_effects": sorted(EFFECTS & set(context.get("allowed_effects", EFFECTS)) if context else EFFECTS),
-        "configured_search_url": config.search_url(),
+        "configured_search_url": browser_settings.current().search_url,
         "original_milestones": [asdict(s) for s in steps],
         "verified_progress": progress,
         "contradiction": reason,

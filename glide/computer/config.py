@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 MIN_OCR_CONFIDENCE = 0.3
 MAX_OPTIONS = 255  # TypeSafe Choice ceiling
@@ -13,6 +15,8 @@ DEFAULT_STEPS = 100
 DEFAULT_DELAY = 2.0
 DEFAULT_READINESS_TIMEOUT = 10.0  # seconds a page or form may take to become usable before the run reports it
 DEFAULT_HANDOFFS = 10  # each one is a call to the answer model, a few seconds and a few cents
+DEFAULT_RESEARCH_CALLS = 24  # model calls one research task may use, each a few seconds and a few cents
+MAX_RESEARCH_CALLS = 32  # the most any setting may allow
 DEFAULT_BROWSER = "Google Chrome"
 
 # Sites the classifier can pick by name. Anything else goes through the writer.
@@ -56,7 +60,20 @@ def email() -> str | None:
     return os.environ.get("GLIDE_EMAIL") or None
 
 
-def search_url() -> str:
-    """Where a search starts when the task names no site. Configuration only (GLIDE_SEARCH_URL): the code names no
-    search engine, so an unset value means a task has to name its own address."""
-    return os.environ.get("GLIDE_SEARCH_URL", "").strip()
+def research_budget(table: Mapping[str, Any] | None = None, env: Mapping[str, str] | None = None) -> int:
+    """Model calls one research task may use: GLIDE_RESEARCH_CALLS over `calls` in the `[research]` table over the
+    default. A ValueError names the setting, never its value."""
+    env = os.environ if env is None else env
+    table = {} if table is None else table
+    for key in table:
+        if key != "calls":
+            raise ValueError(f"[research] has an unknown key {key!r} (known: calls)")
+    named = env.get("GLIDE_RESEARCH_CALLS", "").strip()
+    calls = table.get("calls", DEFAULT_RESEARCH_CALLS)
+    if named:
+        calls = int(named) if named.isdecimal() else None
+    if type(calls) is not int or not 1 <= calls <= MAX_RESEARCH_CALLS:
+        raise ValueError(
+            f"The research budget ([research] calls or GLIDE_RESEARCH_CALLS) must be a whole number from 1 to {MAX_RESEARCH_CALLS}"
+        )
+    return calls

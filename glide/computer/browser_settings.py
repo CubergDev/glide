@@ -6,6 +6,7 @@ In glide.toml:
     provider = "cdp"            # native (the default), cdp, obscura or playwright
     target = "new"              # a tab id, or "new" for a tab of its own; empty means the one open tab
     fallback = ["obscura"]      # optional, default none: tried in order when the provider is unavailable, see providers.py
+    search_url = "https://..."  # optional: where a search starts when a task names no site. There is no built-in one.
 
     [browser.cdp]
     endpoint = "http://127.0.0.1:9222"
@@ -16,7 +17,7 @@ In glide.toml:
     cli = "/path/to/playwright-cli"
 
 The environment wins over the file: GLIDE_BROWSER_PROVIDER, GLIDE_BROWSER_ENDPOINT (for the selected cdp or obscura
-provider), GLIDE_BROWSER_TARGET, GLIDE_PLAYWRIGHT_SESSION and GLIDE_PLAYWRIGHT_CLI. With no provider named, one with an
+provider), GLIDE_BROWSER_TARGET, GLIDE_PLAYWRIGHT_SESSION, GLIDE_PLAYWRIGHT_CLI and GLIDE_SEARCH_URL. With no provider named, one with an
 endpoint means cdp and anything else means the native desktop. Endpoints must be loopback HTTP origins: a browser is
 reached only on this machine and only where the user pointed Glide at it. Nothing here holds a key.
 """
@@ -25,21 +26,22 @@ from __future__ import annotations
 
 import os
 import re
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 from urllib.parse import urlsplit
+
+from .execution.contracts import safe_url
 
 PROVIDERS = ("native", "cdp", "obscura", "playwright")
 ENDPOINT_PROVIDERS = ("cdp", "obscura")
 DEFAULT_SESSION = "glide"
-_TABLE_KEYS = ("provider", "target", "fallback", *ENDPOINT_PROVIDERS, "playwright")
+_TABLE_KEYS = ("provider", "target", "fallback", "search_url", *ENDPOINT_PROVIDERS, "playwright")
 _SESSION = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
-class Connection(NamedTuple):
+@dataclass(frozen=True)
+class Connection:
     provider: str
     endpoint: str
     target: str
@@ -54,6 +56,7 @@ class Settings:
     endpoints: Mapping[str, str]
     session: str
     cli: str
+    search_url: str  # where a search starts when a task names no site; "" when none is configured
     source: str  # where the provider came from: "environment", "glide.toml" or "default"
 
     def connection(self, provider: str | None = None) -> Connection:
@@ -153,6 +156,7 @@ def resolve(table: Mapping[str, Any] | None = None, env: Mapping[str, str] | Non
         or _text(subtables["playwright"], "session", "[browser.playwright]")
         or DEFAULT_SESSION,
         cli=env.get("GLIDE_PLAYWRIGHT_CLI", "") or _text(subtables["playwright"], "cli", "[browser.playwright]"),
+        search_url=env.get("GLIDE_SEARCH_URL", "").strip() or _text(table, "search_url", "[browser]"),
         source=source,
     )
     _check(settings)
@@ -160,6 +164,8 @@ def resolve(table: Mapping[str, Any] | None = None, env: Mapping[str, str] | Non
 
 
 def _check(settings: Settings) -> None:
+    if settings.search_url and not safe_url(settings.search_url):
+        raise ValueError("The search address (search_url or GLIDE_SEARCH_URL) must be an http or https address")
     chain = settings.chain
     for name in chain:
         validate_provider(name, settings.endpoints.get(name, ""), settings.target, settings.session)
@@ -176,20 +182,6 @@ def _check(settings: Settings) -> None:
 _table: Mapping[str, Any] = {}
 
 
-def load_table(source: str) -> dict[str, Any]:
-    """The `[browser]` table of the file `source` names (a loaded config's `source`); {} when it is no file."""
-    path = Path(source)
-    if not path.is_file():
-        return {}
-    try:
-        table = tomllib.loads(path.read_text(encoding="utf-8")).get("browser", {})
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
-        raise ValueError(f"Cannot read the [browser] table from {path.name}") from None
-    if not isinstance(table, dict):
-        raise ValueError("[browser] must be a table")
-    return table
-
-
 def use(table: Mapping[str, Any] | None) -> Settings:
     """Install the `[browser]` table of glide.toml for this process and return what it resolves to (ValueError if bad)."""
     global _table
@@ -202,21 +194,16 @@ def current() -> Settings:
     return resolve(_table)
 
 
-def connection(provider: str | None = None) -> Connection:
-    """The selected session (or that of `provider`), independent of the native desktop browser."""
-    return current().connection(provider)
-
-
 def description() -> str:
     settings = current()
-    provider, endpoint, target, session = settings.connection()
-    if provider == "native":
+    target = settings.target or "single tab"
+    if settings.provider == "native":
         from .config import browser
 
         return f"Native desktop · {browser()}"
-    if provider == "playwright":
-        return f"Playwright CLI · session {session} · target {target or 'single tab'}"
-    return f"{'CDP' if provider == 'cdp' else 'Obscura'} · {endpoint} · target {target or 'single tab'}"
+    if settings.provider == "playwright":
+        return f"Playwright CLI · session {settings.session} · target {target}"
+    return f"{'CDP' if settings.provider == 'cdp' else 'Obscura'} · {settings.endpoints[settings.provider]} · target {target}"
 
 
 def add_arguments(parser) -> None:
