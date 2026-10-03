@@ -1,13 +1,16 @@
-"""Provider-neutral text generation. Only provider implementations know wire formats."""
+"""Provider-neutral text generation: the one request and result shape the writer speaks (`ModelProvider`).
+
+The implementation is `glide.providers.writer_client.ChainWriter`, over the glide.toml chains. Nothing here knows a
+vendor, a wire format or an environment variable.
+"""
 
 from __future__ import annotations
 
 import base64
-import json
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from .control import RunControl, checkpoint
+from .control import RunControl
 
 
 class GenerationError(Exception):
@@ -56,58 +59,3 @@ class ModelProvider(Protocol):
 
 def image_url(data: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(data).decode()
-
-
-class AnthropicProvider:
-    """Explicit legacy provider; Anthropic shapes stop at this boundary."""
-
-    def __init__(self, client, *, custom: bool = False):
-        self.client = client
-        self.messages = client.messages
-        self.base_url = client.base_url
-        self.custom = custom
-
-    def generate(self, request: GenerationRequest, cancel: RunControl | None = None) -> GenerationResult:
-        import anthropic
-
-        checkpoint(cancel)
-        content = []
-        if request.image is not None:
-            content.append(
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(request.image).decode()},
-                }
-            )
-        content.append({"type": "text", "text": request.text})
-        system = request.instructions
-        extra = {}
-        if getattr(self, "custom", False):
-            system += "\n\nAnswer with a single JSON object and nothing else, matching this schema:\n" + json.dumps(
-                request.schema
-            )
-            extra["thinking"] = {"type": "disabled"}
-        try:
-            reply = self.messages.create(
-                model=request.model,
-                timeout=request.deadline_s,
-                max_tokens=request.max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": content}],
-                output_config={"format": {"type": "json_schema", "schema": request.schema}},
-                **extra,
-            )
-        except anthropic.APIError as error:
-            raise GenerationError("Anthropic request failed") from error
-        checkpoint(cancel)
-        usage = getattr(reply, "usage", None)
-        return GenerationResult(
-            "".join(b.text for b in reply.content if b.type == "text"),
-            getattr(reply, "model", None) or request.model,
-            TokenUsage(
-                (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0),
-                getattr(usage, "cache_read_input_tokens", 0) or 0,
-                getattr(usage, "output_tokens", 0) or 0,
-            ),
-            completed=getattr(reply, "stop_reason", None) not in {"max_tokens", "refusal"},
-        )
