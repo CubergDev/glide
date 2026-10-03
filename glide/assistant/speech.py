@@ -53,6 +53,21 @@ _LIST_MARKER = re.compile(r"^\s{0,3}(?:#{1,6}\s+|[-*+•]\s+|\d{1,3}[.)]\s+|>\s+
 _EMOJI = re.compile("[\U0001f000-\U0001faff\U00002600-\U000027bf\U0000fe0f\U0000200d]")
 
 
+# The executor's own progress notes ("Verified 0 effect(s); 2 remain") were once read aloud as if they were an answer.
+# They are diagnostics: they stay on screen and in the log, and are never voiced. This is the net under the real
+# fix (a task is spoken through `TaskResult.spoken`, which carries no counters), narrow on purpose: a sentence
+# is dropped only when it is made of effect or verification counts, not whenever it contains a number.
+_INTERNAL_STATUS = re.compile(
+    r"\bverified\s+\d+\s+effects?\b|\b\d+\s+effects?(?:\(s\))?\s+(?:verified|remain\w*|left|pending)\b|\beffects?\(s\)",
+    re.IGNORECASE,
+)
+
+
+def is_internal_status(text: str) -> bool:
+    """Whether `text` is the executor's own progress counter rather than something to say to a person."""
+    return _INTERNAL_STATUS.search(text) is not None
+
+
 def has_content(text: str) -> bool:
     """Whether there is anything to say: a letter or a digit, in any script. `"`, `)` and `**` are not speech."""
     return any(ch.isalnum() for ch in text)
@@ -282,7 +297,7 @@ class Speaker:
         """Queue one sentence. False when there was nothing to say or `only_if` (checked under the lock
         that `cancel` takes, so a cancel cannot slip between the check and the queueing) said no."""
         cleaned = clean_for_speech(text)
-        if not has_content(cleaned):
+        if not has_content(cleaned) or is_internal_status(cleaned):
             return False
         with self._lock:
             if only_if is not None and not only_if():
