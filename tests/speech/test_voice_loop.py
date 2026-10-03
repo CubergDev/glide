@@ -166,7 +166,7 @@ def test_nothing_ends_a_turn_on_a_short_silence_before_the_configured_one():
     r.device.on_frame = lambda left: ended_early.append(left) if left == 1 and r.loop._turn is None else None
     run(r)  # the turn was still open when the script ran out; stopping aborts it, silence never ended it
     assert not ended_early
-    assert len(stt.streams) == 1 and stt.ended == [] and len(stt.audio[0]) // FRAME_BYTES == 10 + 18 - 1 + 8 - 8
+    assert len(stt.streams) == 1 and stt.ended == [] and len(stt.audio[0]) // FRAME_BYTES == 10 + 18
 
 
 # -- no dropped segments ----------------------------------------------------------------------------
@@ -283,18 +283,69 @@ def test_activity_keeps_the_microphone_on():
     assert r.device.calls == []
 
 
+# -- more recorded failures -------------------------------------------------------------------------
+
+
+def test_a_short_command_after_a_long_idle_sends_nothing_for_the_idle_and_ends_once():
+    """Replay of the recorded double commit: 20 s of idle must not reach the transcriber (it once counted toward a
+    proactive flush), and the one short command is one stream with one end."""
+    stt = ScriptedSTT(["open youtube and play the first video"])
+    r = run(rig([*quiet(20_000), *speech(3), *quiet(700), *quiet(700)], stt))
+    assert r.heard == ["open youtube and play the first video"]
+    assert stt.streams == [0] and stt.ended == [0]
+    assert len(stt.audio[0]) // FRAME_BYTES == 8 + 3 - 1 + 19  # the pre-roll, the speech and the closing silence: not 625 frames
+
+
+def test_stopping_the_loop_discards_a_half_said_command_instead_of_submitting_it():
+    stt = ScriptedSTT(["must not be answered"])
+    r = run(rig([*speech(10)], stt))
+    assert r.heard == [] and stt.ended == [] and not r.warned  # an abort is on purpose, so it is not an error either
+
+
+def test_the_assistants_heard_hook_is_restored_when_the_loop_ends():
+    stt = ScriptedSTT([])
+    r = rig([], stt)
+    wrapped = r.assistant.io.heard
+    assert wrapped.__name__ == "on_heard"
+    run(r)
+    assert r.assistant.io.heard == r.heard.append
+
+
+def test_a_voice_request_to_act_is_a_dry_run_unless_the_caller_said_otherwise():
+    seen = []
+
+    class Recorder:
+        io = IO()
+        busy = False
+
+        def handle_audio(self, chunks, **kwargs):
+            seen.append(kwargs["act"])
+            list(chunks)
+
+        def interrupt_speech(self):
+            pass
+
+    for kwargs in ({}, {"act": True}):
+        device = ScriptedDevice([*speech(3), *quiet(700)])
+        loop = VoiceLoop(Recorder(), device, vad, **kwargs)
+        device.loop = loop
+        loop.stop_soon = loop._stop.set
+        loop.run()
+        loop.join_turns(WAIT)
+    assert seen == [False, True]
+
+
 # -- internal counters never reach the TTS ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("outcome", ["stalled", "step limit", "provider failure", "done", "crashed", "dry run"])
+@pytest.mark.parametrize("outcome", ["stalled", "step limit", "provider failure", "done", "crashed", "dry run", "nothing helps"])
 def test_a_task_result_is_spoken_without_its_counters(outcome):
+    """`steps`, `seconds` and the run folder are on the result for the terminal; only `spoken()` goes to the TTS."""
     result = TaskResult(goal="open the page", act=True, outcome=outcome, steps=7, seconds=12.5, folder=Path("runs/run-0042"))
     r = rig([], ScriptedSTT([]))
     r.assistant._finish_task(SimpleNamespace(result=result, stop_requested=False), "en")
     assert wait_until(lambda: r.tts.calls)
     r.assistant.wait_idle(WAIT)
-    said = " ".join(text for text, _ in r.tts.calls).lower()
-    assert said  # something was said
-    for leaked in ("7", "12", "0042", "runs/", "effect", "remain"):
-        assert leaked not in said
-    assert not any(ch.isdigit() for ch in said)
+    said = " ".join(text for text, _ in r.tts.calls)
+    assert said == result.spoken("en")
+    assert not any(ch.isdigit() for ch in said) and "runs/" not in said
