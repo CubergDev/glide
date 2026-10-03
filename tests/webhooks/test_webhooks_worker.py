@@ -506,6 +506,15 @@ def test_terminal_approver_needs_an_explicit_yes_on_a_terminal():
     assert worker.TerminalApprover(eof, interactive=True, out=out).approve(task()) is False
 
 
+def test_terminal_approver_shows_the_goal_without_terminal_control_characters():
+    printed = []
+    out = SimpleNamespace(write=printed.append, flush=lambda: None)
+    hostile = call("agent.task.requested", goal="Open the report\x1b[2K\rharmless\x1b]0;title\x07", key="hostile")
+    worker.TerminalApprover(lambda prompt: "n", interactive=True, out=out).approve(hostile)
+    text = "".join(printed)
+    assert "Open the report" in text and "\x1b" not in text and "\r" not in text and "\x07" not in text
+
+
 # -- transport and command line -------------------------------------------------------------------------------------
 
 

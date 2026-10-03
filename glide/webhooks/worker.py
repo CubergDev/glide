@@ -277,7 +277,10 @@ class TerminalApprover:
     def approve(self, call: AgentCall) -> bool:
         if not self.interactive:
             return False
-        print(f"Webhook {call.operation} from {call.source} wants to use this computer.\nGoal: {call.goal}", file=self.out)
+        # The goal and source come from the sender: strip escape and carriage-return characters so they cannot
+        # redraw or overwrite what the person is about to approve.
+        goal, source = (_clip(text, 4096).replace("\r", " ") for text in (call.goal, call.source))
+        print(f"Webhook {call.operation} from {source} wants to use this computer.\nGoal: {goal}", file=self.out)
         try:
             return self.ask("Allow this one run? [y/N] ").strip().lower() in {"y", "yes"}
         except EOFError:
