@@ -17,6 +17,7 @@ DEFAULT_HANDOFFS = 10  # each one is a call to the answer model, a few seconds a
 DEFAULT_WRITER_MODEL = "claude-haiku-4-5"
 DEFAULT_ANSWER_MODEL = "claude-sonnet-5"  # runs only when the classifier stops, on a screenshot: worth a stronger reader
 DEFAULT_BROWSER = "Google Chrome"
+DEFAULT_SEARCH_URL = "https://www.google.com/"  # a site address to start a search from, not an API endpoint
 ANTHROPIC_HOST = "api.anthropic.com"
 WRITER_APIS = ("anthropic", "openai")
 
@@ -113,3 +114,8 @@ def answer_reasoning() -> str | None:
 
 def email() -> str | None:
     return os.environ.get("CLICKER_EMAIL") or None
+
+
+def search_url() -> str:
+    """Where a search starts when the task names no site: a destination preference, not a catalog of commands."""
+    return os.environ.get("GLIDE_SEARCH_URL", "").strip() or DEFAULT_SEARCH_URL
