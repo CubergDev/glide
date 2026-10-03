@@ -1,0 +1,18 @@
+# Secret-scan config for gitleaks (CI job "secret-scan"). The vendor-specific rules (cloud, GitHub, Anthropic, OpenAI,
+# private keys, ...) stay fully on everywhere.
+#
+# Only the noisy generic-api-key rule is relaxed, and only for obvious placeholders in tests: the match must be in
+# tests/ AND the secret must contain a marker such as 0123456789, abcdef, secret or test. A real random key in tests/
+# has none of those, so it is still reported. Tests are offline and never hold a real key (AGENTS.md).
+#
+# Needs gitleaks 8.25 or newer ([[allowlists]]). The CI job pins GITLEAKS_VERSION; keep it at or above that.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Placeholder keys in offline test fixtures"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/''']
+regexes = ['''(?i)(0123456789|1234567890|9876543210|abcdef|abc123|secret|test|fake|dummy|example)''']
