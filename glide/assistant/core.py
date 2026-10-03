@@ -15,7 +15,14 @@ One request, start to finish:
 4. A computer task runs on a worker thread (tasks.py), as a dry run unless the caller passes
    `act=True`, and its result is spoken when it ends.
 
-`stop()` is safe from any thread at any moment: it cancels the answer in flight, the speech, and the task.
+Interruption is real, not only a dropped result. Each request owns a `RunControl` (glide/computer/control.py),
+the one cancel token of the whole path: the providers called for the request (the router, the streamed answer,
+speech recognition) run under it, so cancelling it closes their connections and returns the caller at once
+(providers/chain.py); a computer task has its own control, which `stop()` cancels the same way; and the voice
+has one, which is cut with the speech. A cancel is silent: it is never shown as an error and never spoken.
+
+`stop()` is safe from any thread at any moment: it cancels every request in flight, the speech, and the task.
+`interrupt_speech()` is the barge-in hook, called by whatever hears the person start to talk.
 """
 
 from __future__ import annotations
@@ -27,9 +34,10 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..computer.control import RunControl, controlled
 from ..providers.base import Audio
 from ..providers.config import ConfigError
-from ..providers.errors import ProviderError
+from ..providers.errors import CANCELLED, ProviderError
 from .audio_io import SAMPLE_RATE, Player, rms
 from .phrases import say
 from .router import Route, Router, answer_messages, fast_path, is_stop
@@ -39,6 +47,7 @@ from .tasks import DEFAULT_RUNS_DIR, ComputerTask, TaskBusy, TaskResult, TaskRun
 HISTORY_CHARS = 400  # how much of one earlier message the router and the answer are shown
 ANSWER_TOKENS = 1024  # room for a reasoning model's thinking as well as a short spoken answer (see router.ROUTER_TOKENS)
 ANSWER_TEMPERATURE = 0.3
+UNWIND_S = 2.0  # how long a request waits for the task whose question it dropped to end, so that its own task can start
 MIN_SPEECH_RMS = 150.0  # audio quieter than this overall is silence: an empty transcript is believed, not retried
 
 
@@ -82,12 +91,53 @@ class Reply:
     timings: dict[str, float] = field(default_factory=dict)
 
 
-class _Turn:
-    """One request's cancel flag, so a stop or a newer request ends the answer still being written."""
+STOPPED = "stopped by the user"
+SUPERSEDED = "a newer request replaced it"
+SPEECH_CUT = "speech cut"
 
-    def __init__(self) -> None:
-        self.cancel = threading.Event()
+
+class _Turn:
+    """One request, from the moment it is taken up until its answer is done.
+
+    Its `control` is the cancel token for everything done on its behalf. A stop, or a newer request, cancels it:
+    the provider calls in flight are closed and return, and nothing the request has not yet said is said.
+    `hearing` is true while speech is still being transcribed, so a barge-in that must not drop the person's
+    earlier, still unfinished request can tell it from an answer being written.
+    """
+
+    def __init__(self, *, hearing: bool = False) -> None:
+        self.control = RunControl()
+        self.hearing = hearing
         self.parts: list[str] = []
+
+    @property
+    def cancelled(self) -> bool:
+        return self.control.cancelled.is_set()
+
+
+class _Voice:
+    """The TTS as the speaker uses it, with the connection of the sentence being made under a control of its own.
+
+    `cut()` cancels that control, which closes the voice provider's connection and releases the thread waiting on
+    it, and gives the sentences said afterwards a fresh one. Sentences are made on the speaker's thread, which
+    has no control of its own, so the control is made current here, where each sentence's stream is created.
+    """
+
+    def __init__(self, tts) -> None:
+        self._tts = tts
+        self._lock = threading.Lock()
+        self._control = RunControl()
+
+    def stream(self, text, **options):
+        with self._lock:
+            control = self._control
+        with controlled(control):
+            return self._tts.stream(text, **options)
+
+    def cut(self) -> None:
+        with self._lock:
+            old, self._control = self._control, RunControl()
+        old.cancel(SPEECH_CUT)
 
 
 class Assistant:
@@ -99,6 +149,7 @@ class Assistant:
         runs_dir: Path = DEFAULT_RUNS_DIR,
         history_turns: int = 4,
         clock: Callable[[], float] = time.monotonic,
+        clarify: bool = False,
     ) -> None:
         self._config = config
         self.io = io or IO()
@@ -106,10 +157,12 @@ class Assistant:
         self._tasks = TaskRunner(config, runs_dir)
         self._history: deque[dict] = deque(maxlen=max(0, history_turns) * 2)
         self._lock = threading.RLock()
-        self._turn: _Turn | None = None
+        self._live: set[_Turn] = set()  # the requests being heard or answered
         self._epoch = 0  # bumped by every stop and barge-in: a request begun before one never answers
         self._speaker: Speaker | None = None
+        self._voice: _Voice | None = None
         self._speech_off = False
+        self._clarify = clarify  # whether a computer task may put a question to the user (see `answer_pending`)
 
     def __repr__(self) -> str:
         return f"<Assistant speaking={self.io.player is not None} task_running={self._tasks.running}>"
@@ -122,10 +175,15 @@ class Assistant:
         With `wait=True` a computer task has ended when this returns; with `wait=False` it runs on, and its
         result is shown and spoken when it ends. Speech of an answer is always asynchronous: this returns
         when the text is complete, and `wait_idle` waits for the voice.
+
+        A request that is cancelled (a stop, or a newer request) while it is being answered returns
+        `Reply("none")` and says nothing, not even that something failed.
         """
         return self._handle(text, act, wait, hint_language, self._epoch)
 
-    def _handle(self, text: str, act: bool, wait: bool, hint_language: str | None, epoch: int) -> Reply:
+    def _handle(
+        self, text: str, act: bool, wait: bool, hint_language: str | None, epoch: int, turn: _Turn | None = None
+    ) -> Reply:
         started = self._clock()
         text = " ".join(text.split())
         if not text:
@@ -134,9 +192,19 @@ class Assistant:
             self.stop()
             return Reply("stop", timings={"total_s": self._clock() - started})
 
-        turn = self._begin(epoch)
-        if turn is None:  # a stop or a barge-in came after this request was made: it is not wanted any more
-            return Reply("none")
+        own = turn is None
+        if own:
+            turn = self._enter(epoch, hearing=False)
+        try:
+            if turn is None or not self._begin(turn):  # a stop or a barge-in came after this request was made
+                return Reply("none")
+            with controlled(turn.control):
+                return self._respond(turn, text, act, wait, hint_language, started)
+        finally:
+            if own and turn is not None:
+                self._leave(turn)
+
+    def _respond(self, turn: _Turn, text: str, act: bool, wait: bool, hint_language: str | None, started: float) -> Reply:
         speaker = self._speaker_or_none()
         if speaker is not None:
             speaker.mark()
@@ -148,7 +216,7 @@ class Assistant:
 
         route = Router(llm, clock=self._clock).route(text, self._messages())
         reply.timings["route_s"] = route.latency_s
-        if route.source == "fallback":  # a request to act becomes an answer: never silently
+        if route.source == "fallback" and not turn.cancelled:  # a request to act becomes an answer: never silently
             why = route.error.kind if route.error is not None else "unreadable reply"
             self.io.warn(f"could not route the request ({why}): answering instead of acting")
         if route.route == "stop":  # the model heard a stop that the fast path did not
@@ -182,10 +250,21 @@ class Assistant:
         audio was not silent, the audio that was kept is sent once more as a single request, because a
         short command is the one case a streaming transcriber is known to get wrong.
 
-        Speech that was begun before a stop or a barge-in is transcribed and then dropped, not answered:
-        whoever interrupted wants the newer request.
+        Speech that was begun before a stop or a barge-in is cancelled, even in the middle of being transcribed
+        (the connection to the transcriber is closed at once), and is dropped, not answered: whoever interrupted
+        wants the newer request. Call `interrupt_speech()` BEFORE starting the speech that interrupts.
         """
         epoch = self._epoch
+        turn = self._enter(epoch, hearing=True)
+        if turn is None:
+            return Reply("none")
+        try:
+            with controlled(turn.control):
+                return self._hear(turn, chunks, sample_rate, language, act, wait)
+        finally:
+            self._leave(turn)
+
+    def _hear(self, turn: _Turn, chunks: Iterable[bytes], sample_rate: int, language: str | None, act: bool, wait: bool) -> Reply:
         try:
             stt = self._config.stt()
         except ConfigError as exc:
@@ -218,6 +297,8 @@ class Assistant:
 
         heard = final.text.strip() if final is not None else ""
         spoken_language = final.language if final is not None else None
+        if turn.cancelled:  # stopped or replaced while it was being heard: no fallback request, no warning, no answer
+            return Reply("none", heard=heard)
         if not heard:
             for chunk in source:  # the stream may have died early: the batch request needs the whole utterance
                 captured.extend(chunk)
@@ -227,48 +308,58 @@ class Assistant:
                     heard, spoken_language, error = batch.text.strip(), batch.language, None
                 except ProviderError as exc:
                     error = error or exc
+        if turn.cancelled:
+            return Reply("none", heard=heard)
         if not heard:
             reply = Reply("none", heard="")
             if error is not None:
                 reply.error = self._scrub(str(error))
                 self.io.warn(f"speech recognition failed: {reply.error}")
             return reply
-        if epoch != self._epoch:  # the person barged in or said stop while this was being heard: drop it, say nothing
-            return Reply("none", heard=heard)
         self.io.heard(heard)
-        reply = self._handle(heard, act, wait, spoken_language or language, epoch)
+        reply = self._handle(heard, act, wait, spoken_language or language, self._epoch, turn)
         reply.heard = heard
         return reply
 
     # -- control --------------------------------------------------------------------------------
 
     def stop(self) -> bool:
-        """Stop everything: the answer being written, the speech, and the computer task. True if a task was running.
+        """Stop everything: every request in flight, the speech, and the computer task. True if a task was running.
 
-        Safe from any thread. A task stops before its next action; a request already sent to a model
-        finishes first, since a network call cannot be recalled.
+        Safe from any thread. The connection of each provider call in flight is closed and its caller returns at
+        once; an answer that still arrives is dropped. A task stops before its next action, and the model call it
+        is waiting on is closed the same way. An action that was already sent cannot be taken back.
         """
         with self._lock:
             self._epoch += 1
-            if self._turn is not None:
-                self._turn.cancel.set()
-        had_task = self._tasks.stop()  # the flag is set before the speech is cut, so a result cannot slip out after it
+            self._cancel_turns(STOPPED)
+        had_task = self._tasks.stop()  # the turns are cancelled before the speech is cut, so a result cannot slip out after it
         self._cancel_speech()
         return had_task
 
-    def interrupt_speech(self) -> None:
-        """Barge-in: cut the voice and the answer being written now, and drop any request still being heard or
-        routed. A running task is left alone."""
+    def interrupt_speech(self, *, drop_pending: bool = True) -> None:
+        """Barge-in: the person began to talk over Glide. Cut the voice and the answer being written now, closing
+        the connections that were making them.
+
+        With `drop_pending` (the default) any request still being heard or routed is cancelled as well, so a late
+        answer to it can never be spoken over the person; the transcription connection is closed at once. Pass
+        False when an earlier request of the person's is still waiting for its transcript: that one is wanted.
+        A running task is left alone (`stop()` stops it).
+
+        Call it BEFORE starting the speech that interrupts: a request begun earlier is cancelled by it, one begun
+        later is not.
+        """
         with self._lock:
-            self._epoch += 1
-        self._silence()
+            if drop_pending:
+                self._epoch += 1
+                self._cancel_turns(STOPPED)
+            else:
+                self._cancel_turns(STOPPED, hearing=False)
+        self._cancel_speech()
 
     def _silence(self) -> None:
-        """Cut the voice and the answer being written, without dropping the request being made right now."""
-        with self._lock:
-            if self._turn is not None:
-                self._turn.cancel.set()
-        self._cancel_speech()
+        """Cut the voice and the answers being written, without dropping a request that is still being heard."""
+        self.interrupt_speech(drop_pending=False)
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Block until everything said so far has been played. False if `timeout` ran out first."""
@@ -282,6 +373,22 @@ class Assistant:
     @property
     def busy(self) -> bool:
         return self._tasks.running
+
+    @property
+    def pending_question(self) -> str | None:
+        """The question a running task has put to the user and is waiting on, or None. Only with `clarify=True`."""
+        task = self._tasks.current
+        return task.pending_question if task is not None else None
+
+    def answer_pending(self, text: str) -> bool:
+        """Give `text` to the task waiting on a question: the only way a question is ever answered. False when none is.
+
+        A request made through `handle_text` or `handle_audio` is never taken for the answer, whatever it says: it
+        is a new request, and it drops the question (the task is stopped, and the question is no longer spoken). The
+        front end decides which of the two a line of text or an utterance is.
+        """
+        task = self._tasks.current
+        return task.answer(text) if task is not None else False
 
     def close(self) -> None:
         self.stop()
@@ -300,13 +407,14 @@ class Assistant:
             else:
                 language = self._stream(turn, llm, text, language, reply, started)
         except ProviderError as exc:
-            detail = self._scrub(str(exc))
-            self._failed(reply, say("no_llm", language), detail, language, speak=not turn.parts)
+            if not turn.cancelled:  # an interrupted answer is not a failure: nothing is shown or said about it
+                detail = self._scrub(str(exc))
+                self._failed(reply, say("no_llm", language), detail, language, speak=not turn.parts)
         except ConfigError as exc:
             self._failed(reply, say("no_llm", language), self._scrub(str(exc)), language, speak=True)
         reply.text = " ".join(turn.parts)
         reply.language = language
-        if reply.text and not turn.cancel.is_set():
+        if reply.text and not turn.cancelled:
             self._remember(text, reply.text)
 
     def _stream(self, turn: _Turn, llm, text: str, language: str | None, reply: Reply, started: float) -> str | None:
@@ -315,7 +423,7 @@ class Assistant:
         splitter = SentenceSplitter()
         try:
             for delta in stream:
-                if turn.cancel.is_set():
+                if turn.cancelled:
                     return language
                 reply.timings.setdefault("first_token_s", self._clock() - started)
                 for sentence in splitter.feed(delta):
@@ -331,14 +439,14 @@ class Assistant:
     def _emit(self, turn: _Turn, sentence: str, language: str | None, reply: Reply, started: float) -> str:
         """Show a sentence and hand it to the speaker. Returns the language, decided by the first sentence."""
         language = language or detect_language(sentence)
-        if turn.cancel.is_set():
+        if turn.cancelled:
             return language
         turn.parts.append(sentence)
         reply.timings.setdefault("first_sentence_s", self._clock() - started)
         self.io.show(sentence)
         speaker = self._speaker_or_none()
         if speaker is not None:
-            speaker.say(sentence, language=language, only_if=lambda: not turn.cancel.is_set())
+            speaker.say(sentence, language=language, only_if=lambda: not turn.cancelled)
         return language
 
     # -- computer tasks -------------------------------------------------------------------------
@@ -354,10 +462,17 @@ class Assistant:
             reply.text = " ".join(turn.parts)
         try:
             with self._lock:  # checked and started under the lock `stop` takes, so a stop cannot fall between the two
-                if turn.cancel.is_set():
+                if turn.cancelled:
                     reply.route = "stop"
                     return
-                task = self._tasks.start(goal, act=act, on_done=lambda finished: self._finish_task(finished, language))
+                task = self._tasks.start(
+                    goal,
+                    act=act,
+                    on_done=lambda finished: self._finish_task(finished, language),
+                    on_question=(lambda finished, question: self._ask_user(finished, question, language))
+                    if self._clarify
+                    else None,
+                )
         except TaskBusy:
             self._failed(reply, say("busy", language), "a task is already running", language, speak=True)
             return
@@ -365,6 +480,14 @@ class Assistant:
         self._remember(text, route.reply or f"(started a computer task: {goal})")
         if wait:
             task.wait()
+
+    def _ask_user(self, task: ComputerTask, question: str, language: str | None) -> None:
+        """A task has a question for the user, on the task's thread: show it and say it. The task waits for `answer_pending`."""
+        self.io.show(question)
+        speaker = self._speaker_or_none()
+        if speaker is not None:
+            for sentence in split_sentences(question):
+                speaker.say(sentence, language=language or detect_language(sentence), only_if=lambda: not task.stop_requested)
 
     def _finish_task(self, task: ComputerTask, language: str | None) -> None:
         """A task ended, on its worker thread: say so, unless the user stopped it."""
@@ -396,19 +519,45 @@ class Assistant:
 
     # -- plumbing -------------------------------------------------------------------------------
 
-    def _begin(self, epoch: int) -> _Turn | None:
-        """A new request supersedes the last: its answer stops being written and its speech is cut.
-
-        None when a stop or barge-in has happened since `epoch` was read, which is when the request was made.
-        """
+    def _enter(self, epoch: int, *, hearing: bool) -> _Turn | None:
+        """Take up a request: it can now be cancelled by a stop or a barge-in. None when one has happened since `epoch`
+        was read, which is when the request was made."""
         with self._lock:
             if epoch != self._epoch:
                 return None
-            if self._turn is not None:
-                self._turn.cancel.set()
-            self._turn = turn = _Turn()
+            turn = _Turn(hearing=hearing)
+            self._live.add(turn)
+            return turn
+
+    def _leave(self, turn: _Turn) -> None:
+        with self._lock:
+            self._live.discard(turn)
+
+    def _cancel_turns(self, reason: str, *, hearing: bool = True, keep: _Turn | None = None) -> None:
+        """Cancel the requests in flight (those still being heard too, unless `hearing` is False). Called with the lock held."""
+        for turn in tuple(self._live):
+            if turn is not keep and (hearing or not turn.hearing):
+                turn.control.cancel(reason)
+
+    def _begin(self, turn: _Turn) -> bool:
+        """A new request supersedes the answers before it: they stop being written and their speech is cut. A question
+        a task is waiting on is dropped with them: this request is not its answer. False if `turn` was cancelled first.
+
+        A request still being heard is not touched: the person said it and wants it answered too."""
+        dropped = None
+        with self._lock:
+            if turn.cancelled:
+                return False
+            turn.hearing = False
+            self._cancel_turns(SUPERSEDED, hearing=False, keep=turn)
+            waiting = self._tasks.current
+            if waiting is not None and waiting.pending_question is not None:
+                waiting.stop()
+                dropped = waiting
         self._cancel_speech()
-        return turn
+        if dropped is not None:
+            dropped.wait(UNWIND_S)  # a correction that is itself a task ("open Safari instead") must find the machine free
+        return True
 
     def _messages(self) -> list[dict]:
         with self._lock:
@@ -431,16 +580,23 @@ class Assistant:
                     self._speech_off = True
                     self.io.warn(f"speech is off: {self._scrub(str(exc))}")
                     return None
-                self._speaker = Speaker(tts, self.io.player, on_error=self._speech_failed)
+                self._voice = _Voice(tts)
+                self._speaker = Speaker(self._voice, self.io.player, on_error=self._speech_failed)
             return self._speaker
 
     def _cancel_speech(self) -> None:
+        """Silence now. The lane is marked dead and its queue drained BEFORE the sentence being made is cut: the thread
+        that the cut wakes then finds a dead lane and ends, instead of starting the next queued sentence."""
         if self._speaker is not None:
             self._speaker.cancel()
         elif self.io.player is not None:
             self.io.player.cancel()
+        if self._voice is not None:
+            self._voice.cut()  # the sentence being made: its connection is closed and its thread released
 
     def _speech_failed(self, exc: BaseException) -> None:
+        if isinstance(exc, ProviderError) and exc.kind == CANCELLED:
+            return  # the voice was cut on purpose
         self.io.warn(f"speech failed: {self._scrub(str(exc))}")
 
     def _failed(self, reply: Reply, sentence: str, detail: str, language: str | None, *, speak: bool) -> Reply:

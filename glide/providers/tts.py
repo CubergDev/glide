@@ -22,12 +22,14 @@ import threading
 import time
 import wave
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
 import httpx
 
+from . import interrupt
 from .base import ProviderSpec, SpeechAudio, TTSClient
 from .chain import Chain
 from .errors import ProviderError, from_exception, from_status, snippet
@@ -138,6 +140,7 @@ def _provider_errors(name: str) -> Iterator[None]:
     try:
         yield
     except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as exc:
+        interrupt.check(name)  # a connection closed by a cancel is not a transport fault
         error = from_exception(exc, provider=name)
         raise error from None
 
@@ -256,7 +259,13 @@ class _HTTPStreamTTS:
         request = self._request(text, voice, language)
         carry = b""
         produced = False
-        with _provider_errors(self.name), self._http.stream("POST", timeout=timeout, **request) as response:
+        call = interrupt.Call(self._http)
+        with (
+            _provider_errors(self.name),
+            interrupt.closing(call.abort, self.name),  # until the first byte there is no response to close
+            self._http.stream("POST", timeout=timeout, extensions=call.extensions, **request) as response,
+            interrupt.closing(partial(interrupt.abort_response, response), self.name),
+        ):
             if response.status_code != 200:
                 raise self._status_error(response, text)
             for data in response.iter_bytes():
@@ -266,6 +275,7 @@ class _HTTPStreamTTS:
                 if data:
                     produced = True
                     yield data
+        interrupt.check(self.name)  # a body that a cancel cut short ends quietly: it is not a finished sentence
         if not produced:
             raise ProviderError(f"{self.name} returned no audio", kind="content", provider=self.name)
 

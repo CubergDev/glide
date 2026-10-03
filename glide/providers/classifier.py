@@ -73,9 +73,11 @@ from typesafe_sdk import (
     constants,
 )
 
+from glide.computer.control import checkpoint
+
 from .base import ChatResult, ProviderSpec, Usage
 from .chain import Chain, ChainPolicy, Slot, SwitchEvent
-from .errors import FAILOVER_KINDS, AllProvidersFailed, ProviderError, from_status, snippet
+from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, from_status, snippet
 
 TOP_N = 3  # options each Choice is asked to rank
 ROLE = "classifier"
@@ -643,7 +645,12 @@ class ChainedClassifier:
             except TypeSafeError as e:  # a bare SDK client in a slot: still a provider failure, not a bug
                 raise typesafe_error(e, slot.name) from None
 
-        name, reply = self.chain.call(ask, hedge=True)
+        try:
+            name, reply = self.chain.call(ask, hedge=True)
+        except ProviderError as e:
+            if e.kind == CANCELLED:
+                checkpoint(wait=False)  # the run loop speaks `Abort`, with the reason the control was cancelled for
+            raise
         self.last_slot = name
         return reply
 

@@ -29,12 +29,13 @@ import time
 import wave
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
+from functools import partial
 from urllib.parse import urlencode
 
 import httpx
 import websocket
 
-from . import errors
+from . import errors, interrupt
 from .base import Audio, ProviderSpec, STTClient, Transcript
 from .chain import Chain
 from .errors import ProviderError, snippet
@@ -330,15 +331,26 @@ class _HTTPAdapter:
         reply: dict | None = None
         started = time.monotonic()
         try:
-            response = self._http.post(
+            call = interrupt.Call(self._http)
+            request = self._http.build_request(
+                "POST",
                 url,
                 headers=headers,
                 data=data,
                 files={"file": ("audio.wav", wav, "audio/wav")},
                 timeout=timeout or self._timeout_s,
+                extensions=call.extensions,
             )
-            response.raise_for_status()
+            with interrupt.closing(call.abort, self.name):  # the answer is awaited here, before any header
+                response = self._http.send(request, stream=True)  # streamed, so a cancel can close the body too
+            try:
+                with interrupt.closing(partial(interrupt.abort_response, response), self.name):
+                    response.read()
+                    response.raise_for_status()
+            finally:
+                response.close()
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:  # ValueError: a base_url httpx cannot make a request of
+            interrupt.check(self.name)  # a connection closed by a cancel is not a transport fault
             failure = errors.from_exception(e, provider=self.name)
         if failure is None:
             try:
@@ -459,23 +471,26 @@ class ElevenLabsSTT(_HTTPAdapter):
         )
         run = _Run(self, self._open(url), sample_rate=sample_rate, language=language)
         try:
-            sent = 0
-            for pcm in _frames(chunks, sample_rate):
-                run.send(audio_message(pcm, sample_rate))
-                sent += len(pcm)
-                yield from run.pending()
-                if run.done:
-                    break
-            if not run.done:
-                if sent:
-                    run.commit_at = time.monotonic()  # before the send: the reply can be faster than the next line
-                    run.send(commit_message(sample_rate))
-                    yield from run.wait()
-                else:
-                    run.done = True  # no audio, so nothing to commit and nothing to wait for
-            final = run.final()
-            run.close()
-            yield final
+            with interrupt.closing(
+                run.abort, self.name
+            ):  # a stop closes the socket, which wakes the reader and the waiting caller
+                sent = 0
+                for pcm in _frames(chunks, sample_rate):
+                    run.send(audio_message(pcm, sample_rate))
+                    sent += len(pcm)
+                    yield from run.pending()
+                    if run.done:
+                        break
+                if not run.done:
+                    if sent:
+                        run.commit_at = time.monotonic()  # before the send: the reply can be faster than the next line
+                        run.send(commit_message(sample_rate))
+                        yield from run.wait()
+                    else:
+                        run.done = True  # no audio, so nothing to commit and nothing to wait for
+                final = run.final()
+                run.close()
+                yield final
         finally:
             run.close()
 
@@ -611,6 +626,7 @@ class _Run:
         try:
             self.ws.send(message)
         except Exception as e:  # websocket-client raises its own classes, OSError and ssl errors
+            interrupt.check(self.client.name)  # a socket closed by a cancel is not a transport fault
             failure = self._why_broken(e)
         if failure is not None:
             raise failure
@@ -664,6 +680,8 @@ class _Run:
 
     def _handle(self, item: object) -> Transcript | None:
         name = self.client.name
+        if isinstance(item, (_Closed, _Broken)):
+            interrupt.check(name)  # the socket was closed by a cancel, not by the server
         if isinstance(item, _Closed):
             raise self.client._error(
                 ProviderError(f"{name} closed the connection before the transcript was complete", kind="transport", provider=name)
@@ -721,6 +739,14 @@ class _Run:
         """The whole utterance. Its latency is measured from the end of the audio, which is what a user waits for."""
         self.asm.partial = ""
         return self._transcript(self.asm.text, partial=False)
+
+    def abort(self) -> None:
+        """Cut the socket now, from any thread, and wake whoever waits on it. `close` still has to be called."""
+        with contextlib.suppress(Exception):
+            self.ws.abort()  # shuts the socket down, which a read blocked on it does notice
+        with contextlib.suppress(Exception):
+            self.ws.close(timeout=0)
+        self.inbox.put(_Closed())
 
     def close(self) -> None:
         if self._closed:

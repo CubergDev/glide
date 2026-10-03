@@ -14,6 +14,12 @@ What it adds over the older stop hook, and why it is adopted
   unknown", and stops. `in_flight` is cleared only by a fresh observation (`action_checked`).
 - `cancel()` runs the callbacks registered with `closing_on_cancel`, so a blocked network read (a model
   request, a CDP websocket) is closed instead of being waited out.
+- `interruptible(call)` runs a blocking call on a helper thread and returns the moment the control is cancelled,
+  whether or not the thread can be woken. A connection that is already open is closed by its own
+  `closing_on_cancel` callback; a request that is still waiting for its first byte cannot be closed from
+  outside, so its thread is left to end on its own deadline and its answer is thrown away. The provider chains
+  (glide/providers/chain.py) call every provider through it, so one cancel reaches every model, speech and
+  classifier call made under the control, and no adapter has to know about threads.
 
 How it composes with `assistant.tasks.abort_on`
 ------------------------------------------------
@@ -33,6 +39,7 @@ from __future__ import annotations
 import contextvars
 import threading
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 
@@ -105,6 +112,21 @@ class RunControl:
             with self._lock:
                 self._callbacks.discard(close)
 
+    def interruptible[R](self, call: Callable[[], R]) -> R:
+        """`call()`, run on a helper thread, or `Abort` the moment this control is cancelled, whichever is first.
+
+        An answer that arrives after the cancel is dropped, never returned. The helper is a daemon thread that
+        sees this control as the current one, so what it opens can register its own `closing_on_cancel`. It is
+        abandoned, not killed, when the cancel wins: it ends when its connection closes or its deadline passes.
+        """
+        woke = threading.Event()
+        with self.closing_on_cancel(woke.set):  # Abort here if the control was cancelled already
+            outcome = spawn(call, self)
+            outcome.add_done_callback(lambda _: woke.set())
+            woke.wait()
+        self.check(wait=False)
+        return outcome.result()
+
     def event(self, kind: str, text: str = "", **kwargs) -> None:
         self.emit(TaskEvent(self.task_id, kind, text, **kwargs))
 
@@ -129,6 +151,41 @@ def controlled(control: RunControl | None) -> Iterator[None]:
         yield
     finally:
         _CURRENT.reset(token)
+
+
+def spawn[R](call: Callable[[], R], control: RunControl | None = None) -> Future[R]:
+    """Run `call()` on a daemon thread, under `control`, and return the Future of its outcome.
+
+    The context variables of the caller are copied, so code in the thread finds the same current control (or
+    `control`, when one is given) that code in the caller would. A daemon thread never delays the end of the process.
+    """
+    outcome: Future[R] = Future()
+    context = contextvars.copy_context()
+
+    def work() -> None:
+        try:
+            with controlled(control if control is not None else current_control()):
+                outcome.set_result(call())
+        except BaseException as error:  # whatever it was is handed to whoever waits
+            outcome.set_exception(error)
+
+    threading.Thread(target=context.run, args=(work,), name="glide-call", daemon=True).start()
+    return outcome
+
+
+@contextmanager
+def linked(parent: RunControl | None) -> Iterator[RunControl]:
+    """A fresh control that is cancelled whenever `parent` is, and can be cancelled alone without touching it.
+
+    That is what a request raced against another needs: the loser is cancelled by itself, the user's cancel
+    reaches both. Raises `Abort` at once if `parent` is cancelled already.
+    """
+    child = RunControl(parent.task_id if parent is not None else "")
+    if parent is None:
+        yield child
+        return
+    with parent.closing_on_cancel(lambda: child.cancel(parent.reason)):
+        yield child
 
 
 def dispatch(action, *args, **kwargs):
