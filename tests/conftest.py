@@ -73,6 +73,19 @@ from glide.computer.browser import cdp  # noqa: E402
 from glide.computer.models import Item, Screen  # noqa: E402
 
 
+def pytest_configure(config):
+    """Register every per-owner guard module `tests/guards_*.py` (an autouse fixture module each).
+
+    Loaded by path, since a name like `guards_core-run` is not an importable identifier. A new call that
+    reaches the machine gets its refusal in its owner's guards file, in the same change that adds the call.
+    """
+    for path in sorted(Path(__file__).parent.glob("guards_*.py")):
+        spec = importlib.util.spec_from_file_location("tests_" + path.stem.replace("-", "_"), path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config.pluginmanager.register(module, name=path.stem)
+
+
 @pytest.fixture(autouse=True)
 def no_real_machine(monkeypatch):
     """No test reaches the computer it runs on, whoever wrote it.
