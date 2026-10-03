@@ -32,10 +32,12 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import partial
 from urllib.parse import urlsplit
 
 import httpx
 
+from . import interrupt
 from .base import ChatResult, LLMClient, ProviderSpec, Usage
 from .chain import Chain
 from .errors import ProviderError, from_exception, from_status, snippet, spent
@@ -229,8 +231,10 @@ class OpenAICompatLLM:
             echo=_texts(prepared),
         )
         try:
-            raw = self._drain(response, deadline=started + limit)
+            with interrupt.closing(partial(interrupt.abort_response, response), self.name):
+                raw = self._drain(response, deadline=started + limit)
         except _HTTPX_ERRORS as e:
+            interrupt.check(self.name)  # a connection closed by a cancel is not a transport fault
             raise from_exception(e, provider=self.name) from e
         finally:
             response.close()
@@ -272,8 +276,10 @@ class OpenAICompatLLM:
             echo=_texts(prepared),
         )
         try:
-            yield from self._events(response, started, started + limit)
+            with interrupt.closing(partial(interrupt.abort_response, response), self.name):
+                yield from self._events(response, started, started + limit)
         except _HTTPX_ERRORS as e:
+            interrupt.check(self.name)
             raise from_exception(e, provider=self.name) from e
         finally:
             response.close()
@@ -330,15 +336,24 @@ class OpenAICompatLLM:
         error: ProviderError | None = None
         stale_retried = False
         for _ in range(MAX_ATTEMPTS):
+            interrupt.check(self.name)
             with self._lock:
                 mode = self._mode
+            call = interrupt.Call(self._client)
             request = self._client.build_request(
-                "POST", self._url, json=build(mode), headers=self._headers(stream), timeout=_timeout(limit)
+                "POST",
+                self._url,
+                json=build(mode),
+                headers=self._headers(stream),
+                timeout=_timeout(limit),
+                extensions=call.extensions,
             )
             sent = _clock()
             try:
-                response = self._client.send(request, stream=True)
+                with interrupt.closing(call.abort, self.name):  # a model's answer is awaited here, before any header
+                    response = self._client.send(request, stream=True)
             except _HTTPX_ERRORS as e:
+                interrupt.check(self.name)
                 # A kept-alive connection that the server had closed fails at once, and a fresh one will do. A reset
                 # after a long wait is the server giving up on a real request: asking again would break the timeout
                 # and may be billed twice.
@@ -347,9 +362,10 @@ class OpenAICompatLLM:
                     stale_retried = True
                     continue
                 raise from_exception(e, provider=self.name) from e
-            if response.is_success:
-                return response
-            text = _without(self._error_text(response, started + limit), echo)
+            with interrupt.closing(partial(interrupt.abort_response, response), self.name):  # a cancel while the answer is read
+                if response.is_success:
+                    return response
+                text = _without(self._error_text(response, started + limit), echo)
             error = self._status_error(response.status_code, text, response.headers)
             sent_format = schema is not None and mode.response_format != "none"
             if response.status_code in ADAPTABLE_STATUS and self._adapt(mode, text.lower(), sent_format):

@@ -11,7 +11,8 @@ from __future__ import annotations
 import httpx
 
 # Another provider may well succeed after these. A `bad_request` is our own fault (a malformed
-# request fails everywhere), so it is raised at once instead of being tried on the next provider.
+# request fails everywhere), and `cancelled` is the caller's own decision (the user interrupted): neither says
+# anything about the provider, so both are raised at once instead of being tried on the next one.
 FAILOVER_KINDS = frozenset({"auth", "rate_limit", "timeout", "transport", "server", "unsupported", "content"})
 SNIPPET = 300
 # What a provider says when the account behind a key has nothing left to spend. The words are the providers' own
@@ -19,6 +20,7 @@ SNIPPET = 300
 # seconds, and nothing the server said is worth repeating.
 SPENT_WORDS = ("credit_balance_exhausted", "insufficient_quota", "insufficient_credits", "billing_hard_limit_reached")
 SPENT_STATUS = 402
+CANCELLED = "cancelled"
 
 
 class ProviderError(Exception):
@@ -27,7 +29,8 @@ class ProviderError(Exception):
     `kind` is one of: auth (key refused), rate_limit, timeout, transport (could not connect or the
     connection dropped), server (5xx), unsupported (model or feature this provider lacks),
     content (a reply that could not be used, such as invalid JSON), bad_request (our fault),
-    stream (a stream died after it had started), exhausted (every provider failed).
+    stream (a stream died after it had started), exhausted (every provider failed), cancelled (the caller
+    interrupted the call: the connection was closed on purpose, which is not a fault of the provider).
     """
 
     def __init__(
@@ -48,6 +51,13 @@ class AllProvidersFailed(ProviderError):
         super().__init__(f"every {role} provider failed ({tried})", kind="exhausted")
         self.role = role
         self.errors = errors
+
+
+def cancelled(provider: str = "", reason: str = "") -> ProviderError:
+    """The error for a call that was interrupted. It is never retried, never failed over and never a SwitchEvent."""
+    return ProviderError(
+        f"{provider or 'provider'} call cancelled" + (f" ({reason})" if reason else ""), kind=CANCELLED, provider=provider
+    )
 
 
 def snippet(body: object) -> str:

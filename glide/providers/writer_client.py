@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from glide.computer.control import RunControl, checkpoint
+from glide.computer.control import RunControl, checkpoint, controlled, current_control
 from glide.computer.generation import (
     GenerationError,
     GenerationRequest,
@@ -115,14 +115,16 @@ class ChainWriter:
         checkpoint(cancel)
         label, facade = self._route(request.role)
         try:
-            result = facade.chat(
-                _messages(request),
-                max_tokens=request.max_tokens,
-                temperature=0.0,
-                schema=request.schema,
-                timeout=self._deadline(request, label),
-            )
+            with controlled(cancel if cancel is not None else current_control()):  # the chains cancel what is in flight
+                result = facade.chat(
+                    _messages(request),
+                    max_tokens=request.max_tokens,
+                    temperature=0.0,
+                    schema=request.schema,
+                    timeout=self._deadline(request, label),
+                )
         except ProviderError as error:
+            checkpoint(cancel, wait=False)  # a call a cancel cut short is an `Abort`, not an unavailable writer
             raise _generation_error(error) from error
         checkpoint(cancel)  # an answer that arrives after a cancel is dropped, never used
         return GenerationResult(

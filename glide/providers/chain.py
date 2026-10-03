@@ -9,21 +9,52 @@ fallback is never silent.
 
 The chain is transport-agnostic: it reacts only to `ProviderError` (see errors.py). Any other
 exception is a bug and propagates untouched, with no effect on a provider's health.
+
+Interruption. A call made while a `RunControl` is current (glide/computer/control.py) is cancellable: the
+provider is called through `control.interruptible`, so the caller gets a `ProviderError` of kind "cancelled" the
+moment the control is cancelled, however the provider is blocked, and whatever the provider raises after that
+(a closed connection reads as a transport error) is that same cancel. A cancel is not a provider fault: it is not
+retried, is never failed over to the next slot, leaves the slot's health alone and is never a `SwitchEvent`.
+A hedged call gives each racer its own control, linked to the caller's: the user's cancel reaches both, and the
+loser is cancelled alone when the winner answers, so its connection is closed instead of being left to finish.
 """
 
 from __future__ import annotations
 
 import contextlib
+import queue
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future
 from dataclasses import dataclass
+from functools import partial
 
-from .errors import FAILOVER_KINDS, AllProvidersFailed, ProviderError
+from glide.computer.control import RunControl, current_control, linked, spawn
+from glide.computer.models import Abort
+
+from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, cancelled
 
 ORDERS = ("priority", "latency")
+HEDGE_LOST = "another provider answered first"
+_END = object()
+
+
+def _begin[T, R](fn: Callable[[Slot[T]], Iterator[R]], slot: Slot[T]) -> Iterator[R]:
+    return iter(fn(slot))
+
+
+def _advance[R](items: Iterator[R], control: RunControl | None) -> R | object:
+    """The next item, or `_END`. When the control was cancelled while it was being made, the generator is closed here,
+    on the thread that ran it: the caller has gone and cannot close a generator that was still executing."""
+    item = next(items, _END)
+    if control is not None and control.cancelled.is_set():
+        close = getattr(items, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                close()
+    return item
 
 
 @dataclass(frozen=True)
@@ -153,9 +184,10 @@ class Chain[T]:
         errors: list[tuple[str, ProviderError]] = []
         if hedge and self.policy.hedge_after_s is not None and len(order) > 1:
             return self._hedged(fn, order, errors)
+        control = current_control()
         for i, slot in enumerate(order):
             try:
-                return self._attempt(fn, slot)
+                return self._attempt(fn, slot, control)
             except ProviderError as e:
                 errors.append((slot.name, e))
                 if e.kind not in self.policy.failover_kinds:
@@ -167,18 +199,25 @@ class Chain[T]:
         """Yield from `fn(slot)` on the first provider that produces an item.
 
         Failover happens only until the first item arrives. After that the caller has already used
-        what came before, so a failure is raised to it as a ProviderError of kind "stream".
+        what came before, so a failure is raised to it as a ProviderError of kind "stream". A cancel is
+        raised as it is, as "cancelled", at any point.
+
+        The control is the one current when this is called, not when the first item is asked for.
         """
+        return self._stream(fn, current_control())
+
+    def _stream[R](self, fn: Callable[[Slot[T]], Iterator[R]], control: RunControl | None) -> Iterator[R]:
         order = self._order()
         errors: list[tuple[str, ProviderError]] = []
         for i, slot in enumerate(order):
             started = self._clock()
+            items: Iterator[R] | None = None
             try:
-                items = iter(fn(slot))
-                first = next(items)
-            except StopIteration:
-                self._succeeded(slot.name, self._clock() - started)
-                return
+                items = self._step(slot, control, partial(_begin, fn, slot))
+                first = self._step(slot, control, partial(_advance, items, control))
+                if first is _END:
+                    self._succeeded(slot.name, self._clock() - started)
+                    return
             except ProviderError as e:
                 self._failed(slot.name, e)
                 errors.append((slot.name, e))
@@ -187,12 +226,22 @@ class Chain[T]:
                 self._emit(slot.name, order[i + 1].name if i + 1 < len(order) else None, e)
                 continue
             self._succeeded(slot.name, self._clock() - started)  # latency to the first item
-            yield first
             try:
-                yield from items
+                yield first
+                while (item := self._step(slot, control, partial(_advance, items, control))) is not _END:
+                    yield item
             except ProviderError as e:
+                if e.kind == CANCELLED:
+                    raise
                 self._failed(slot.name, e)
                 raise ProviderError(str(e), kind="stream", provider=e.provider or slot.name, status=e.status) from e
+            finally:
+                close = getattr(
+                    items, "close", None
+                )  # the consumer stopped early, or a cancel ended it: give the connection back
+                if close is not None:
+                    with contextlib.suppress(Exception):  # ValueError while an abandoned step is still running: it closes itself
+                        close()
             return
         raise AllProvidersFailed(self.role, errors)
 
@@ -217,54 +266,95 @@ class Chain[T]:
                 resting.sort(key=lambda s: s.name != self._pinned)
             return ready + resting
 
-    def _attempt[R](self, fn: Callable[[Slot[T]], R], slot: Slot[T]) -> R:
+    def _attempt[R](self, fn: Callable[[Slot[T]], R], slot: Slot[T], control: RunControl | None, *, hop: bool = True) -> R:
         started = self._clock()
         try:
-            result = fn(slot)
+            result = self._step(slot, control, lambda: fn(slot), hop=hop)
         except ProviderError as e:
             self._failed(slot.name, e)
             raise
         self._succeeded(slot.name, self._clock() - started)
         return result
 
-    def _hedged[R](self, fn: Callable[[Slot[T]], R], order: list[Slot[T]], errors: list[tuple[str, ProviderError]]) -> R:
-        pool = ThreadPoolExecutor(max_workers=len(order), thread_name_prefix=f"chain-{self.role}")
-        futures: dict[Future, Slot[T]] = {}
-        launched = 0
+    @staticmethod
+    def _step[R](slot: Slot[T], control: RunControl | None, call: Callable[[], R], *, hop: bool = True) -> R:
+        """One blocking step of a provider's work. With a control it ends the moment the control is cancelled,
+        and whatever the provider raised once that has happened is the cancel, not a fault of its own.
 
-        def launch() -> Future:
-            nonlocal launched
-            slot = order[launched]
-            launched += 1
-            future = pool.submit(self._attempt, fn, slot)
-            futures[future] = slot
-            return future
-
-        pending = {launch()}
+        `hop=False` is for a caller that is already on a thread of its own to abandon (a hedged racer)."""
+        if control is None:
+            return call()
         try:
-            while pending:
-                racing = launched < len(order)
-                done, pending = wait(pending, timeout=self.policy.hedge_after_s if racing else None, return_when=FIRST_COMPLETED)
-                if not done:
-                    waiting_on = ", ".join(futures[f].name for f in pending)
-                    self._emit_raw(waiting_on, order[launched].name, "slow", f"no answer in {self.policy.hedge_after_s}s")
-                    pending.add(launch())
-                    continue
-                for future in sorted(done, key=lambda f: f.exception() is not None):  # a success beats a failure
-                    slot = futures[future]
+            return control.interruptible(call) if hop else call()
+        except Abort:
+            raise cancelled(slot.name, control.reason) from None
+        except ProviderError as e:
+            if control.cancelled.is_set() and e.kind != CANCELLED:
+                raise cancelled(slot.name, control.reason) from None
+            raise
+
+    def _hedged[R](self, fn: Callable[[Slot[T]], R], order: list[Slot[T]], errors: list[tuple[str, ProviderError]]) -> R:
+        parent = current_control()
+        finished: queue.SimpleQueue[Future | None] = queue.SimpleQueue()  # an attempt that ended, or None: cancelled
+        racers: dict[Future, RunControl] = {}
+        slots: dict[Future, Slot[T]] = {}
+        launched = 0
+        try:
+            with contextlib.ExitStack() as links:
+                if parent is not None:
                     try:
-                        return future.result()
-                    except ProviderError as e:
-                        errors.append((slot.name, e))
-                        if e.kind not in self.policy.failover_kinds:
-                            raise
-                        self._emit(slot.name, order[launched].name if launched < len(order) else None, e)
-                if not pending and launched < len(order):
-                    pending.add(launch())
-            raise AllProvidersFailed(self.role, errors)
+                        links.enter_context(parent.closing_on_cancel(lambda: finished.put(None)))
+                    except Abort:
+                        raise cancelled(order[0].name, parent.reason) from None
+
+                def launch() -> Future:
+                    nonlocal launched
+                    slot = order[launched]
+                    launched += 1
+                    try:
+                        control = links.enter_context(linked(parent))
+                    except Abort:
+                        raise cancelled(slot.name, parent.reason if parent else "") from None
+                    future = spawn(lambda: self._attempt(fn, slot, control, hop=False), control)
+                    racers[future], slots[future] = control, slot
+                    future.add_done_callback(finished.put)
+                    return future
+
+                pending = {launch()}
+                while pending:
+                    racing = launched < len(order)
+                    try:
+                        first = finished.get(timeout=self.policy.hedge_after_s if racing else None)
+                    except queue.Empty:
+                        waiting_on = ", ".join(slots[f].name for f in pending)
+                        self._emit_raw(waiting_on, order[launched].name, "slow", f"no answer in {self.policy.hedge_after_s}s")
+                        pending.add(launch())
+                        continue
+                    batch = [first]
+                    while True:  # whatever else has ended by now is judged together: a success beats a failure
+                        try:
+                            batch.append(finished.get_nowait())
+                        except queue.Empty:
+                            break
+                    if None in batch:
+                        raise cancelled(order[0].name, parent.reason if parent else "")
+                    pending.difference_update(batch)
+                    for future in sorted(batch, key=lambda f: f.exception() is not None):
+                        slot = slots[future]
+                        try:
+                            return future.result()
+                        except ProviderError as e:
+                            errors.append((slot.name, e))
+                            if e.kind not in self.policy.failover_kinds:
+                                raise
+                            self._emit(slot.name, order[launched].name if launched < len(order) else None, e)
+                    if not pending and launched < len(order):
+                        pending.add(launch())
+                raise AllProvidersFailed(self.role, errors)
         finally:
-            # The slower request cannot be cancelled once sent; its answer is simply dropped.
-            pool.shutdown(wait=False, cancel_futures=True)
+            for future, control in racers.items():  # a racer that is still going has lost: close its connection
+                if not future.done():
+                    control.cancel(HEDGE_LOST)
 
     def _succeeded(self, name: str, latency: float) -> None:
         with self._lock:
