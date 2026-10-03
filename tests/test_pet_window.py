@@ -6,6 +6,7 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets")
 
+from pet_fakes import FakeCore, qt_application, window_factory
 from PySide6.QtCore import Qt
 from test_assistant_fakes import FakeLLM
 from test_pet_core import PetConfig, make_core
@@ -14,60 +15,14 @@ from glide.ui import pet
 from glide.ui.core import MAX_TEXT, PetEvent
 
 
-class FakeCore:
-    """What the window asks of `PetCore`, recorded."""
-
-    def __init__(self) -> None:
-        self.act = self.headset = self.record_content = False
-        self.silence_ms = 600
-        self.voice_active = self.busy = False
-        self.calls: list = []
-        self.queue: list[PetEvent] = []
-
-    def drain(self):
-        out, self.queue = self.queue, []
-        return out
-
-    def send_text(self, text):
-        self.calls.append(("text", text))
-        return True
-
-    def start_voice(self):
-        self.calls.append("start_voice")
-
-    def pause_voice(self):
-        self.calls.append("pause_voice")
-
-    def stop(self):
-        self.calls.append("stop")
-
-    def close(self):
-        self.calls.append("close")
-
-
 @pytest.fixture
-def qt_app(monkeypatch):
-    from PySide6.QtWidgets import QApplication
-
-    yield QApplication.instance() or QApplication([])
+def qt_app():
+    return qt_application()
 
 
 @pytest.fixture
 def pet_window(qt_app):
-    from glide.ui.pet_ui import PetWindow
-
-    made = []
-
-    def make(core=None, config=None):
-        window = PetWindow(core or FakeCore(), config or PetConfig(llm=FakeLLM()), poll=False)
-        made.append(window)
-        return window
-
-    yield make
-    for window in made:
-        window.timer.stop()
-        window.deleteLater()
-    qt_app.processEvents()
+    yield from window_factory(qt_app)
 
 
 def test_the_pet_starts_passive_with_actions_and_recording_off_and_no_indicator(pet_window):

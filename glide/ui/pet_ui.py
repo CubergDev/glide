@@ -9,17 +9,40 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QMenu, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QScrollArea,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
-from . import pet_overlay
+from ..assistant.point_ask import MAX_QUESTION
+from ..computer.config import writer_vision
+from . import pet, pet_overlay
 from .core import MAX_TEXT, PetCore, PetView, provider_lines
 from .raccoon.widget import VOICE, icon_send
 from .raccoon.widget import PetWindow as RaccoonWindow
 
 POLL_MS = 50  # how often the window drains the core's events
+DEFAULT_QUESTION = "What is this, and what should I do next?"
+CONTROL, POINT = 0, 1  # the activity selector
 
 BADGE_STYLE = "QLabel { background: %s; color: white; font-size: 11px; font-weight: bold; padding: 2px 6px; border-radius: 6px; }"
 REC_COLOR, ACT_COLOR = "#c62839", "#b36b00"
+
+
+def _image_allowed() -> bool:
+    try:
+        return writer_vision()
+    except ValueError:  # a malformed setting is not a yes
+        return False
 
 
 def _plain(label: QLabel, name: str) -> QLabel:
@@ -57,10 +80,15 @@ class PetWindow(RaccoonWindow):
             QWidget { background: #142233; color: #eff6ff; font-size: 13px; }
             QTextEdit { background: #0e1927; border: 1px solid #33465b; border-radius: 8px; padding: 8px; }
         """)
-        self.settings.resize(440, 560)
+        self.settings.resize(440, 640)
         layout = QVBoxLayout(self.settings)
         self.status = _plain(QLabel(self.view.status), "Session status")
         layout.addWidget(self.status)
+        # RaccoonWindow.mode is its COMPACT/CHAT/VOICE layout state: the selector must never replace it.
+        self.activity = QComboBox()
+        self.activity.addItems(["Control computer", "Point & ask (read only)"])
+        self.activity.setAccessibleName("Interaction activity")
+        layout.addWidget(self.activity)
         self.act = QCheckBox("Allow computer actions (Glide clicks and types on this Mac)")
         self.act.setChecked(False)
         self.act_banner = _plain(
@@ -80,6 +108,38 @@ class PetWindow(RaccoonWindow):
             layout.addWidget(widget)
         self.providers = _plain(QLabel(""), "Provider chains")
         layout.addWidget(self.providers)
+        self.share = QCheckBox("Share selected context for an answer")
+        self.share.setToolTip("Sends your question and the selected item's text to the answer provider shown below.")
+        self.include_image = QCheckBox("Include a small image crop")
+        self.include_image.setToolTip("Also shares nearby visible content. Needs an image-capable answer model.")
+        self.question = QLineEdit()
+        self.question.setMaxLength(MAX_QUESTION)
+        self.question.setPlaceholderText(DEFAULT_QUESTION)
+        self.question.setAccessibleName("Question about the selected point")
+        self.ask_button = QPushButton("Read this point")
+        self.target = _plain(QLabel(""), "Pinned item")
+        self.answer = _plain(QLabel(self.view.answer), "Point answer")
+        self.answer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.answer.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.answer_card = QScrollArea()
+        self.answer_card.setWidgetResizable(True)
+        self.answer_card.setMinimumHeight(110)
+        self.answer_card.setMaximumHeight(200)
+        self.answer_card.setWidget(self.answer)
+        self.answer_note = _plain(QLabel(""), "How old the pinned snapshot is")
+        self.point_provider = _plain(QLabel(""), "Answer provider")
+        self.point_widgets = (
+            self.point_provider,
+            self.share,
+            self.include_image,
+            self.question,
+            self.ask_button,
+            self.target,
+            self.answer_card,
+            self.answer_note,
+        )
+        for widget in self.point_widgets:
+            layout.addWidget(widget)
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setAcceptRichText(False)
@@ -93,19 +153,74 @@ class PetWindow(RaccoonWindow):
         self.menu.addSeparator()
         self.menu.addAction("Quit", self.close)
 
+        self.activity.currentIndexChanged.connect(self.refresh)
+        self.share.toggled.connect(self.refresh)
+        self.ask_button.clicked.connect(self.ask_typed)
         self.act.toggled.connect(self._set_act)
         self.headset.toggled.connect(self._set_headset)
         self.record.toggled.connect(self._set_record)
-        self.text_submitted.connect(self.core.send_text)
-        self.voice_started.connect(self.core.start_voice)
+        self.text_submitted.connect(self.submit_text)
+        self.voice_started.connect(self.begin_voice)
         self.voice_finished.connect(lambda _seconds: self.core.pause_voice())
         self.voice_cancelled.connect(self.stop)
 
+        self.marker = None  # the pin drawn on screen, and the point it was drawn for
+        self.marker_point = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         if poll:
             self.timer.start(POLL_MS)
         self.refresh()
+
+    # -- point and ask ---------------------------------------------------------------------------
+
+    @property
+    def point_mode(self) -> bool:
+        return self.activity.currentIndex() == POINT
+
+    def _image(self) -> bool:
+        return self.share.isChecked() and self.include_image.isChecked() and _image_allowed()
+
+    def submit_text(self, text: str) -> None:
+        """What the bar's text box sends: a request to Glide, or in point mode a question about the pin."""
+        if self.point_mode:
+            self.point_question(text)
+        else:
+            self.core.send_text(text)
+
+    def point_question(self, text: str) -> None:
+        if self.core.point.holding:
+            self.core.point.ask(text)
+        else:
+            self.core.point.start(text, share=self.share.isChecked(), with_image=self._image())
+
+    def ask_typed(self) -> None:
+        if self.point_mode:
+            self.point_question(self.question.text().strip() or DEFAULT_QUESTION)
+
+    def start_voice(self) -> None:
+        if self.point_mode and not self.share.isChecked():
+            self.view.status = "Tick “Share selected context for an answer” to ask about a point by voice."
+            self.refresh()
+            return
+        super().start_voice()
+
+    def begin_voice(self) -> None:
+        if self.point_mode and not self.core.voice_active:
+            self.core.point.start("", share=True, with_image=self._image(), voice=True)
+        else:
+            self.core.start_voice()
+
+    def _sync_marker(self) -> None:
+        pin = self.view.pin
+        if pin == self.marker_point:
+            return
+        if self.marker is not None:
+            pet.dismiss_point_marker(self.marker)
+            self.marker = None
+        self.marker_point = pin
+        if pin is not None:
+            self.marker = pet.show_point_marker(list(pin))
 
     # -- settings --------------------------------------------------------------------------------
 
@@ -145,7 +260,7 @@ class PetWindow(RaccoonWindow):
         if events:
             self.refresh()
 
-    def refresh(self) -> None:
+    def refresh(self, *_) -> None:
         self.set_mood(self.view.mood, rest=True)
         self.status.setText(self.view.status)
         self.log.setPlainText("\n".join(self.view.lines))
@@ -158,13 +273,35 @@ class PetWindow(RaccoonWindow):
         self.record.setChecked(self.view.recording)
         self.record.blockSignals(False)
         self.record_banner.setVisible(self.view.recording)
-        self.act_banner.setVisible(self.act.isChecked())
         badges = [text for text, show in (("● REC", self.view.recording), ("ACT", self.act.isChecked())) if show]
         self.badges.setText("  ".join(badges))
         self.badges.setStyleSheet(BADGE_STYLE % (REC_COLOR if self.view.recording else ACT_COLOR))
         self.badges.setVisible(bool(badges))
         self.badges.adjustSize()
-        self.stop_action.setEnabled(locked)
+        self._refresh_point(locked)
+        self._sync_marker()
+
+    def _refresh_point(self, locked: bool) -> None:
+        point, active, holding = self.point_mode, self.core.point.active, self.core.point.holding
+        self.activity.setEnabled(not locked and not active)
+        self.act.setVisible(not point)
+        self.act_banner.setVisible(self.act.isChecked() and not point)
+        for widget in self.point_widgets:
+            widget.setVisible(point)
+        self.share.setEnabled(not active)
+        self.include_image.setEnabled(not active and self.share.isChecked() and _image_allowed())
+        self.ask_button.setText("Ask this point" if self.share.isChecked() else "Read this point")
+        self.ask_button.setEnabled(not active or holding)
+        self.question.setEnabled(not active or holding)
+        self.voice_button.setEnabled(not point or self.share.isChecked())
+        self.voice_button.setToolTip("Ask about the point by voice" if point else "Talk to the raccoon")
+        self.input.setMaxLength(MAX_QUESTION if point else MAX_TEXT)
+        self.input.setPlaceholderText("Ask about the pinned point…" if point else "Ask Glide…")
+        self.target.setText(self.view.target)
+        self.answer.setText(self.view.answer)
+        self.answer_note.setText(self.view.answer_note)
+        self.point_provider.setText(self.view.provider)
+        self.stop_action.setEnabled(locked or active)
 
     def stop(self) -> None:
         """Stop the answer, the speech and the task, and end the voice session."""
@@ -175,6 +312,9 @@ class PetWindow(RaccoonWindow):
     def closeEvent(self, event):
         self.timer.stop()
         self.settings.close()
+        if self.marker is not None:
+            pet.dismiss_point_marker(self.marker)
+            self.marker = None
         self.core.close()
         event.accept()
 

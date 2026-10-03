@@ -28,13 +28,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..assistant.core import IO, Assistant, Reply
+from ..assistant.point_ask import capture_point
 from ..assistant.tasks import DEFAULT_RUNS_DIR
 from ..providers.chain import SwitchEvent
 from ..providers.config import ConfigError
+from .point_core import POINT_DELAY_S, PointMode
 
 MAX_TEXT = 8192  # the longest typed request taken
 REASON_CHARS = 160  # how much of a switch's reason is shown
 LINES = 80  # lines of activity kept in memory
+ANSWER_CHARS = 4096  # the answer card
+LABEL_CHARS = 1024
+POINT_IDLE = "Choose Point & ask, then press Ask: the point you aim at stays pinned for follow-up questions."
 PROVIDER_ROLES = ("llm.fast", "llm.smart", "stt", "tts", "classifier")
 # Outcomes of a task that could not run or did not finish for want of something outside the task (assistant/tasks.py).
 FAILED_OUTCOMES = frozenset(
@@ -52,6 +57,8 @@ class PetEvent:
     - `switch`: `role`, `from_slot`, `to_slot`, `kind`, `reason`. One per provider fallback; none is silent.
     - `mic`: `open`, and `detail` (a short machine reason, never user content).
     - `recording`: `on`. Whether the core keeps content (D3).
+    - `point`: `kind` (`status`, `selecting`, `selected`, `preview`, `thinking`, `answer`, `error`, `stopped`, `closed`)
+      and that kind's fields (point_core.py, point_session.py). Point and ask, read only.
     - `notice`: `message`, something the person should see that is not an answer.
     """
 
@@ -142,6 +149,8 @@ class PetCore:
         runs_dir: Path = DEFAULT_RUNS_DIR,
         record_content: bool = False,
         voice_factory=None,
+        capture=None,
+        point_delay_s: float = POINT_DELAY_S,
     ) -> None:
         self._config = config
         self._runs_dir = Path(runs_dir)
@@ -157,6 +166,14 @@ class PetCore:
         self.silence_ms = config.speech.silence_ms
         config.record_content = bool(record_content)  # D3: off unless asked for, whatever the config object held
         self._unsubscribe = config.on_switch(self._on_switch)
+        self.point = PointMode(
+            config,
+            lambda kind, **data: self._emit("point", kind=kind, **data),
+            start_voice=self._start_point_voice,
+            end_voice=self._end_voice_now,
+            capture=capture or capture_point,
+            delay_s=point_delay_s,
+        )
         if record_content:
             self._emit("recording", on=True)
 
@@ -174,7 +191,7 @@ class PetCore:
 
     @property
     def busy(self) -> bool:
-        return any(a.working for a in self._assistants())
+        return any(getattr(a, "working", a.busy) for a in self._assistants())
 
     @property
     def voice_active(self) -> bool:
@@ -214,38 +231,58 @@ class PetCore:
     def start_voice(self) -> None:
         """Open the microphone: build the voice stack the first time, or resume it after `pause_voice`."""
         with self._lock:
-            if self._closed or self._opening:
-                return
-            if self._voice is not None:
+            if self._voice is not None and not self._closed:
                 self._voice.resume()
                 self._emit("mic", open=True)
                 return
-            self._opening = True
-        threading.Thread(target=self._build_voice, name="glide-pet-voice", daemon=True).start()
+        if self._reserve_voice():
+            threading.Thread(
+                target=self._run_voice, args=(self._make_assistant, None, self.act), name="glide-pet-voice", daemon=True
+            ).start()
 
-    def _build_voice(self) -> None:
+    def _reserve_voice(self) -> bool:
+        """Claim the single voice slot. False when a session is open or opening, or the pet is closed."""
+        with self._lock:
+            if self._closed or self._opening or self._voice is not None:
+                return False
+            self._opening = True
+            return True
+
+    def _run_voice(self, assistant_factory, bind, act: bool) -> bool:
+        """Build and start a voice session in the slot `_reserve_voice` gave. `bind(assistant)` runs before listening."""
         try:
             settings = dataclasses.replace(self._config.speech, headset=self.headset, silence_ms=self.silence_ms)
-            loop = self._voice_factory(
-                self._config, settings, io=self._new_io(), act=self.act, assistant_factory=self._make_assistant
-            )
-            loop.start()
+            loop = self._voice_factory(self._config, settings, io=self._new_io(), act=act, assistant_factory=assistant_factory)
+            try:
+                if bind is not None:
+                    bind(loop.assistant)
+                loop.start()
+            except BaseException:
+                loop.assistant.close()
+                raise
         except Exception as exc:  # AudioUnavailable, ConfigError, VadError: each says what is missing and never a key
             with self._lock:
                 self._opening = False
             self._emit("mic", open=False, detail="unavailable")
             self._emit("notice", message=f"Voice input could not start ({type(exc).__name__}): {self._scrub(str(exc))}")
-            return
+            return False
         with self._lock:
             self._opening = False
-            self._voice = loop
             closed = self._closed
+            if not closed:
+                self._voice = loop
         if closed:
-            with self._lock:
-                self._voice = None
             self._end_voice(loop)
-            return
+            return False
         self._emit("mic", open=True)
+        return True
+
+    def _start_point_voice(self, assistant_factory, bind) -> bool:
+        """For `PointMode`, on its worker thread: a voice session whose assistant answers about the pin."""
+        if not self._reserve_voice():
+            self._emit("notice", message="Stop the current voice session before asking about a point by voice.")
+            return False
+        return self._run_voice(assistant_factory, bind, False)  # reading a point never acts
 
     def pause_voice(self) -> None:
         """Finish what is being said, then turn the microphone off. Answers, speech and tasks go on."""
@@ -256,14 +293,10 @@ class PetCore:
             self._emit("mic", open=False, detail="paused")
 
     def stop(self) -> None:
-        """Stop the answer, the speech and the task, and end the voice session. Returns at once."""
-        with self._lock:
-            voice, self._voice = self._voice, None
-        for assistant in self._assistants(voice):
+        """Stop the answer, the speech and the task, end the voice session and any pin. Returns at once."""
+        self.point.close()
+        for assistant in self._assistants(self._pop_voice()):
             assistant.stop()
-        if voice is not None:
-            threading.Thread(target=self._end_voice, args=(voice,), name="glide-pet-stop", daemon=True).start()
-            self._emit("mic", open=False, detail="stopped")
         self._emit("state", assistant="idle")
 
     def close(self) -> None:
@@ -273,10 +306,23 @@ class PetCore:
             voice, self._voice = self._voice, None
             text, self._text = self._text, None
         self._unsubscribe()
+        self.point.close()
         if voice is not None:
             self._end_voice(voice)
         if text is not None:
             text.close()
+
+    def _pop_voice(self):
+        """Take the open voice session, if any, and end it on a thread of its own so the caller does not wait."""
+        with self._lock:
+            voice, self._voice = self._voice, None
+        if voice is not None:
+            threading.Thread(target=self._end_voice, args=(voice,), name="glide-pet-stop", daemon=True).start()
+            self._emit("mic", open=False, detail="stopped")
+        return voice
+
+    def _end_voice_now(self) -> None:
+        self._pop_voice()
 
     def _end_voice(self, voice) -> None:
         try:
@@ -368,6 +414,12 @@ class PetView:
         self.working = False
         self.lines: deque[str] = deque(maxlen=LINES)
         self._result: tuple[str, str] | None = None  # how the last task ended, kept until something else happens
+        # Point and ask: the pinned item, the answer card and where the pin is drawn. All plain text, in memory only.
+        self.pin: tuple[float, float] | None = None
+        self.target = ""
+        self.answer = POINT_IDLE
+        self.answer_note = ""
+        self.provider = ""
 
     def apply(self, event: PetEvent) -> None:
         handler = getattr(self, "_" + event.type, None)
@@ -422,6 +474,46 @@ class PetView:
         else:
             self.mood = "idle"
             self.status = "Microphone off · task and readout remain active" if detail == "paused" else "Idle · microphone off"
+
+    def _point(self, kind: str, **data) -> None:
+        text = data.get("text", "")
+        if not isinstance(text, str):
+            return
+        if kind == "selecting":
+            self.pin, self.target, self.answer_note = None, "", ""
+            self.answer, self.status, self.mood = "Move the pointer to your item during the countdown.", text[:500], "thinking"
+        elif kind == "selected":
+            point = data.get("point")
+            if isinstance(point, list) and len(point) == 2:
+                self.pin = (point[0], point[1])
+            self.target = "Pinned: " + text[:LABEL_CHARS]
+            self.status = "Point pinned · read only"
+        elif kind in ("answer", "preview"):
+            uncertain = bool(data.get("uncertain"))
+            self.answer = text[:ANSWER_CHARS]
+            age = data.get("age_s")
+            self.answer_note = (
+                f"From a snapshot taken {age:.0f} s ago; the screen may have changed. Point again to refresh."
+                if isinstance(age, (int, float))
+                else ""
+            )
+            self.status = "More context needed · ask a follow-up" if uncertain else "Answer ready"
+            self.mood = "question" if uncertain else "happy"
+            if kind == "answer":
+                self.lines.append(f"point answer: {str(data.get('model', ''))[:200]} | {float(data.get('seconds', 0)):.3f}s")
+        elif kind in ("thinking", "status", "stopped"):
+            if kind == "status" and text.startswith("Answer provider:"):
+                self.provider = text[:1000]
+            else:
+                self.status = text[:500]
+            self.mood = "thinking" if kind == "thinking" else self.mood
+        elif kind == "error":
+            self.status, self.answer, self.mood = text[:500], text[:ANSWER_CHARS], "sad"
+            self.lines.append(text[:500])
+            if data.get("closed", True):
+                self.pin, self.target = None, ""
+        elif kind == "closed":
+            self.pin, self.target = None, ""
 
     def _recording(self, on: bool) -> None:
         self.recording = on

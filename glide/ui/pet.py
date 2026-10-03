@@ -15,6 +15,18 @@ def open_window(core, config) -> int:
     return show_pet(core, config)
 
 
+def show_point_marker(point):
+    """Pin a ring at a primary-display point. Lazy, like `open_window`; the marker never takes input or focus."""
+    from .point_ui import show_marker
+
+    return show_marker(point)
+
+
+def dismiss_point_marker(marker) -> None:
+    marker.close()
+    marker.deleteLater()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m glide.ui",
