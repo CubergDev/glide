@@ -236,6 +236,20 @@ def test_glides_own_echo_never_interrupts_it_and_never_opens_a_probe(kind, seed)
 
 
 @pytest.mark.parametrize("kind", CANCELLERS)
+def test_on_seeds_the_thresholds_were_not_tuned_on_echo_still_never_interrupts_glide(kind):
+    """Held out: the margin, percentiles and run lengths were set looking at seeds 1 to 8. Seeds 9 to 16 were run once,
+    afterwards. Zero interruptions in 96 runs per canceller; probes (which interrupt nothing) measured 1 for WebRTC and
+    0 for the numpy filter, so the bound is two."""
+    probes = 0
+    for seed in range(9, 17):
+        for delay, gain, noise in GRID:
+            run = scenario(kind, 170 if kind == "webrtc" and delay == 150 else delay, gain, seed, noise=noise)
+            assert run.decisions == [], (kind, seed, delay, gain, noise)
+            probes += run.status["probes"]
+    assert probes <= 2
+
+
+@pytest.mark.parametrize("kind", CANCELLERS)
 def test_a_loudspeaker_that_distorts_still_never_interrupts_glide(kind):
     """A soft-clipping speaker is an echo no linear canceller can remove. Nothing may interrupt (a stop probe is allowed
     at most once over the grid: measured 1 in 288 runs for WebRTC, 0 for the numpy filter)."""

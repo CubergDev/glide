@@ -71,9 +71,12 @@ sweeps:
 - ERLE after convergence: WebRTC at least 30 dB (about 40 measured), numpy filter at least 12 dB (15 to 28 measured).
 - Echo only: no false barge-in and no false probe in the committed linear sweep (4 seeds, 3 delays, 2 echo levels, 2 noise
   levels: 48 runs per canceller). Wider sweeps during development (8 seeds, 288 runs per canceller, linear and with a
-  soft-clipping loudspeaker) gave no false interruption and one false probe (WebRTC, nonlinear). A loudspeaker that
+  soft-clipping loudspeaker) gave no false interruption and one false probe (WebRTC, nonlinear). The thresholds were
+  chosen looking at those sweeps, so that is in-sample; seeds 9 to 16 were then run once, held out (96 runs per canceller
+  and loudspeaker type): no false interruption in 384 runs, and false probes of 1 in 96 for WebRTC (3 in 96 with the
+  distorting loudspeaker) and 0 for the numpy filter. A probe sends a moment of audio to the transcriber and drops the text. A loudspeaker that
   distorts is an echo no linear filter removes; the committed test bounds probes there and requires zero interruptions.
-- A voice 9 dB over the echo at the microphone: detected within 0.6 s of starting by both cancellers, the speaker's queue
+- A voice 9 dB over the echo at the microphone (and, for the numpy filter, 1.5 dB over it, or 3 dB under it within 0.8 s): detected within 0.6 s of starting by both cancellers, the speaker's queue
   empty at the next output block, and the first 300 ms of the voice in the turn.
 - Double talk: the filter recovers its ERLE afterwards and the numpy filter passes the voice through (correlation above 0.95).
 
