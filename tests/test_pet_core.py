@@ -307,6 +307,13 @@ def test_typed_text_during_a_voice_session_goes_to_the_voice_assistant(tmp_path)
     core.close()
 
 
+def test_closing_twice_is_harmless(tmp_path):
+    core, config = make_core(tmp_path)
+    core.close()
+    core.close()
+    assert config.listeners == []
+
+
 def test_what_is_heard_is_shown_as_it_arrives_and_a_spoken_answer_is_speaking(tmp_path):
     core, config, built = voice_core(tmp_path)
     config._stt = FakeSTT(final="hello glide", partials=["hello"])
@@ -321,6 +328,58 @@ def test_what_is_heard_is_shown_as_it_arrives_and_a_spoken_answer_is_speaking(tm
     assert ("transcript", "user") in types(seen) and ("state", "listening") in types(seen)
     assert ("state", "thinking") in types(seen) and ("state", "speaking") in types(seen)
     assert types(seen)[-1] == ("state", "idle")
+    core.close()
+
+
+def blocked_voice(tmp_path, **options):
+    """A core whose voice factory waits for the test, so a stop can arrive while the stack is still being built."""
+    entered, release, loops = threading.Event(), threading.Event(), []
+
+    def factory(config, settings, *, io, act, assistant_factory):
+        entered.set()
+        assert release.wait(WAIT), "the test never released the voice factory"
+        loop = FakeLoop(assistant_factory(config, io=io))
+        loops.append(loop)
+        return loop
+
+    core, config = make_core(tmp_path, voice_factory=factory, **options)
+    return core, config, entered, release, loops
+
+
+@pytest.mark.parametrize("how", ["stop", "pause", "close"])
+def test_a_stop_while_the_voice_stack_is_still_opening_wins_and_the_microphone_never_starts(tmp_path, how):
+    core, _, entered, release, loops = blocked_voice(tmp_path)
+    core.start_voice()
+    assert entered.wait(WAIT) and core.voice_active
+    {"stop": core.stop, "pause": core.pause_voice, "close": core.close}[how]()
+    release.set()
+    assert wait_until(lambda: loops and not core._opening)
+    (loop,) = loops
+    assert loop.calls == ["stop"]  # built, so ended; never started, so never listening
+    assert not core.voice_active
+    events = core.drain()
+    assert not any(e.type == "mic" and e.data.get("open") for e in events)  # nothing ever said the microphone was open
+    if how != "close":
+        core.start_voice()  # and the slot is free for the next try
+        assert wait_until(lambda: len(loops) == 2 and core.voice_active and core._voice is not None)
+    core.close()
+
+
+def test_a_voice_stack_that_fails_after_a_stop_says_nothing(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    def factory(config, settings, **kw):
+        entered.set()
+        release.wait(WAIT)
+        raise RuntimeError("no microphone")
+
+    core, _ = make_core(tmp_path, voice_factory=factory)
+    core.start_voice()
+    assert entered.wait(WAIT)
+    core.stop()
+    release.set()
+    assert wait_until(lambda: not core._opening)
+    assert not any(e.type == "notice" or (e.type == "mic" and e.data.get("open") is not False) for e in core.drain())
     core.close()
 
 

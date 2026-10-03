@@ -223,7 +223,11 @@ def test_the_pin_converts_coordinates_without_touching_the_pointer(qt_app, monke
 
 
 def test_the_real_pin_and_its_removal_are_refused_in_tests():
-    for call, args in ((pet.show_point_marker, ([1, 2],)), (pet.dismiss_point_marker, (None,))):
+    for call, args in (
+        (pet.show_point_marker, ([1, 2],)),
+        (pet.dismiss_point_marker, (None,)),
+        (point_ui.show_marker, ([1, 2],)),  # the widget function itself, not only the pet's door to it
+    ):
         with pytest.raises(RuntimeError, match="real machine"):
             call(*args)
 

@@ -111,7 +111,9 @@ setting name that the config owner will rename; the code reads it where `compute
       Recording the first time.
 - [ ] Ask about something that needs the surroundings ("which row is this?"). The answer uses what is near the item.
 - [ ] Point at the edge of the screen and at a Retina display's corner: the ring and the crop are at the item, not
-      shifted. On a second display, pointing refuses (primary display only) rather than guessing.
+      shifted. Point at something on a second display: a text-only pin works but no ring is drawn (the ring is
+      primary-display only); with the image box ticked it says "The image crop works on the primary display only; point
+      again." rather than guessing.
 
 ## 8. Stopping, and a provider that is slow
 
@@ -125,12 +127,13 @@ setting name that the config owner will rename; the code reads it where `compute
 
 Share ticked. Press the wave icon (this pins first, then listens).
 
-- [ ] After the countdown the status says it is listening about the pinned item. Ask aloud; the answer is spoken and
-      shown, with its age.
+- [ ] After the countdown the status says "Listening · say your command" (it is listening for questions about the
+      pinned item, not for commands). Ask aloud; the answer is spoken and shown, with its age.
 - [ ] Say "stop" while it speaks: the voice cuts, the pin and the microphone stay. Say "stop" when nothing is speaking:
       nothing happens.
 - [ ] Type a follow-up in the bar: it answers about the same pin, spoken too.
-- [ ] The send icon pauses the microphone; the wave icon resumes it for the same pin.
+- [ ] The send icon pauses the microphone; the wave icon resumes it for the same pin. Press the x (or Escape, or Stop)
+      right after pressing the wave icon, before it is listening: the microphone must never come on afterwards.
 - [ ] Wait out two minutes of silence, then ask: the expiry message appears, the session ends and the microphone indicator
       goes out.
 - [ ] Open an ordinary voice session first, then try point by voice: a notice says to stop the current voice session.

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from ..computer.config import load_dotenv, writer_vision
 from ..computer.writer import make_writer, provider
-from ..providers.config import load_config
+from ..providers.config import ConfigError, load_config
 from ..speech.settings import MAX_SILENCE_MS, MIN_SILENCE_MS
 from .core import IO
 from .point_ask import MAX_QUESTION, PointStopped, PointUnavailable, capture_point
@@ -115,11 +115,19 @@ def main(argv: Sequence[str] | None = None, *, voice_factory: Callable | None = 
             close()
 
 
+def _writer(config):
+    """The answer writer over the chains, or None; a slot of glide.toml that cannot be set up says why, without a key."""
+    try:
+        return make_writer(config)
+    except ConfigError as error:
+        raise PointUnavailable(" ".join(config.scrub(str(error)).split())) from error
+
+
 def _run(args, config, voice_factory, capture) -> int:
     writer = None
     try:
         if args.allow_model:
-            writer = make_writer(config)
+            writer = _writer(config)
             if writer is None:
                 raise PointUnavailable(
                     "Configure an answer provider first: the smart LLM chain in glide.toml has no usable slot."

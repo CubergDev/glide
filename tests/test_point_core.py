@@ -18,6 +18,7 @@ from glide.assistant.point_voice import PointAssistant
 from glide.computer.generation import GenerationResult
 from glide.computer.platform_adapter import using
 from glide.computer.point_types import PointTarget
+from glide.providers.config import ConfigError
 from glide.ui.core import PetEvent, PetView
 from glide.ui.point_core import NO_PROVIDER, TEXT_ONLY, UNREADABLE, PointMode
 
@@ -325,3 +326,50 @@ def test_a_point_voice_cannot_start_while_an_ordinary_voice_session_is_open(tmp_
     notices = [e.data["message"] for e in core.drain() if e.type == "notice"]
     assert any("Stop the current voice session" in m for m in notices) and not core.point.holding
     core.close()
+
+
+def test_a_stop_while_a_point_voice_session_is_still_opening_wins_and_nothing_stays_open(tmp_path):
+    entered, release, loops = threading.Event(), threading.Event(), []
+
+    def factory(config, settings, *, io, act, assistant_factory):
+        entered.set()
+        assert release.wait(WAIT)
+        loop = FakeLoop(assistant_factory(config, io=io))
+        loops.append(loop)
+        return loop
+
+    core, _, fake = pet_with_point(tmp_path, voice_factory=factory)
+    with using(fake):
+        core.point.start("", share=True, voice=True)
+        assert entered.wait(WAIT)
+        core.stop()
+        release.set()
+        assert wait_until(lambda: loops and not core.point._cancel and not core._opening)
+    (loop,) = loops
+    assert loop.calls == ["stop"] and not core.voice_active and not core.point.holding
+    assert not any(e.type == "mic" and e.data.get("open") for e in core.drain())
+    core.close()
+
+
+def test_a_slot_that_cannot_be_set_up_is_reported_as_that_not_as_a_permission_problem():
+    rig = Rig()
+    rig.config.secret = SECRET
+
+    def broken(timeout=None):
+        raise ConfigError(f"[llm.smart] local cannot be set up: bad option {SECRET}")
+
+    rig.config.writer = broken
+    rig.start("Explain", share=True)
+    (event,) = rig.events
+    assert event["kind"] == "error" and event["closed"] is True and "llm.smart" in event["text"] and "bad option" in event["text"]
+    assert SECRET not in event["text"] and "permission" not in event["text"] and rig.captured == []
+
+
+def test_an_image_crop_off_the_primary_display_says_so_instead_of_blaming_permissions():
+    rig = Rig(capture=lambda **options: capture_point((5000, 5000), **options))
+    rig.start("Explain", share=True, with_image=True)
+    assert rig.events[-1] == {
+        "kind": "error",
+        "text": "The image crop works on the primary display only; point again.",
+        "closed": True,
+    }

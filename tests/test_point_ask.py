@@ -59,6 +59,13 @@ def test_small_crop_marks_the_same_point_at_different_display_scales(scale):
         fake.raw.getpixel((0, 0))  # the adapter's own capture was closed
 
 
+def test_an_image_crop_off_the_primary_display_is_refused_in_our_own_words():
+    with using(SyntheticDesktop()), pytest.raises(PointUnavailable, match="primary display only"):
+        capture_point((5000, 5000), with_image=True)
+    with using(SyntheticDesktop()), capture_point((5000, 5000)) as selected:  # a text pin needs no crop
+        assert selected.region is None
+
+
 def test_image_is_bounded_after_retina_resizing():
     with using(SyntheticDesktop(scale=3)), capture_point(with_image=True, radius=240) as selected:
         assert max(selected.image.size) <= 768

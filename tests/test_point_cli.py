@@ -75,6 +75,23 @@ def test_no_usable_provider_stops_before_the_screen_is_read(capsys):
     assert code == 2 and "Configure an answer provider" in capsys.readouterr().err and fake.calls == []
 
 
+def test_a_slot_that_cannot_be_set_up_is_said_to_be_that_and_nothing_is_read(capsys):
+    from glide.providers.config import ConfigError
+
+    config = config_with(None)
+    config.secret = SECRET
+
+    def broken(timeout=None):
+        raise ConfigError(f"[llm.smart] local cannot be set up: bad option {SECRET}")
+
+    config.writer = broken
+    fake = SyntheticDesktop()
+    with using(fake):
+        code = point_cli.main(["--delay", "0", "--allow-model"], load=lambda path: config)
+    err = capsys.readouterr().err
+    assert code == 2 and "llm.smart" in err and SECRET not in err and "permission" not in err and fake.calls == []
+
+
 def test_a_text_only_model_refuses_an_image_before_the_screen_is_read(monkeypatch, capsys):
     monkeypatch.setattr(point_cli, "writer_vision", lambda: False)
     code, fake, _ = run(["--allow-model", "--with-image"], writer=reply_writer())

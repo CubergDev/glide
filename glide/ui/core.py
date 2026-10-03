@@ -19,6 +19,7 @@ of them touches a widget: each puts a `PetEvent` on a queue, and the window drai
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import queue
 import threading
@@ -160,6 +161,7 @@ class PetCore:
         self._text: PetAssistant | None = None
         self._voice = None
         self._opening = False
+        self._voice_epoch = 0  # bumped by every stop: a session still being built under an older epoch is abandoned
         self._closed = False
         self.act = False  # computer tasks are dry runs until the person turns this on
         self.headset = False
@@ -235,61 +237,79 @@ class PetCore:
                 self._voice.resume()
                 self._emit("mic", open=True)
                 return
-        if self._reserve_voice():
+        epoch = self._reserve_voice()
+        if epoch is not None:
             threading.Thread(
-                target=self._run_voice, args=(self._make_assistant, None, self.act), name="glide-pet-voice", daemon=True
+                target=self._run_voice, args=(self._make_assistant, None, self.act, epoch), name="glide-pet-voice", daemon=True
             ).start()
 
-    def _reserve_voice(self) -> bool:
-        """Claim the single voice slot. False when a session is open or opening, or the pet is closed."""
+    def _reserve_voice(self) -> int | None:
+        """Claim the single voice slot: the epoch to build under, or None when a session is open or opening, or closed."""
         with self._lock:
             if self._closed or self._opening or self._voice is not None:
-                return False
+                return None
             self._opening = True
-            return True
+            return self._voice_epoch
 
-    def _run_voice(self, assistant_factory, bind, act: bool) -> bool:
-        """Build and start a voice session in the slot `_reserve_voice` gave. `bind(assistant)` runs before listening."""
+    def _abandoned(self, epoch: int) -> bool:
+        with self._lock:
+            return self._closed or epoch != self._voice_epoch
+
+    def _run_voice(self, assistant_factory, bind, act: bool, epoch: int) -> bool:
+        """Build and start a voice session in the slot `_reserve_voice` gave. `bind(assistant)` runs before listening.
+
+        A stop that arrives while this is still building wins: nothing is started, a loop already built is ended, and
+        no `mic` event says the microphone is open. (Opening a stream is what asks macOS for the microphone.)"""
+        loop = None
         try:
+            if self._abandoned(epoch):
+                return False
             settings = dataclasses.replace(self._config.speech, headset=self.headset, silence_ms=self.silence_ms)
             loop = self._voice_factory(self._config, settings, io=self._new_io(), act=act, assistant_factory=assistant_factory)
-            try:
-                if bind is not None:
-                    bind(loop.assistant)
-                loop.start()
-            except BaseException:
-                loop.assistant.close()
-                raise
+            if bind is not None:
+                bind(loop.assistant)
+            with self._lock:
+                registered = not self._abandoned(epoch)
+                if registered:
+                    loop.start()  # under the lock: a stop cannot fall between the check and the first frame
+                    self._voice = loop
         except Exception as exc:  # AudioUnavailable, ConfigError, VadError: each says what is missing and never a key
+            if loop is not None:
+                self._end_quietly(loop)
+            if not self._abandoned(epoch):
+                self._emit("mic", open=False, detail="unavailable")
+                self._emit("notice", message=f"Voice input could not start ({type(exc).__name__}): {self._scrub(str(exc))}")
+            return False
+        finally:
             with self._lock:
                 self._opening = False
-            self._emit("mic", open=False, detail="unavailable")
-            self._emit("notice", message=f"Voice input could not start ({type(exc).__name__}): {self._scrub(str(exc))}")
-            return False
-        with self._lock:
-            self._opening = False
-            closed = self._closed
-            if not closed:
-                self._voice = loop
-        if closed:
-            self._end_voice(loop)
+        if not registered:
+            self._end_quietly(loop)
             return False
         self._emit("mic", open=True)
         return True
 
+    def _end_quietly(self, loop) -> None:
+        with contextlib.suppress(Exception):
+            self._end_voice(loop)
+
     def _start_point_voice(self, assistant_factory, bind) -> bool:
         """For `PointMode`, on its worker thread: a voice session whose assistant answers about the pin."""
-        if not self._reserve_voice():
+        epoch = self._reserve_voice()
+        if epoch is None:
             self._emit("notice", message="Stop the current voice session before asking about a point by voice.")
             return False
-        return self._run_voice(assistant_factory, bind, False)  # reading a point never acts
+        return self._run_voice(assistant_factory, bind, False, epoch)  # reading a point never acts
 
     def pause_voice(self) -> None:
         """Finish what is being said, then turn the microphone off. Answers, speech and tasks go on."""
         with self._lock:
-            voice = self._voice
+            voice, opening = self._voice, self._opening
+            if voice is None and opening:
+                self._voice_epoch += 1  # nothing was being said yet: the session still being built is abandoned
         if voice is not None:
             voice.pause()
+        if voice is not None or opening:
             self._emit("mic", open=False, detail="paused")
 
     def stop(self) -> None:
@@ -302,7 +322,10 @@ class PetCore:
     def close(self) -> None:
         """The window is closing: stop everything and release the microphone, speaker and provider clients."""
         with self._lock:
+            if self._closed:
+                return  # closing twice (the window's closeEvent, then a caller's cleanup) is harmless
             self._closed = True
+            self._voice_epoch += 1
             voice, self._voice = self._voice, None
             text, self._text = self._text, None
         self._unsubscribe()
@@ -315,6 +338,7 @@ class PetCore:
     def _pop_voice(self):
         """Take the open voice session, if any, and end it on a thread of its own so the caller does not wait."""
         with self._lock:
+            self._voice_epoch += 1  # also abandons a session still being built (see `_run_voice`)
             voice, self._voice = self._voice, None
         if voice is not None:
             threading.Thread(target=self._end_voice, args=(voice,), name="glide-pet-stop", daemon=True).start()

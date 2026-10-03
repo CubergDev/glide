@@ -24,6 +24,7 @@ from ..assistant.point_session import PointSession
 from ..assistant.point_voice import PointAssistant
 from ..computer.config import writer_vision
 from ..computer.writer import make_writer, provider
+from ..providers.config import ConfigError
 
 POINT_DELAY_S = 3.0  # time to position the pointer after pressing Ask
 LABEL_CHARS = 1024
@@ -138,7 +139,11 @@ class PointMode:
         if not share:
             self._emit("status", text="Local preview: reads the pointed item's accessibility text. Nothing is sent to a model.")
             return None
-        writer = make_writer(self._config)
+        try:
+            writer = make_writer(self._config)
+        except ConfigError as error:  # a slot of glide.toml that cannot be set up: its message names the file and slot, no key
+            self._emit("error", text=self._scrub(str(error)), closed=True)
+            return None
         if writer is None:
             self._emit("error", text=NO_PROVIDER, closed=True)
             return None
@@ -152,6 +157,10 @@ class PointMode:
             + (" and a small image crop." if with_image else "."),
         )
         return writer
+
+    def _scrub(self, text: str) -> str:
+        scrub = getattr(self._config, "scrub", None)
+        return " ".join((scrub(text) if callable(scrub) else text).split())
 
     def _preview(self, selection: PointSelection) -> None:
         packet = selection.target.packet() if selection.target is not None else {}

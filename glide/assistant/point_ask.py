@@ -150,7 +150,10 @@ def capture_point(
         raise PointUnavailable("Protected fields cannot be read or captured.")
     image = region = None
     if with_image:
-        image, region = desktop.point_region(point, radius)
+        try:
+            image, region = desktop.point_region(point, radius)
+        except ValueError as error:  # the point or the crop is not on the primary display
+            raise PointUnavailable("The image crop works on the primary display only; point again.") from error
         # Accessibility state may change during capture: reject a protected target or a changed hit test rather
         # than pair two different observations.
         try:
