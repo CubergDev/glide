@@ -9,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
+from ..providers.config import load_config
 from . import config
 from .actions import Context
 from .control import RunControl
@@ -20,6 +21,11 @@ from .timing import format_timing
 from .writer import make_writer, provider
 
 DOTENV = Path.cwd() / ".env"
+ABORTED, FAILED = (
+    130,
+    1,
+)  # exit codes: stopped by the user (the shell's own value for Ctrl-C), and any run that did not do the job
+FAILED_OUTCOMES = {"blocked", "unsupported", "crashed", "provider failure"}  # failures that may carry no `failure` text
 
 
 def _prepare() -> None:
@@ -46,6 +52,19 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("goal", help="what you want done on this computer")
     parser.add_argument("--act", action="store_true", help="actually click and type (default: dry run, one step)")
+    parser.add_argument(
+        "--engine",
+        choices=["legacy", "structured"],
+        default="legacy",
+        help="legacy: the screen loop. structured: planned effects checked after each action, through the "
+        "provider chains of glide.toml (browser and desktop tasks; research and reasoning)",
+    )
+    parser.add_argument(
+        "--readiness-timeout",
+        type=float,
+        default=config.DEFAULT_READINESS_TIMEOUT,
+        help="structured engine: seconds a page or an effect may take to show before the run reports it (0-30)",
+    )
     parser.add_argument("--steps", type=int, default=config.DEFAULT_STEPS, help="max actions before stopping")
     parser.add_argument("--min-confidence", type=float, default=config.DEFAULT_MIN_CONFIDENCE, help="stop below this confidence")
     parser.add_argument("--delay", type=float, default=config.DEFAULT_DELAY, help="seconds to wait after each action")
@@ -70,7 +89,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.act and not desktop.accessibility_trusted():
         sys.exit("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     try:
-        writer = make_writer()
+        # The structured engine takes its classifier from the same configuration as the writer, so a failover in
+        # one is visible to the other. The legacy loop keeps the classifier it has always had.
+        glide_config = load_config() if args.engine == "structured" else None
+        writer = make_writer(glide_config) if glide_config is not None else make_writer()
         config.writer_vision()  # a bad value stops the run here, not at its first stop
     except ValueError as e:
         sys.exit(str(e))
@@ -93,6 +115,9 @@ def main(argv: list[str] | None = None) -> None:
         app=args.app,
         url=args.url,
         record_content=args.record_content,
+        engine=args.engine,
+        execution_browser=config.browser(),
+        readiness_timeout=args.readiness_timeout,
     )
 
     def ctx_factory(typesafe, history):
@@ -108,9 +133,11 @@ def main(argv: list[str] | None = None) -> None:
 
     # The run prints nothing of its own; this terminal shows what it reports, and Ctrl-C reaches it as a stop.
     control = RunControl(str(uuid.uuid4()), lambda event: print(event.text) if event.text else None)
-    state = run(cfg, ctx_factory, control=control)
+    state = run(cfg, ctx_factory, classifier_factory=glide_config.classifier if glide_config else None, control=control)
     if state.outcome.startswith("aborted"):
-        sys.exit(130)
+        sys.exit(ABORTED)
+    if state.failure or state.outcome in FAILED_OUTCOMES:
+        sys.exit(FAILED)
 
 
 def inspect(argv: list[str] | None = None) -> None:
