@@ -8,6 +8,9 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 
+from .control import current_control
+from .diagnostics import event, record_content
+
 CLASSIFIER = "classifier"
 WRITER = "writer"
 MODELS = (CLASSIFIER, WRITER)
@@ -84,36 +87,92 @@ class Calls:
         return "calls: " + "  ".join(parts)
 
 
-class MeteredClassifier:
+class _Metered:
+    """What both clients share: count the request, trace it, and tell the run's listener when it is done.
+
+    Request content (instructions, text, schema, reply) is traced only when the task opted into content
+    recording; the events otherwise carry the model, the role, the count, the seconds and the token counts.
+    """
+
+    role: str
+
+    def __init__(self, client, calls: Calls):
+        self._client = client
+        self._calls = calls
+
+    def _call(self, model: str, send, *, content: dict | None = None, done: str):
+        started = time.perf_counter()
+        count = self._calls.count[self.role] + 1
+        who = {"role": self.role, "request_count": count}
+        event("model_request_started", model=model, **who)
+        if content is not None and record_content():
+            event("model_request_content", model=model, **who, **content)
+        try:
+            with self._calls.record(self.role):
+                reply = send()
+        except BaseException as error:
+            event("model_request_failed", model=model, **who, elapsed_s=time.perf_counter() - started, exception=error)
+            raise
+        used = self._used(reply, model)
+        seconds = time.perf_counter() - started
+        event("model_request_completed", model=used.model, **who, elapsed_s=seconds, **used.tokens)
+        if content is not None and record_content():
+            event("model_response_content", model=used.model, **who, text=reply.text, completed=reply.completed)
+        if active := current_control():
+            active.event(done, model=used.model, role=self.role, elapsed_s=seconds)
+        return reply
+
+
+class MeteredClassifier(_Metered):
     """The TypeSafe client, counting each request. `system_one` is the only call the package makes.
 
     TypeSafe's reply names its `model` and reports `usage` as `input_tokens` and `output_tokens`,
     with no cached count.
     """
 
-    def __init__(self, client, calls: Calls):
-        self._client = client
-        self._calls = calls
+    role = CLASSIFIER
 
     def system_one(self, **request):
-        with self._calls.record(CLASSIFIER):
-            reply = self._client.system_one(**request)
+        model = _model(request.get("model"), CLASSIFIER)
+        return self._call(model, lambda: self._client.system_one(**request), done="classifier_completed")
+
+    def _used(self, reply, requested: str):
         usage = getattr(reply, "usage", None)
-        self._calls.used(
-            _model(getattr(reply, "model", None), request.get("model"), CLASSIFIER),
-            input_tokens=_tokens(usage, "input_tokens"),
-            output_tokens=_tokens(usage, "output_tokens"),
-        )
-        return reply
+        tokens = {"input_tokens": _tokens(usage, "input_tokens"), "output_tokens": _tokens(usage, "output_tokens")}
+        name = _model(getattr(reply, "model", None), requested)
+        self._calls.used(name, **tokens)
+        return _Used(name, tokens)
 
 
-class MeteredWriter:
-    """The Anthropic client, counting each request. `messages.create` is the only call the package makes."""
+class MeteredWriter(_Metered):
+    """The neutral writer (`generate(GenerationRequest)`), counting each request.
+
+    `messages.create` is the Anthropic-shaped call the writer still makes until the writer boundary moves to
+    `generate`; it is counted the same way and goes when that shim does.
+    """
+
+    role = WRITER
 
     def __init__(self, client, calls: Calls):
-        self._client = client
-        self._calls = calls
+        super().__init__(client, calls)
         self.messages = SimpleNamespace(create=self._create)
+
+    def generate(self, request, cancel=None):
+        content = {
+            "instructions": request.instructions,
+            "text": request.text,
+            "schema": request.schema,
+            "reasoning": request.reasoning,
+            "deadline_s": request.deadline_s,
+            "max_tokens": request.max_tokens,
+        }
+        return self._call(request.model, lambda: self._client.generate(request, cancel), content=content, done="model_completed")
+
+    def _used(self, reply, requested: str):
+        name = reply.model or requested
+        tokens = asdict(reply.usage)
+        self._calls.used(name, **tokens)
+        return _Used(name, tokens)
 
     def _create(self, **request):
         with self._calls.record(WRITER):
@@ -126,6 +185,12 @@ class MeteredWriter:
             output_tokens=_tokens(usage, "output_tokens"),
         )
         return reply
+
+
+@dataclass(frozen=True)
+class _Used:
+    model: str
+    tokens: dict
 
 
 def _model(*names) -> str:
