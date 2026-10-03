@@ -1116,3 +1116,39 @@ def test_building_a_role_from_two_threads_builds_it_once():
 def test_config_module_exposes_the_documented_names():
     for name in ("GlideConfig", "ConfigError", "load_config", "PRESETS", "ROLES", "DEFAULT_TOML", "pin_variable"):
         assert hasattr(config_module, name)
+
+
+# -- tables another module reads ------------------------------------------------------------------
+
+
+def test_memory_mcp_and_webhooks_are_known_tables_that_this_loader_does_not_parse():
+    cfg, _ = make(
+        '[memory]\nenabled = true\n[mcp]\nserver_memory = "off"\n[webhooks]\nconfig = "webhooks.json"\n[nonsense]\nx = 1'
+    )
+    assert cfg.warnings == ["<toml>: ignoring the unknown table [nonsense]"]
+    cfg, _ = make("[memory]\nthis_key_is_not_this_loaders_to_judge = 1")  # memory's own reader refuses it, with its own message
+    assert cfg.warnings == []
+
+
+def test_the_whole_speech_table_loads_and_the_voice_settings_come_from_it():
+    cfg, _ = make(
+        '[speech]\nsilence_ms = 700\nheadset = true\nmerge_window_s = 1.5\nidle_s = 30\nvad = "energy"\noutput_rate = 22050'
+    )
+    assert (cfg.voice.silence_ms, cfg.voice.headset, cfg.voice.merge_window_s) == (700, True, 1.5)
+    assert (cfg.voice.idle_s, cfg.voice.vad, cfg.voice.output_rate) == (30.0, "energy", 22050)
+    assert (cfg.speech.silence_ms, cfg.speech.headset) == (700, True)  # the providers' view of the same table
+    assert make("")[0].voice == type(cfg.voice)()  # no table: the voice stack's own defaults
+
+
+@pytest.mark.parametrize(
+    ("line", "match"),
+    [
+        ("silence_ms = 100", "silence_ms must be 200-2000"),
+        ("merge_window_s = 9", "merge_window_s must be 0-5"),
+        ('vad = "silero"', "needs vad_model_path and vad_model_sha256"),
+        ("output_rate = 7", "output_rate must be one of"),
+    ],
+)
+def test_a_voice_only_key_is_checked_when_the_file_loads(line, match):
+    with pytest.raises(ConfigError, match=match):
+        make(f"[speech]\n{line}")
