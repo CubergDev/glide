@@ -101,3 +101,28 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 #   GLIDE_PIN_CLASSIFIER=typesafe        GLIDE_PIN_LLM_PLANNER=openai (only when [llm.planner] is set)
 # A pin that names no usable slot is an error that lists the slots there are.
 # ---------------------------------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------------------------------
+# Browser provider: which one drives the browser for a computer task. Nothing here is started for you: you start the
+# browser, Obscura or the Playwright CLI session yourself, and Glide only attaches. Endpoints must be loopback.
+#   provider  native (the default: this Mac's own browser), cdp, obscura or playwright
+#   target    a tab id, or "new" for a tab of its own; empty means the one open tab
+#   fallback  optional, default none. Tried in order when the provider is unavailable, only before anything has been
+#             done, and every switch is reported. "native" cannot be a fallback: it takes over this machine.
+# Per run, the environment wins: GLIDE_BROWSER_PROVIDER, GLIDE_BROWSER_ENDPOINT, GLIDE_BROWSER_TARGET,
+# GLIDE_PLAYWRIGHT_SESSION, GLIDE_PLAYWRIGHT_CLI. A provider that is not installed or not enabled fails with a message
+# that says what to do, and takes no action. What to check live: docs/live-checks/browsers.md.
+#
+# [browser]
+# provider = "cdp"
+# target = "new"
+# fallback = ["obscura"]
+#
+# [browser.cdp]
+# endpoint = "http://127.0.0.1:9222"
+# [browser.obscura]
+# endpoint = "http://127.0.0.1:9333"
+# [browser.playwright]
+# session = "glide"                       # an already opened Playwright CLI session
+# cli = "/path/to/playwright-cli"         # optional; the default is playwright-cli on PATH
+# ---------------------------------------------------------------------------------------------------------------
