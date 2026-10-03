@@ -226,3 +226,12 @@ def test_the_real_pin_and_its_removal_are_refused_in_tests():
     for call, args in ((pet.show_point_marker, ([1, 2],)), (pet.dismiss_point_marker, (None,))):
         with pytest.raises(RuntimeError, match="real machine"):
             call(*args)
+
+
+def test_a_badge_says_when_questions_about_a_point_are_shared_with_the_answer_provider(pet_window):
+    window = point_window(pet_window)
+    assert window.badges.isHidden()
+    window.share.setChecked(True)
+    assert window.badges.text() == "SHARE" and not window.badges.isHidden()
+    window.activity.setCurrentIndex(pet_ui.CONTROL)  # sharing applies to point questions only
+    assert window.badges.isHidden()

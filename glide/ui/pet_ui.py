@@ -68,7 +68,8 @@ class PetWindow(RaccoonWindow):
         self.cancel_button.setToolTip("Stop the voice session and cancel the task")
         self.cancel_button.setAccessibleName("Stop the voice session and cancel the task")
 
-        # Always visible while they apply: content is being recorded, or Glide may click and type on this Mac.
+        # Always visible while they apply: content is being recorded, Glide may click and type on this Mac, or point
+        # questions send the pinned item to the answer provider.
         self.badges = QLabel(self)
         self.badges.setTextFormat(Qt.TextFormat.PlainText)
         self.badges.setAccessibleName("Recording and computer-action indicators")
@@ -273,7 +274,10 @@ class PetWindow(RaccoonWindow):
         self.record.setChecked(self.view.recording)
         self.record.blockSignals(False)
         self.record_banner.setVisible(self.view.recording)
-        badges = [text for text, show in (("● REC", self.view.recording), ("ACT", self.act.isChecked())) if show]
+        sharing = self.point_mode and self.share.isChecked()
+        badges = [
+            text for text, show in (("● REC", self.view.recording), ("ACT", self.act.isChecked()), ("SHARE", sharing)) if show
+        ]
         self.badges.setText("  ".join(badges))
         self.badges.setStyleSheet(BADGE_STYLE % (REC_COLOR if self.view.recording else ACT_COLOR))
         self.badges.setVisible(bool(badges))
