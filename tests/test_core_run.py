@@ -228,11 +228,9 @@ def test_runner_prints_nothing_of_its_own(monkeypatch, tmp_path, capsys):
 # -- engines and configuration ------------------------------------------------------------------------
 
 
-def test_the_default_engine_is_the_legacy_loop_and_structured_is_refused_until_it_exists(tmp_path):
+def test_the_default_engine_is_the_legacy_loop_and_an_unknown_engine_is_refused(tmp_path):
     cfg = RunConfig("goal", tmp_path)
     assert cfg.engine == "legacy" and cfg.record_content is False and cfg.readiness_timeout == DEFAULT_READINESS_TIMEOUT
-    with pytest.raises(ValueError, match="structured engine is not part of this build"):
-        runner.run(RunConfig("goal", tmp_path, engine="structured"), lambda *a: None)
     with pytest.raises(ValueError, match="Unknown execution engine"):
         runner.run(RunConfig("goal", tmp_path, engine="nope"), lambda *a: None)
 
@@ -332,7 +330,7 @@ def test_the_command_line_records_content_only_when_asked(monkeypatch, tmp_path,
 
     def fake_run(cfg, ctx_factory, **kwargs):
         seen.update(cfg=cfg, control=kwargs.get("control"))
-        return SimpleNamespace(outcome="done")
+        return SimpleNamespace(outcome="done", failure="")
 
     monkeypatch.setattr(cli, "run", fake_run)
     cli.main(["a goal", "--out", str(tmp_path), *flags])
