@@ -150,7 +150,7 @@ def test_without_a_writer_the_run_says_why_there_is_no_answer(tmp_path, screen):
     hand_off(RunConfig(goal=GOAL, out=tmp_path), context(), state, 1, log)
 
     assert state.answer is None
-    assert "no answer" in lines[0] and "ANTHROPIC_API_KEY" in lines[0]
+    assert "no answer" in lines[0] and "glide.toml" in lines[0]
 
 
 def test_the_last_capture_is_answered_from_when_nothing_acted_after_it(tmp_path, screen, make_item, monkeypatch):
@@ -175,7 +175,7 @@ def test_the_screen_is_captured_again_when_an_action_made_the_last_capture_stale
     state = RunState(outcome="step limit", view=None)
     lines, log = logged()
 
-    hand_off(RunConfig(goal=GOAL, out=tmp_path), context(fake), state, 1, log)
+    hand_off(RunConfig(goal=GOAL, out=tmp_path, record_content=True), context(fake), state, 1, log)
 
     assert state.answer == Answer(text="No dates on screen.", achieved=False)
     assert "goal not achieved" in lines[0]
@@ -233,3 +233,16 @@ def test_an_action_makes_the_last_capture_stale(tmp_path, screen, monkeypatch):
 
     assert keep_going
     assert state.view is None
+
+
+def test_the_recaptured_screen_is_not_saved_unless_content_recording_is_on(tmp_path, screen, make_item, monkeypatch):
+    monkeypatch.setattr(runner.desktop, "check_abort", lambda: None)
+    monkeypatch.setattr(runner, "capture", lambda *a, **k: screen)
+    monkeypatch.setattr(runner, "perceive", lambda *a, **k: [make_item(0, "TICKETS")])
+    state = RunState(outcome="step limit", view=None)
+    _, log = logged()
+
+    hand_off(RunConfig(goal=GOAL, out=tmp_path), context(FakeWriter({"achieved": False, "answer": "No."})), state, 1, log)
+
+    assert state.answer is not None
+    assert not list(tmp_path.glob("*.png")) and not list(tmp_path.glob("step-*"))

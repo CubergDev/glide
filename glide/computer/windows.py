@@ -230,6 +230,9 @@ def mouse_location() -> tuple[float, float]:
 
 
 def check_abort() -> None:
+    from .control import checkpoint
+
+    checkpoint()
     x, y = mouse_location()
     if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
         raise Abort("mouse in top-left corner")
@@ -254,6 +257,15 @@ def accessibility_trusted() -> bool:
         return False
 
 
+def screen_capture_trusted() -> bool:
+    # Windows exposes no equivalent user-consent screen-recording permission.
+    return True
+
+
+def request_permissions(*, accessibility: bool = False, screen_capture: bool = False) -> None:
+    pass
+
+
 # ------------------------------------------------------------------ input
 
 
@@ -268,23 +280,45 @@ def click_at(point: tuple[float, float]) -> None:
     A cursor that did not reach the target (another desktop has the input, or the point is off
     every monitor) means the click would land somewhere unknown, so nothing is pressed.
     """
+    check_abort()
     target = (round(point[0]), round(point[1]))
     _move(target)
     actual = mouse_location()
     if not landed(target, actual):
         raise Missed(f"the cursor went to {actual}, not {target}")
-    _send(_mouse(MOUSEEVENTF_LEFTDOWN))
-    _send(_mouse(MOUSEEVENTF_LEFTUP))
+    check_abort()
+    try:
+        _send(_mouse(MOUSEEVENTF_LEFTDOWN))
+    finally:
+        _send(_mouse(MOUSEEVENTF_LEFTUP))
 
 
 def press(key: str, command: bool = False) -> None:
-    for vk, flags in key_events(key, command):
-        _send(_key(vk=vk, flags=flags))
+    check_abort()
+    held = []
+    try:
+        for vk, flags in key_events(key, command):
+            if flags & KEYEVENTF_KEYUP:
+                _send(_key(vk=vk, flags=flags))
+                held.pop()
+            else:
+                # Never pause with a modifier held. Finish this key pair, then observe Stop.
+                held.append((vk, flags))
+                _send(_key(vk=vk, flags=flags))
+    finally:
+        for vk, flags in reversed(held):
+            _send(_key(vk=vk, flags=flags | KEYEVENTF_KEYUP))
 
 
 def type_text(text: str) -> None:
     for unit, flags in unicode_events(text):
-        _send(_key(scan=unit, flags=flags))
+        if flags & KEYEVENTF_KEYUP:
+            continue
+        check_abort()
+        try:
+            _send(_key(scan=unit, flags=flags))
+        finally:
+            _send(_key(scan=unit, flags=flags | KEYEVENTF_KEYUP))
 
 
 def clear_field() -> None:
@@ -294,9 +328,11 @@ def clear_field() -> None:
 
 def scroll(lines: int) -> None:
     """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
+    check_abort()
     center = frontmost_window_center()
     if center is not None:
         _move((round(center[0]), round(center[1])))
+    check_abort()
     _send(_mouse(MOUSEEVENTF_WHEEL, wheel_delta(lines)))
 
 
@@ -345,14 +381,18 @@ def _find_window(app: str) -> int | None:
 
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
+    check_abort()
     hwnd = _find_window(app)
     if hwnd is None:
         return False
+    check_abort()
     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    check_abort()
     with suppress(Exception):  # Windows may refuse focus theft; the check below reports it
         win32gui.SetForegroundWindow(hwnd)
     end = time.monotonic() + timeout
     while time.monotonic() < end:
+        check_abort()
         if win32gui.GetForegroundWindow() == hwnd:
             return True
         time.sleep(0.1)
@@ -360,10 +400,13 @@ def activate(app: str, timeout: float = 3.0) -> bool:
 
 
 def open_url(browser: str, url: str) -> bool:
+    check_abort()
     exe = next((exe for name, exe in BROWSER_EXES.items() if name.lower() == browser.strip().lower()), None)
     if exe and shutil.which(exe):
+        check_abort()
         subprocess.Popen([exe, url])
     else:
+        check_abort()
         webbrowser.open(url)
     return activate(browser)
 
@@ -387,6 +430,7 @@ def browser_url(browser: str) -> str | None:
 
 def open_path(path: Path, as_text: bool = False) -> None:
     """Show a file to the user in its default app; a .txt already opens in the text editor."""
+    check_abort()
     os.startfile(path)
 
 
@@ -497,6 +541,7 @@ def focused_field() -> Field | None:
 
 def ax_press(ref) -> bool:
     """Invoke an element, or run its named legacy default action: the same rule as `pressable`."""
+    check_abort()
     invoke = _pattern(ref, auto.PatternId.InvokePattern)
     try:
         if invoke is not None:
@@ -512,6 +557,7 @@ def ax_press(ref) -> bool:
 
 def ax_focus(ref) -> bool:
     """Give an element the keyboard focus."""
+    check_abort()
     try:
         return bool(ref.SetFocus())
     except Exception:
@@ -520,6 +566,7 @@ def ax_focus(ref) -> bool:
 
 def ax_set_value(ref, text: str) -> bool:
     """Write an element's value. A read-only or unwilling element reports an error."""
+    check_abort()
     pattern = _pattern(ref, auto.PatternId.ValuePattern)
     try:
         return pattern is not None and bool(pattern.SetValue(text))
@@ -558,11 +605,15 @@ def _ui_attrs(element) -> AxAttrs:
 
 
 def _ui_actions(element) -> list[str]:
+    if not getattr(element, "IsEnabled", True):
+        return ["AXDisabled"]
     has_invoke = _pattern(element, auto.PatternId.InvokePattern) is not None
     return [AX_PRESS] if pressable(has_invoke, "" if has_invoke else _ui_default_action(element)) else []
 
 
-def actionable_elements(pid: int, display_w_pt: float, display_h_pt: float) -> tuple[list[AxNode], list[AxNode], bool]:
+def actionable_elements(
+    pid: int, display_w_pt: float, display_h_pt: float, *, focused_only: bool = False
+) -> tuple[list[AxNode], list[AxNode], bool]:
     """Labelled controls of the foreground window, in screen pixels, and the pressable off-screen
     ones. Best effort: a window that refuses UI Automation, or belongs to a different process, or
     has none, yields nothing."""
@@ -574,3 +625,96 @@ def actionable_elements(pid: int, display_w_pt: float, display_h_pt: float) -> t
     except Exception:
         return [], [], False
     return walk_actionable(root, _ui_children, _ui_attrs, _ui_actions, display_w_pt, display_h_pt)
+
+
+def execution_tabs(browser: str) -> dict:
+    return {"tabs": {}, "active": "", "unsupported": True}
+
+
+def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
+    from .models import DesktopError
+
+    raise DesktopError("Stable browser tab operations on Windows require an explicitly configured CDP connection")
+
+
+def execution_shortcut(key: str, modifiers: tuple[str, ...]) -> None:
+    from .execution.contracts import MODIFIERS
+    from .models import DesktopError
+
+    codes = {
+        **VK,
+        **{c: ord(c.upper()) for c in "abcdefghijklmnopqrstuvwxyz"},
+        "space": 0x20,
+        "right": 0x27,
+        "up": 0x26,
+        "down": 0x28,
+        "home": 0x24,
+        "end": 0x23,
+    }
+    if key not in codes or not set(modifiers) <= MODIFIERS:
+        raise DesktopError("Invalid key or shortcut")
+    check_abort()
+    mods = {"command": VK_CONTROL, "control": VK_CONTROL, "alt": VK_ALT, "shift": 0x10}
+    held = []
+    try:
+        for vk in dict.fromkeys([*(mods[m] for m in modifiers), codes[key]]):
+            held.append(vk)
+            _send(_key(vk=vk))
+    finally:
+        for vk in reversed(held):
+            _send(_key(vk=vk, flags=KEYEVENTF_KEYUP))
+
+
+def execution_scrolls(pid: int) -> list[dict]:
+    hwnd = win32gui.GetForegroundWindow()
+    if _window_pid(hwnd) != pid:
+        return []
+    pending, result = [auto.ControlFromHandle(hwnd)], []
+    for _ in range(512):
+        if not pending:
+            break
+        el = pending.pop(0)
+        pattern = _pattern(el, auto.PatternId.ScrollPattern)
+        if pattern and pattern.VerticallyScrollable:
+            result.append(
+                {
+                    "id": str(el.GetRuntimeId()),
+                    "label": el.Name or "scroll area",
+                    "position": float(pattern.VerticalScrollPercent),
+                    "maximum": 100.0,
+                    "ref": el,
+                }
+            )
+        pending.extend(_ui_children(el)[:100])
+    return result[:32]
+
+
+def execution_labels(pid: int) -> list[dict]:
+    from .control import checkpoint
+
+    hwnd = win32gui.GetForegroundWindow()
+    if _window_pid(hwnd) != pid:
+        return []
+    pending, result = [auto.ControlFromHandle(hwnd)], []
+    deadline = time.monotonic() + 0.15
+    for _ in range(512):
+        if not pending or len(result) >= 80 or time.monotonic() >= deadline:
+            break
+        checkpoint()
+        el = pending.pop(0)
+        if el.ControlTypeName == "TextControl" and el.Name and not el.IsOffscreen:
+            result.append({"id": str(el.GetRuntimeId()), "label": str(el.Name)[:300]})
+        pending.extend(_ui_children(el)[:100])
+    return result
+
+
+def execution_scroll(ref, direction: str) -> None:
+    from .models import DesktopError
+
+    check_abort()
+    if direction not in {"up", "down"}:
+        raise DesktopError("Invalid scroll direction")
+    pattern = _pattern(ref, auto.PatternId.ScrollPattern)
+    if not pattern or not pattern.VerticallyScrollable:
+        raise DesktopError("Target cannot scroll")
+    pattern.SetScrollPercent(-1, min(100, max(0, pattern.VerticalScrollPercent + (10 if direction == "down" else -10))))

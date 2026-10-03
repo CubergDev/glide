@@ -199,10 +199,23 @@ def walk_actionable(
         visible = not hidden and clickable(frame) and center_on_display(frame, display_w_pt, display_h_pt)
         if label and not duplicate and not nameless_group and not wrapper:
             if visible:
-                pressable = AX_PRESS in actions(node)
+                supported = actions(node)
+                pressable = AX_PRESS in supported
                 if pressable or role in AX_ACTIONABLE_ROLES:
                     x, y, w, h = frame
-                    found.append(AxNode(role=role, label=label, x=x, y=y, w=w, h=h, pressable=pressable, ref=node))
+                    found.append(
+                        AxNode(
+                            role=role,
+                            label=label,
+                            x=x,
+                            y=y,
+                            w=w,
+                            h=h,
+                            pressable=pressable,
+                            ref=node,
+                            enabled="AXDisabled" not in supported,
+                        )
+                    )
                     emitted = True
             elif frame is not None and len(offscreen) < offscreen_cap and AX_PRESS in actions(node):
                 x, y, w, h = frame

@@ -6,6 +6,7 @@ import pytest
 from world import FakeWriter, Page, World, drive, scripted
 
 from glide.computer.calls import Calls, MeteredClassifier, MeteredWriter, Usage
+from glide.computer.control import RunControl, controlled
 from glide.computer.generation import GenerationRequest, GenerationResult, TokenUsage
 
 REQUEST = GenerationRequest(model="", instructions="be brief", text="{}", schema={"type": "object"})
@@ -52,15 +53,29 @@ def test_the_writer_passes_the_request_and_the_cancel_on_untouched():
 def test_a_request_that_fails_was_still_made():
     calls = Calls()
 
-    def refuse(request, cancel=None):
+    def refuse(request, cancel):
         raise RuntimeError("no")
 
     writer = MeteredWriter(SimpleNamespace(generate=refuse), calls)
 
     with pytest.raises(RuntimeError):
-        writer.generate(REQUEST)
+        writer.generate(GenerationRequest("m", "", "", {}))
     assert calls.count["writer"] == 1
     assert calls.usage == {}  # no reply, so no tokens reported
+
+
+def test_live_events_name_actual_returned_models_and_roles():
+    events = []
+    classifier = MeteredClassifier(SimpleNamespace(system_one=lambda **kw: SimpleNamespace(model="jev-resolved")), Calls())
+    writer = MeteredWriter(SimpleNamespace(generate=lambda req, cancel: GenerationResult("ok", "writer-resolved")), Calls())
+    with controlled(RunControl("task", events.append)):
+        classifier.system_one(model="jev-alias")
+        writer.generate(GenerationRequest("writer-alias", "", "", {}))
+    assert [(e.kind, e.model, e.role) for e in events] == [
+        ("classifier_completed", "jev-resolved", "classifier"),
+        ("model_completed", "writer-resolved", "writer"),
+    ]
+    assert all(e.elapsed_s >= 0 and not e.text for e in events)
 
 
 def test_the_classifier_counts_tokens_under_the_model_its_reply_names():
@@ -86,16 +101,13 @@ def test_the_classifier_counts_tokens_under_the_model_its_reply_names():
 
 def test_the_writer_counts_each_reply_under_the_model_that_answered_with_cache_reads_apart():
     calls = Calls()
-    replies = {
-        "writer-model": GenerationResult("{}", "writer-model", TokenUsage(1050, 3000, 80)),
-        "answer-model": GenerationResult("{}", "answer-model", TokenUsage(1050, 3000, 80)),
-    }
-    client = SimpleNamespace(generate=lambda request, cancel=None: replies[request.model])
+    usage = TokenUsage(1050, 3000, 80)
+    client = SimpleNamespace(generate=lambda request, cancel: GenerationResult("ok", request.model, usage))
     writer = MeteredWriter(client, calls)
 
-    writer.generate(replace(REQUEST, model="writer-model"))
-    writer.generate(replace(REQUEST, model="answer-model"))
-    writer.generate(replace(REQUEST, model="answer-model"))
+    writer.generate(GenerationRequest("writer-model", "", "", {}))
+    writer.generate(GenerationRequest("answer-model", "", "", {}))
+    writer.generate(GenerationRequest("answer-model", "", "", {}))
 
     assert calls.tokens() == {
         "writer-model": {"requests": 1, "input_tokens": 1050, "cached_input_tokens": 3000, "output_tokens": 80},
@@ -135,3 +147,17 @@ def test_run_json_shows_tokens_per_model_and_the_calls_line_is_unchanged(monkeyp
     assert run["calls"]["classifier"]["calls"] == 1
     log = (tmp_path / "run" / "run.log").read_text()
     assert "calls: classifier 1 (50%, " in log and "writer 1 (50%, " in log
+
+
+def test_request_content_is_traced_only_when_recording_is_opted_into(tmp_path):
+    from glide.computer.diagnostics import Diagnostics
+
+    request = GenerationRequest("m", "be brief", "secret page text", {})
+    writer = MeteredWriter(SimpleNamespace(generate=lambda request, cancel: GenerationResult("answer", "m")), Calls())
+    for opted_in in (False, True):
+        recorder = Diagnostics(tmp_path, record_content=opted_in)
+        with recorder.activate():
+            writer.generate(request)
+        names = [item["event"] for item in recorder.events]
+        assert ("model_request_content" in names) is opted_in
+        assert ("secret page text" in str(list(recorder.events))) is opted_in

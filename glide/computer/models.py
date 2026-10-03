@@ -41,6 +41,34 @@ class Missed(Exception):
     """A click that could not be aimed: the pointer did not reach the point, so nothing was pressed."""
 
 
+class DesktopError(RuntimeError):
+    """The desktop cannot be used; stop without model recovery or action replay."""
+
+
+class DesktopPermissionError(DesktopError):
+    """A required OS permission has not been granted to this launch context."""
+
+
+class BrowserConnectionError(DesktopError):
+    """Safe transport metadata, without page content or raw provider error strings."""
+
+    def __init__(self, provider, endpoint, error):
+        reason = getattr(error, "reason", error)
+        self.details = {
+            "provider": provider,
+            "endpoint": endpoint,
+            "error_type": type(error).__name__,
+            "cause_type": type(reason).__name__,
+            "errno": getattr(reason, "errno", None),
+        }
+        hint = (
+            "Open the selected Playwright CLI session and try again."
+            if provider == "playwright-cli"
+            else "Start or reconnect the selected debugging browser/server, or choose another provider."
+        )
+        super().__init__(f"Cannot connect to {provider} at {endpoint}. {hint}")
+
+
 @dataclass(frozen=True)
 class Exchange:
     """One question the writer put to the user, and what the user said."""
@@ -163,6 +191,7 @@ class AxNode:
     pressable: bool
     ref: object | None = field(default=None, compare=False, repr=False)
     covered_by: Popup | None = None
+    enabled: bool = True
 
     @property
     def role_word(self) -> str:
