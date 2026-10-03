@@ -20,7 +20,7 @@ from glide.computer.generation import GenerationError, GenerationRequest
 from glide.providers import config as config_module
 from glide.providers.base import Audio, ChatResult, SpeechAudio, Transcript, Usage
 from glide.providers.chain import SwitchEvent
-from glide.providers.classifier import ChainedClassifier, ClassifierReply, LLMClassifier
+from glide.providers.classifier import ChainedClassifier, ClassifierReply, LLMClassifier, classifier_factory
 from glide.providers.config import (
     DEFAULT_TOML,
     PRESETS,
@@ -716,6 +716,36 @@ def test_a_failing_typesafe_slot_falls_back_to_the_classifier_over_the_fast_llm(
     assert cfg.classifier().last_slot == "llm.fast"
     assert fakes.log == ["typesafe:jev-latest", "openai:gpt-a"]  # the LLM slot is the first slot of the fast chain
     assert [(e.role, e.from_slot, e.to_slot) for e in heard] == [("classifier", "typesafe:jev-latest", "llm.fast")]
+
+
+def test_the_classifier_factory_hands_the_run_the_provider_chain_with_failover_and_a_visible_switch():
+    cfg, fakes = make(FAST)
+    heard = []
+    cfg.on_switch(heard.append)
+    fakes.fail["typesafe:jev-latest"] = ProviderError("down", kind="transport", provider="typesafe:jev-latest")
+    factory = classifier_factory(cfg)
+    questions = {"q": Choice(criteria={"a": None, "b": None})}
+
+    for _ in range(2):  # a run closes what it was given; the next run must still have a classifier
+        with factory() as classifier:
+            assert isinstance(classifier, ChainedClassifier) and classifier.chain is cfg.chain("classifier")
+            assert classifier.system_one(state="s", questions=questions).answers["q"].choice == "a"
+            assert classifier.last_slot == "llm.fast"
+    assert [(e.role, e.from_slot, e.to_slot, e.kind) for e in heard][0] == (
+        "classifier",
+        "typesafe:jev-latest",
+        "llm.fast",
+        "transport",
+    )
+    assert fakes.client("openai:gpt-a").closed is False  # the slots are lent: closing the run's classifier left them open
+
+
+def test_a_classifier_factory_with_no_usable_slot_is_a_provider_failure_naming_the_variables():
+    cfg, _ = make("", env={})
+    with pytest.raises(ProviderError) as caught:
+        classifier_factory(cfg)()
+    assert caught.value.kind == "auth" and caught.value.provider == "classifier"
+    assert "TYPESAFE_API_KEY" in str(caught.value)
 
 
 def test_the_classifier_over_the_fast_llm_is_skipped_when_the_fast_chain_is_unusable():
