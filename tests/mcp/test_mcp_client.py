@@ -10,8 +10,6 @@ from glide.mcp import MCPCallError, SessionClient
 from glide.mcp.client import to_provider_error
 from glide.providers.errors import ProviderError
 
-pytestmark = pytest.mark.anyio
-
 TOOL = {"name": "lookup", "description": "d", "inputSchema": {"type": "object"}}
 
 
