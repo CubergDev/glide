@@ -130,6 +130,7 @@ class ChainWriter:
             result.model,
             _usage(result.usage),
             completed=result.finish_reason not in CUT_SHORT,
+            stop_reason=result.finish_reason,
         )
 
     def _route(self, role: str) -> tuple[str, ChatFacade]:
