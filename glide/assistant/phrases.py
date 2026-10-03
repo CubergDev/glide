@@ -57,6 +57,11 @@ PHRASES: dict[str, dict[str, str]] = {
         "yue": "有啲服務未設定好，所以暫時做唔到。",
         "zh": "有服务还没有设置好，暂时做不了。",
     },
+    "desktop": {
+        "en": "I could not reach the screen or the browser, so nothing was done. Check the permissions and the debugging browser.",
+        "yue": "我連唔到螢幕或者瀏覽器，所以乜都冇做。請檢查權限同除錯瀏覽器。",
+        "zh": "我连不上屏幕或浏览器，所以什么都没做。请检查权限和调试浏览器。",
+    },
     "no_permission": {
         "en": "I need Accessibility permission to act on this Mac.",
         "yue": "我需要輔助使用權限先可以操作呢部 Mac。",
