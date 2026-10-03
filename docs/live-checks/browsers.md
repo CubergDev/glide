@@ -21,8 +21,8 @@ step that changed a page.
 
 ### A small read-only probe
 
-Until the engine is merged (see the last section), no command line entry point selects these providers. This snippet
-uses only the backends. It makes the same calls the engine will, so run it only where you accept that:
+This snippet uses only the backends, read-only, and prints counts. It makes the same calls the engine makes, so run it only
+where you accept that. The end-to-end command is `glide computer GOAL --engine structured --act` (section 6):
 
 ```
 uv run --python 3.13 python - <<'PY'
@@ -136,10 +136,12 @@ fallback = ["obscura"]
 | Stop CDP **during** a task | The task fails with a connection error. It does **not** move to Obscura: a switch happens only before anything is done |
 | `fallback = ["native"]` | Refused at start: the native desktop is never a fallback |
 
-## 6. After the engine is merged
+## 6. End to end, through the engine
 
-Not possible yet: the engine (exec-core) is what calls `providers.make_backend`, and nothing else selects a provider.
-After that merge, repeat sections 1 to 4 end to end with `glide-computer`, using the entry points that branch documents,
-once each, and add: a task that opens a new tab on a loopback test page and reads it; the zero-action refusal when the
-browser is down (the run must report "blocked" with the setting to fix and `steps_taken` of 0); and `glide doctor` for the
-model providers, which does not test browsers.
+The engine is merged. It is reached only by `glide computer`, not by the assistant (`ask`, `chat`, `listen`, `voice` still use the
+legacy loop). Repeat sections 1 to 4 end to end, once per provider, with
+`GLIDE_BROWSER_PROVIDER=<provider> glide computer "<task>" --engine structured --act --out runs/<name>` (add the endpoint, target
+or session variables from `glide.toml.example`). Without `--act` the run stops after one proposed step with outcome `dry run`.
+Add: a task that opens a new tab on a loopback test page and reads it; the zero-action refusal when the browser is down (the run
+must report "blocked" with the setting to fix, `steps_taken` of 0 and exit status 1); and `glide doctor` for the model providers,
+which does not test browsers. [../LIVE_CHECKS.md](../LIVE_CHECKS.md) indexes this with every other live check.

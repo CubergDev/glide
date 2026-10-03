@@ -42,7 +42,7 @@ Not shown, and why:
   both roles reachable. Without `[llm.research]` the role stands on `smart`, which works but is not what you are
   checking.
 - A browser provider the engine supports is running as that provider documents (CDP first: it is the only one ever
-  qualified). The merged engine and router must be on your branch: this package alone has no command of its own.
+  qualified). The engine is reached through `glide computer GOAL --engine structured --act`; the assistant's own tasks do not use it yet (decision D9).
 - Run each task with content recording on (the CLI's `--record-content`) when a step says to read `run.json`, and
   with it off when a step says it must stay out.
 
