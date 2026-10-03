@@ -13,7 +13,52 @@ dependencies = [
     "ocrmac==1.0.1; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices==12.2.2; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+    # The Windows adapter (glide/computer/windows.py) imports these at module scope. Markers keep a Mac install unchanged.
+    "psutil==7.2.2; sys_platform == 'win32'",
+    "pywin32==312; sys_platform == 'win32'",
+    "uiautomation==2.0.29; sys_platform == 'win32'",
+    "winocr==0.0.15; sys_platform == 'win32'",
 ]
+
+# Core stays small. Every feature beyond it is an extra, and `all` installs them together:
+#   uv sync --extra speech        uv sync --all-extras
+# Core pins above are kept as they were. Extras use ranges: each lower bound is the version the source variants
+# were built against (a point-in-time claim, re-checked with `uv lock`), each upper bound the next breaking release.
+# Nothing here is imported by the core: a feature that needs one imports it lazily and reports a missing extra.
+[project.optional-dependencies]
+# Hands-free voice: Silero VAD (numpy + onnxruntime), a full-duplex audio device, realtime TTS over websockets.
+speech = [
+    "numpy>=2.5.3,<3",
+    "onnxruntime>=1.30,<2",
+    "sounddevice>=0.5.6,<1",
+    "websockets>=17.1,<18",
+]
+# The PySide6 pet. Optional until the SwiftUI pet exists (decision D11). Cocoa must match the core's pyobjc pins.
+ui = [
+    "PySide6>=6.10,<7",
+    "pyobjc-framework-Cocoa==12.2.2; sys_platform == 'darwin'",
+]
+# The webhook listener and its worker. PyJWT verifies the sender's token (a webhook trust anchor, not a model sign-in).
+webhooks = [
+    "fastapi>=0.142,<1",
+    "uvicorn>=0.54,<1",
+    "pydantic>=2.13,<3",
+    "pyjwt[crypto]>=2.15.1,<3",
+]
+# Glide as an MCP server and client. 1.30 is what the memory extension's SDK tests were written against;
+# 2.x exists and is unchecked, so it is excluded until someone runs those tests against it.
+mcp = ["mcp>=1.30,<2"]
+# Portable OCR for machines without macOS Vision (RapidOCR on onnxruntime).
+ocr = [
+    "rapidocr>=3.9.2,<4",
+    "onnxruntime>=1.30,<2",
+]
+# Optional OS keychain storage for provider keys. The core reads keys from environment variables only (decision D4).
+keyring = ["keyring>=25.7,<26"]
+# Personalization and memory (SQLite, standard library only): no packages to add. The extra exists so installs and
+# docs name the feature; MCP-facing parts also need the `mcp` extra.
+memory = []
+all = ["glide[speech,ui,webhooks,mcp,ocr,keyring,memory]"]
 
 [project.scripts]
 glide = "glide.cli:main"
