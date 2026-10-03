@@ -18,22 +18,16 @@ SCANNED = sorted(
 )
 
 BANNED_MODULES = {"subprocess", "multiprocessing", "pty", "pexpect", "webbrowser"}
-BANNED_NAMES = {
-    "Popen",
-    "system",
-    "popen",
-    "fork",
-    "forkpty",
-    "posix_spawn",
-    "posix_spawnp",
-    "startfile",
-    "create_subprocess_exec",
-    "create_subprocess_shell",
-}
+ANYWHERE = {"Popen", "create_subprocess_exec", "create_subprocess_shell"}  # no other meaning
+ON_OS = {"system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile"}  # only as os.<name>
 
 
 def process_starts(source: str) -> list[str]:
-    """What in `source` could start a process: banned imports, banned names, os.exec*/os.spawn* calls."""
+    """What in `source` could start a process: banned imports, Popen, and os.<name> calls that run or replace a process."""
+
+    def on_os(name):
+        return name in ON_OS or name.startswith(("exec", "spawn"))
+
     found = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -41,15 +35,11 @@ def process_starts(source: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             if (node.module or "").split(".")[0] in BANNED_MODULES:
                 found.append(node.module)
-            found += [
-                a.name
-                for a in node.names
-                if a.name in BANNED_NAMES or (node.module == "os" and a.name.startswith(("exec", "spawn")))
-            ]
+            found += [a.name for a in node.names if a.name in ANYWHERE or (node.module == "os" and on_os(a.name))]
         elif isinstance(node, ast.Attribute | ast.Name):
             name = node.attr if isinstance(node, ast.Attribute) else node.id
-            on_os = isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os"
-            if name in BANNED_NAMES or (on_os and name.startswith(("exec", "spawn"))):
+            via_os = isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os"
+            if name in ANYWHERE or (via_os and on_os(name)):
                 found.append(name)
     return found
 
@@ -67,6 +57,8 @@ def test_the_scan_sees_each_way_of_starting_a_process():
     ):
         assert process_starts(source), source
     assert not process_starts("import os\nos.path.join('a', 'b')\nx = {'run': 1}")
+    # Ordinary names that happen to match are not process starts.
+    assert not process_starts("system = 'prompt'\nrequest.system\nrequest.fork()\nself.spawn_count = 1\ndef execute(): pass")
 
 
 @pytest.mark.parametrize("path", SCANNED, ids=lambda p: p.name)
