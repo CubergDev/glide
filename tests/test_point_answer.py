@@ -34,7 +34,8 @@ def reply_writer(text=GOOD, stop="end_turn"):
 
 
 def test_a_good_answer_is_returned_as_text_and_a_flag():
-    assert compose_point_answer(reply_writer(), "Explain", {}) == PointAnswer("This is error 0007. Check the connection.", False)
+    answer = compose_point_answer(reply_writer(), "Explain", {})
+    assert answer == PointAnswer("This is error 0007. Check the connection.", False, "fixture")
 
 
 @pytest.mark.parametrize(
@@ -64,7 +65,7 @@ def test_malformed_or_truncated_answers_are_not_shown(text, stop):
 
 def test_complete_thinking_is_removed_and_not_shown():
     reply = '<think>private reasoning</think>{"answer":"Visible answer.","uncertain":true}'
-    assert compose_point_answer(reply_writer(reply), "Explain", {}) == PointAnswer("Visible answer.", True)
+    assert compose_point_answer(reply_writer(reply), "Explain", {}) == PointAnswer("Visible answer.", True, "fixture")
 
 
 def test_an_error_never_repeats_what_the_provider_wrote():

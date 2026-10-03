@@ -60,6 +60,7 @@ SYSTEM = (
 class PointAnswer:
     text: str
     uncertain: bool
+    model: str = ""  # which model the chain actually used, as the provider named it
 
 
 def compose_point_answer(
@@ -92,7 +93,7 @@ def compose_point_answer(
     text = reply["answer"].strip()
     if not text or len(text) > ANSWER_CHARS or UNFINISHED_THINK.search(text):
         raise WriterError("The answer has no usable visible text.")
-    return PointAnswer(text, reply["uncertain"])
+    return PointAnswer(text, reply["uncertain"], response.model)
 
 
 def _one_object(raw: str) -> dict:
