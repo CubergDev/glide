@@ -11,7 +11,8 @@ Every step here uses your screen, your browser and a real model, so each one nee
 
 ## What the offline tests do and do not show
 
-Shown (`tests/test_research_execution.py`, `tests/test_page_reading.py`):
+Shown (`tests/test_research_execution.py`, `tests/test_engine_research.py` for the supervisor inside the engine,
+`tests/test_page_reading.py`):
 
 - the model's decision is validated and corrected once before anything is dispatched; a transport failure is
   never retried;
@@ -42,7 +43,9 @@ Not shown, and why:
   both roles reachable. Without `[llm.research]` the role stands on `smart`, which works but is not what you are
   checking.
 - A browser provider the engine supports is running as that provider documents (CDP first: it is the only one ever
-  qualified). The merged engine and router must be on your branch: this package alone has no command of its own.
+  qualified). Run research with `glide computer --engine structured`. `[research] calls` (or `GLIDE_RESEARCH_CALLS`)
+  bounds its model calls, and `[browser] search_url` (or `GLIDE_SEARCH_URL`) is where it searches when your words name
+  no site: Glide has no built-in one.
 - Run each task with content recording on (the CLI's `--record-content`) when a step says to read `run.json`, and
   with it off when a step says it must stay out.
 

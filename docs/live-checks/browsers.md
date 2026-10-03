@@ -21,8 +21,9 @@ step that changed a page.
 
 ### A small read-only probe
 
-Until the engine is merged (see the last section), no command line entry point selects these providers. This snippet
-uses only the backends. It makes the same calls the engine will, so run it only where you accept that:
+`glide computer --engine structured` selects a provider from `[browser]` (or `--browser-provider` and its siblings) and
+prints which one it will use. This snippet uses only the backends, with no model and no task. It makes the same calls
+the engine makes, so run it only where you accept that:
 
 ```
 uv run --python 3.13 python - <<'PY'
@@ -136,10 +137,10 @@ fallback = ["obscura"]
 | Stop CDP **during** a task | The task fails with a connection error. It does **not** move to Obscura: a switch happens only before anything is done |
 | `fallback = ["native"]` | Refused at start: the native desktop is never a fallback |
 
-## 6. After the engine is merged
+## 6. End to end
 
-Not possible yet: the engine (exec-core) is what calls `providers.make_backend`, and nothing else selects a provider.
-After that merge, repeat sections 1 to 4 end to end with `glide-computer`, using the entry points that branch documents,
-once each, and add: a task that opens a new tab on a loopback test page and reads it; the zero-action refusal when the
+The engine calls `providers.make_backend` and nothing else selects a provider; a fallback is announced on the terminal
+(`fallback: browser cdp -> obscura (BrowserConnectionError)`) and kept in `run.json` as `browser_switches`. Repeat
+sections 1 to 4 end to end with `glide computer --engine structured`, once each, and add: a task that opens a new tab on a loopback test page and reads it; the zero-action refusal when the
 browser is down (the run must report "blocked" with the setting to fix and `steps_taken` of 0); and `glide doctor` for the
 model providers, which does not test browsers.
