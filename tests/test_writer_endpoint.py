@@ -64,7 +64,7 @@ def test_the_answer_goes_to_the_smart_model_with_the_capture_as_a_data_url(clean
 
 
 def test_a_text_only_model_gets_the_screen_text_and_no_capture(clean_env, endpoint, screen, make_item):
-    clean_env.setenv("CLICKER_WRITER_VISION", "false")
+    clean_env.setenv("GLIDE_WRITER_VISION", "false")
     endpoint.state["reply"] = ANSWER
     compose_answer(writer_for(endpoint.url), "find the concert", screen, [make_item(0, "SEP 19")], [], "the goal is achieved")
     assert [part["type"] for part in endpoint.seen[0]["body"]["messages"][1]["content"]] == ["text"]

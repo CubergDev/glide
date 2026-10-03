@@ -68,7 +68,7 @@ CONTROL_TYPE_TO_ROLE = {
     "TextControl": "AXStaticText",
 }
 
-# The browsers the site catalog can open, by the name CLICKER_BROWSER gives and their executable.
+# The browsers the site catalog can open, by the name GLIDE_BROWSER gives and their executable.
 # The frontmost app is reported by the same name, so the classifier sees one browser, not two.
 BROWSER_EXES = {"Google Chrome": "chrome", "Microsoft Edge": "msedge", "Firefox": "firefox", "Brave Browser": "brave"}
 

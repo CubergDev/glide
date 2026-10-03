@@ -402,24 +402,6 @@ ALLOWLIST: tuple[Exception_, ...] = (
 # glide.toml or a documented example. Delete the entry in the change that moves it; the test fails if it lingers.
 D6_DEBT: tuple[Exception_, ...] = (
     Exception_(
-        "glide/computer/config.py",
-        "model-id",
-        "claude-haiku-4-5",
-        "DEFAULT_WRITER_MODEL is a model id in code; belongs in the writer role of glide.toml (D1, D6).",
-    ),
-    Exception_(
-        "glide/computer/config.py",
-        "model-id",
-        "claude-sonnet-5",
-        "DEFAULT_ANSWER_MODEL is a model id in code; belongs in glide.toml (D1, D6).",
-    ),
-    Exception_(
-        "glide/computer/config.py",
-        "endpoint",
-        "api.anthropic.com",
-        "ANTHROPIC_HOST names a vendor host in code; the endpoint must come from configuration (D6).",
-    ),
-    Exception_(
         "glide/providers/config.py",
         "endpoint",
         "https://api.openai.com/v1",

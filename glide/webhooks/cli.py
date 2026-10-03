@@ -28,7 +28,9 @@ def check(settings) -> None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="glide-webhooks", description="Receive authenticated webhooks and queue agent requests")
+    parser = argparse.ArgumentParser(
+        prog="glide webhooks serve", description="Receive authenticated webhooks and queue agent requests"
+    )
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("GLIDE_WEBHOOK_CONFIG", "webhooks.json")))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)

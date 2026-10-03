@@ -409,7 +409,7 @@ def run_one(transport, *, stop: threading.Event | None = None, **options) -> boo
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="glide-webhook-worker", description="Consume verified requests on one agent execution owner"
+        prog="glide webhooks work", description="Consume verified requests on one agent execution owner"
     )
     parser.add_argument("--server", required=True)
     parser.add_argument("--agent", required=True)

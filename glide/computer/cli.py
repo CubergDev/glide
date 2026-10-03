@@ -1,9 +1,14 @@
-"""Command-line entry points: `clicker` and `clicker-inspect`."""
+"""`glide computer` and `glide inspect`: the screen-driving loop, and a look at what it would send.
+
+Both are reached through the one `glide` command (glide/cli.py), which loads glide.toml, prints every provider
+switch, and hands the loaded configuration to `main`. `glide-computer` and `glide-inspect` are the same two
+commands under their older names. Nothing here starts a run, opens a window or captures the screen until the
+person has typed the command.
+"""
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 import uuid
@@ -19,13 +24,15 @@ from .runner import RunConfig, run
 from .timing import format_timing
 from .writer import make_writer, provider
 
-DOTENV = Path.cwd() / ".env"
+WRITER_DISABLED = (
+    "writer disabled: no usable llm provider in glide.toml; type_text, writer-proposed URLs and the final answer need one "
+    "(run `glide doctor`)"
+)
 
 
-def _prepare() -> None:
-    config.load_dotenv(DOTENV)
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        sys.exit("TYPESAFE_API_KEY is not set (export it or put it in .env)")
+def _fail(message: str, code: int = 2) -> int:
+    print(f"glide computer: {message}", file=sys.stderr)
+    return code
 
 
 def ask_user(question: str) -> str:
@@ -39,10 +46,13 @@ def ask_user(question: str) -> str:
         return ""
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None, glide_config) -> int:
+    """Drive this computer toward a goal. `glide_config` is the loaded `GlideConfig`: its writer and classifier chains
+    do the thinking, and every fallback between their slots is announced by the listener `glide` registered on it."""
+    from ..providers.config import ConfigError
+
     parser = argparse.ArgumentParser(
-        prog="clicker",
-        description="Drive this computer toward a goal: screen OCR, a TypeSafe classifier, deterministic actions.",
+        prog="glide computer", description="Drive this computer toward a goal: screen OCR, a classifier, deterministic actions."
     )
     parser.add_argument("goal", help="what you want done on this computer")
     parser.add_argument("--act", action="store_true", help="actually click and type (default: dry run, one step)")
@@ -66,18 +76,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--url", help="browser URL to report during replay")
     args = parser.parse_args(argv)
 
-    _prepare()
     if args.act and not desktop.accessibility_trusted():
-        sys.exit("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
+        return _fail("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     try:
-        writer = make_writer()
+        writer = make_writer(glide_config)
         config.writer_vision()  # a bad value stops the run here, not at its first stop
-    except ValueError as e:
-        sys.exit(str(e))
+    except ValueError as e:  # a ConfigError is one
+        return _fail(str(e))
     if writer is None:
-        print(
-            "writer disabled: no ANTHROPIC_API_KEY or CLICKER_WRITER_BASE_URL; type_text, writer-proposed URLs and the final answer need one"
-        )
+        print(WRITER_DISABLED)
     else:
         print(f"writer: {provider(writer)}")
 
@@ -95,12 +102,12 @@ def main(argv: list[str] | None = None) -> None:
         record_content=args.record_content,
     )
 
-    def ctx_factory(typesafe, history):
+    def ctx_factory(classifier, history):
         return Context(
             goal=args.goal,
             browser=config.browser(),
             email=config.email(),
-            typesafe=typesafe,
+            typesafe=classifier,
             writer=writer,
             history=history,
             ask=ask_user if sys.stdin.isatty() else None,
@@ -108,22 +115,23 @@ def main(argv: list[str] | None = None) -> None:
 
     # The run prints nothing of its own; this terminal shows what it reports, and Ctrl-C reaches it as a stop.
     control = RunControl(str(uuid.uuid4()), lambda event: print(event.text) if event.text else None)
-    state = run(cfg, ctx_factory, control=control)
-    if state.outcome.startswith("aborted"):
-        sys.exit(130)
+    try:
+        state = run(cfg, ctx_factory, classifier_factory=glide_config.classifier, control=control)
+    except ConfigError as e:  # no classifier slot is usable: the message names the variables to set
+        return _fail(glide_config.scrub(str(e)))
+    return 130 if state.outcome.startswith("aborted") else 0
 
 
-def inspect(argv: list[str] | None = None) -> None:
+def inspect(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="clicker-inspect",
-        description="Count down, capture the screen, and show exactly what the clicker would send to TypeSafe.",
+        prog="glide inspect",
+        description="Count down, capture the screen, and show exactly what the classifier would be sent.",
     )
     parser.add_argument("goal", nargs="?", default="(no goal given)")
     parser.add_argument("--countdown", type=int, default=3)
     parser.add_argument("--no-open", action="store_true", help="write files without opening them")
     parser.add_argument("--out", type=Path, default=Path("inspections") / time.strftime("%Y%m%d-%H%M%S"))
     args = parser.parse_args(argv)
-    config.load_dotenv(DOTENV)
     args.out.mkdir(parents=True, exist_ok=True)
 
     for n in range(args.countdown, 0, -1):
@@ -150,3 +158,4 @@ def inspect(argv: list[str] | None = None) -> None:
     if not args.no_open:
         desktop.open_path(annotated)
         desktop.open_path(text, as_text=True)
+    return 0

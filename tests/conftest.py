@@ -650,21 +650,16 @@ def make_item():
 
 @pytest.fixture
 def tmp_env(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("CLICKER_TEST_KEY", raising=False)
+    monkeypatch.delenv("GLIDE_TEST_KEY", raising=False)
     return tmp_path
 
 
 WRITER_ENV = (
-    "CLICKER_WRITER_API",
-    "CLICKER_WRITER_BASE_URL",
-    "CLICKER_WRITER_API_KEY",
-    "CLICKER_WRITER_VISION",
+    "GLIDE_WRITER_VISION",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_PROFILE",
-    "CLICKER_WRITER_KEYRING_SERVICE",
-    "CLICKER_WRITER_KEYRING_USER",
 )
 
 

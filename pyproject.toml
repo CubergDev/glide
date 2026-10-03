@@ -62,8 +62,11 @@ all = ["glide[speech,ui,webhooks,mcp,ocr,keyring,memory]"]
 
 [project.scripts]
 glide = "glide.cli:main"
-glide-computer = "glide.computer.cli:main"
-glide-inspect = "glide.computer.cli:inspect"
+glide-computer = "glide.cli:computer_main"
+glide-inspect = "glide.cli:inspect_main"
+# The two webhook commands under their older names: `glide webhooks serve` and `glide webhooks work` run the same code.
+glide-webhooks = "glide.webhooks.cli:main"
+glide-webhook-worker = "glide.webhooks.worker:main"
 
 [dependency-groups]
 dev = ["pytest==9.1.1", "ruff==0.16.8"]

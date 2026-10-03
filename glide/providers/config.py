@@ -40,7 +40,7 @@ import re
 import threading
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,10 @@ PRESETS: dict[str, ProviderSpec] = {
 
 POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "hedge_after_s", "latency_alpha")
 SPEECH_KEYS = ("language", "silence_ms", "headset", "vad_model_path", "vad_model_url", "vad_model_sha256")
+# Tables another module reads for itself (`glide.memory.settings`, `glide.mcp.config`, `glide.webhooks.cli`): known
+# here so the file does not warn about them, and not parsed here, so the one reader of each stays the only one.
+OWN_TABLES = ("memory", "mcp", "webhooks")
+KNOWN_TABLES = ("providers", "llm", "stt", "tts", "classifier", "speech", *OWN_TABLES)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 # Used when no glide.toml is found, and for any role a file leaves out. It lives here, not in a data file,
@@ -384,10 +388,23 @@ def _roles(data: Mapping, providers: Mapping[str, ProviderSpec]) -> dict[str, Ro
     return {role: _role(role, table, providers) for role, table in found.items()}
 
 
+def _voice(entry: Mapping):
+    """The `[speech]` table as the voice stack reads it (`glide.speech.settings`), validated now rather than at `glide voice`."""
+    from ..speech.settings import SpeechSettings as VoiceSettings
+
+    return VoiceSettings.from_mapping(entry)
+
+
 def _speech(table: object) -> SpeechSettings:
+    """The part of `[speech]` that is about providers, checked first so its messages stay what they were.
+
+    The voice-only keys (merge_window_s, idle_s, vad, ...) are known here too and checked by `_voice`.
+    """
+    from ..speech.settings import SpeechSettings as VoiceSettings
+
     where = "[speech]"
     entry = _table(table, where)
-    _only(entry, SPEECH_KEYS, where)
+    _only(entry, tuple(dict.fromkeys((*SPEECH_KEYS, *(f.name for f in fields(VoiceSettings))))), where)
     out: dict[str, Any] = {}
     if "language" in entry:
         out["language"] = _text(entry["language"], f"{where} language")
@@ -479,9 +496,11 @@ class GlideConfig:
         warnings: tuple[str, ...] = (),
         builders: Mapping[tuple[str, str], Callable[..., Any]] | None = None,
         speech: SpeechSettings | None = None,
+        voice: Any = None,
     ):
         self.providers = dict(providers)
         self.speech = speech or SpeechSettings()
+        self.voice = voice if voice is not None else _voice({})  # what `glide.speech.session.build_voice` takes
         self.roles = dict(roles)
         self.source = source
         self.defaulted = tuple(defaulted)  # roles the file left out, served by the built-in chains
@@ -516,11 +535,7 @@ class GlideConfig:
         """A configuration from an already parsed glide.toml. `env` defaults to the process environment."""
         providers = _providers(data.get("providers", {}))
         roles = _roles(data, providers)
-        warnings = tuple(
-            f"{source}: ignoring the unknown table [{key}]"
-            for key in data
-            if key not in ("providers", "llm", "stt", "tts", "classifier", "speech")
-        )
+        warnings = tuple(f"{source}: ignoring the unknown table [{key}]" for key in data if key not in KNOWN_TABLES)
         for warning in warnings:
             log.warning(warning)
         # Chains the file leaves out come from the built-in defaults. They name presets, and a file that
@@ -535,6 +550,7 @@ class GlideConfig:
             warnings=warnings,
             builders=builders,
             speech=_speech(data["speech"]) if "speech" in data else None,
+            voice=_voice(data["speech"]) if "speech" in data else None,
         )
 
     @classmethod

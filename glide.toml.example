@@ -81,17 +81,51 @@ chain = [
 [classifier]
 chain = ["typesafe:jev-latest", "llm.fast"]
 
-# Voice sessions. Voice ids and model ids belong to the [tts] and [stt] slots above (options.voice, the model after
-# the colon); nothing here has a built-in value, and a voice session says what is missing. The voice-activity model
-# is a file you supply: its path and its SHA-256 digest are required, the https URL only says where it was fetched from.
+# Hands-free voice (`glide voice`; needs the speech extra: uv sync --extra speech). Voice ids and model ids belong
+# to the [tts] and [stt] slots above (options.voice, the model after the colon); nothing here has a built-in value,
+# and a voice session says what is missing. Without a voice-activity model, loudness alone decides when you are
+# speaking (vad = "auto"). The model is a file you supply: its path and its SHA-256 digest are required, the https
+# URL only says where it was fetched from. `glide doctor` reports which of these is in effect.
 #
 # [speech]
 # language = "en"
-# silence_ms = 700
-# headset = false
+# silence_ms = 700          # how long a pause ends your turn (200-2000)
+# merge_window_s = 0.0      # a pause shorter than this does not end the request: "open Safari ... no, Chrome"
+# idle_s = 0.0              # microphone off after this long with nothing happening (0 = never)
+# headset = false           # true: the microphone stays open while Glide speaks, so you can talk over it
+# vad = "auto"              # "auto", "silero" (needs the model below) or "energy"
 # vad_model_path = "models/vad.onnx"
 # vad_model_url = "https://example.invalid/vad.onnx"
 # vad_model_sha256 = "<64 hexadecimal digits>"
+
+# Personalization and memory (`glide memory`). Off unless you turn it on, and it saves what you typed or said, so
+# it stays on this machine, in files only you can read. GLIDE_MEMORY=1 or 0 in the environment overrides `enabled`.
+#
+# [memory]
+# enabled = true
+# auto_capture = false      # true: also save sentences such as "I prefer short answers"
+# data_dir = "~/glide-data" # default: GLIDE_DATA_DIR, else the per-user data directory
+
+# MCP (`glide mcp`). `serve` offers Glide's memory to other programs over stdio; with "off" it offers no tools. Each
+# [[mcp.servers]] is a program Glide may use as a client, started only after you approve that exact command. Name
+# the variables to pass on (`env`), never their values.
+#
+# [mcp]
+# server_memory = "off"     # "off", "read" or "write" (anything but "off" also needs [memory] enabled = true)
+#
+# [[mcp.servers]]
+# name = "files"
+# command = "<a local MCP server command>"
+# args = []
+# env = ["<NAME OF A VARIABLE>"]
+# timeout_s = 60
+
+# Webhooks (`glide webhooks serve`, `glide webhooks work`; needs the webhooks extra). The service, its sources and
+# its enabled switch are in a JSON file (see glide/webhooks/README.md); nothing runs until that file says
+# "enabled": true. This table only says where the file is. GLIDE_WEBHOOK_CONFIG overrides it.
+#
+# [webhooks]
+# config = "webhooks.json"
 
 # ---------------------------------------------------------------------------------------------------------------
 # Pinning, from the environment and with no edit to this file. The value is a slot name or a prefix that names one;
