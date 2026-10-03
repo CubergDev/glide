@@ -1,0 +1,140 @@
+"""Run-scoped, thread-safe interruption shared by models, runners and native input (D2).
+
+A `RunControl` belongs to one task. It is made available to every layer through a context variable
+(`controlled`, `current_control`) so no signature has to carry it.
+
+What it adds over the older stop hook, and why it is adopted
+------------------------------------------------------------
+- `checkpoint()` is called before each step, each model reply is used, and inside every platform input
+  call, so a stop is seen between two actions and between two characters of typed text.
+- `dispatch(action, ...)` gates each real mutation: it takes a checkpoint first, then marks the control
+  `in_flight` before the action runs. After a stop that arrives mid-action the runner therefore knows the
+  outcome of the last write is unknown. AGENTS.md says an attempted action is not a verified effect and an
+  unknown write is never replayed: the runner reads the screen once, read-only, reports "completion
+  unknown", and stops. `in_flight` is cleared only by a fresh observation (`action_checked`).
+- `cancel()` runs the callbacks registered with `closing_on_cancel`, so a blocked network read (a model
+  request, a CDP websocket) is closed instead of being waited out.
+
+How it composes with `assistant.tasks.abort_on`
+------------------------------------------------
+`abort_on(stop_event)` replaces `desktop.check_abort` process-wide while a task runs. It is kept, because
+it needs nothing but an event: it works for a caller that has no `RunControl` and for code that runs on
+another thread, where the context variable is not set. Both mechanisms raise the same `Abort` and are
+polled at the same places, because the platform adapters' own `check_abort` calls `checkpoint()` as well
+as watching the corner of the screen. `ComputerTask.stop()` therefore does both, and gives both the same
+reason (`cancel(reason)`; `abort_on(..., control)`), so the outcome string does not depend on which of
+them fires first. The two never disagree about whether to stop: either one set is enough.
+
+Cancelling is not rolling back. Nothing here undoes an action that was already sent.
+"""
+
+from __future__ import annotations
+
+import contextvars
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+
+from .models import Abort
+
+CANCELLED = "task cancelled"
+
+
+@dataclass(frozen=True)
+class TaskEvent:
+    task_id: str
+    kind: str
+    text: str = ""
+    question_id: str = ""
+    outcome: str = ""
+    model: str = ""
+    role: str = ""
+    elapsed_s: float = 0.0
+    spoken_text: str = ""
+
+
+class RunControl:
+    def __init__(self, task_id: str = "", emit: Callable[[TaskEvent], None] | None = None):
+        self.in_flight = False
+        self.task_id = task_id
+        self.emit = emit or (lambda event: None)
+        self.cancelled = threading.Event()
+        self.reason = CANCELLED
+        self.ready = threading.Event()
+        self.ready.set()
+        self._callbacks: set[Callable[[], None]] = set()
+        self._lock = threading.Lock()
+
+    def cancel(self, reason: str = "") -> None:
+        """Stop the task. The first reason given is the one every later check reports."""
+        with self._lock:
+            if not self.cancelled.is_set():
+                self.reason = reason or CANCELLED
+        self.cancelled.set()
+        self.ready.set()
+        with self._lock:
+            callbacks = tuple(self._callbacks)
+        for close in callbacks:
+            with suppress(Exception):
+                close()
+
+    def pause(self) -> None:
+        self.ready.clear()
+
+    def resume(self) -> None:
+        self.ready.set()
+
+    def check(self, *, wait: bool = True) -> None:
+        while True:
+            if self.cancelled.is_set():
+                raise Abort(self.reason)
+            if not wait or self.ready.wait(0.05):
+                if self.cancelled.is_set():
+                    raise Abort(self.reason)
+                return
+
+    @contextmanager
+    def closing_on_cancel(self, close: Callable[[], None]) -> Iterator[None]:
+        with self._lock:
+            self._callbacks.add(close)
+        try:
+            self.check(wait=False)
+            yield
+        finally:
+            with self._lock:
+                self._callbacks.discard(close)
+
+    def event(self, kind: str, text: str = "", **kwargs) -> None:
+        self.emit(TaskEvent(self.task_id, kind, text, **kwargs))
+
+
+_CURRENT: contextvars.ContextVar[RunControl | None] = contextvars.ContextVar("run_control", default=None)
+
+
+def current_control() -> RunControl | None:
+    return _CURRENT.get()
+
+
+def checkpoint(control: RunControl | None = None, *, wait: bool = True) -> None:
+    active = control if control is not None else _CURRENT.get()
+    if active is not None:
+        active.check(wait=wait)
+
+
+@contextmanager
+def controlled(control: RunControl | None) -> Iterator[None]:
+    token = _CURRENT.set(control)
+    try:
+        yield
+    finally:
+        _CURRENT.reset(token)
+
+
+def dispatch(action, *args, **kwargs):
+    """Gate an actual mutation, and retain uncertainty until fresh observation."""
+    checkpoint()
+    active = current_control()
+    if active:
+        active.in_flight = True
+    return action(*args, **kwargs)
