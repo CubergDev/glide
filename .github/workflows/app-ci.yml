@@ -39,5 +39,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # The workflow also runs when only this file changes. Until the app directory exists on the branch there is
+      # nothing to test, which is not a failure.
+      - name: Is there an app to test
+        id: app
+        run: |
+          if [ -f app/scripts/test.sh ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "no app/ on this branch: nothing to test"; fi
+
       - name: Swift tests
+        if: steps.app.outputs.present == 'true'
         run: sh app/scripts/test.sh
