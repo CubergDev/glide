@@ -325,9 +325,7 @@ def test_the_command_line_records_content_only_when_asked(monkeypatch, tmp_path,
     from glide.computer import cli
 
     seen = {}
-    monkeypatch.setattr(cli.config, "load_dotenv", lambda _: None)
-    monkeypatch.setenv("TYPESAFE_API_KEY", "fixture-key")
-    monkeypatch.setattr(cli, "make_writer", lambda: None)
+    monkeypatch.setattr(cli, "make_writer", lambda config: None)
     monkeypatch.setattr(cli.config, "writer_vision", lambda: True)
 
     def fake_run(cfg, ctx_factory, **kwargs):
@@ -335,5 +333,5 @@ def test_the_command_line_records_content_only_when_asked(monkeypatch, tmp_path,
         return SimpleNamespace(outcome="done")
 
     monkeypatch.setattr(cli, "run", fake_run)
-    cli.main(["a goal", "--out", str(tmp_path), *flags])
+    cli.main(["a goal", "--out", str(tmp_path), *flags], SimpleNamespace(classifier=lambda: None))
     assert seen["cfg"].record_content is recorded and isinstance(seen["control"], RunControl)
