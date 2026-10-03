@@ -203,7 +203,8 @@ class Router:
 
     A `ProviderError` from the model is returned as a fallback "answer" with the error attached, so the
     caller can still try to answer (the streaming call may reach a provider this one did not) and report
-    the failure if that fails too.
+    the failure if that fails too. A call that was cancelled (the person interrupted) comes back the same way, with
+    `error.kind == "cancelled"`: the caller checks whether its request was cancelled before it says anything.
     """
 
     def __init__(self, llm, *, max_tokens: int = ROUTER_TOKENS, timeout: float | None = 15.0, clock=time.monotonic) -> None:

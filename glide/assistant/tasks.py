@@ -13,6 +13,9 @@ A task is `runner.run` on a worker thread, so the assistant stays free to hear "
   An action that was already sent cannot be taken back; the run records it as "completion unknown", reads the
   screen once and never replays it. The replacement is process-wide, so only one task runs at a time.
 - The loop's own words are data. What the writer read off the screen is spoken and printed, never routed.
+- A question the writer puts to the user is answered by `ComputerTask.answer` and by nothing else. It is opt-in
+  (`on_question`): without it the loop never asks (`ask=None`), as before. A stop, or anything that stops the task,
+  ends the wait for the answer.
 """
 
 from __future__ import annotations
@@ -134,10 +137,25 @@ OUTCOME_PHRASES = {
 }
 
 
-class ComputerTask:
-    """One run of the screen-driving loop on a worker thread. Start it once; stop it any time."""
+class _Question:
+    """A question put to the user, and the answer once there is one."""
 
-    def __init__(self, goal: str, *, act: bool, config, folder: Path) -> None:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.reply = ""
+        self.settled = threading.Event()
+
+
+class ComputerTask:
+    """One run of the screen-driving loop on a worker thread. Start it once; stop it any time.
+
+    With `on_question(task, text)` the loop may ask the user something in the middle of a run: the callback shows and
+    says the question, and the run waits until `answer(text)` is called, or until the task is stopped.
+    """
+
+    def __init__(
+        self, goal: str, *, act: bool, config, folder: Path, on_question: Callable[[ComputerTask, str], None] | None = None
+    ) -> None:
         self.goal = goal
         self.act = act
         self.folder = folder
@@ -146,6 +164,9 @@ class ComputerTask:
         self.control = RunControl(str(uuid.uuid4()), self.events.append)
         self.result: TaskResult | None = None
         self._config = config
+        self._on_question = on_question
+        self._pending: _Question | None = None
+        self._question_lock = threading.Lock()
         self._finished = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -160,6 +181,38 @@ class ComputerTask:
     @property
     def stop_requested(self) -> bool:
         return self.stop_event.is_set()
+
+    @property
+    def pending_question(self) -> str | None:
+        """The question the run is waiting on, or None."""
+        with self._question_lock:
+            pending = self._pending
+        return pending.text if pending is not None and not pending.settled.is_set() else None
+
+    def answer(self, text: str) -> bool:
+        """Give the run the answer to its question. False when it is not waiting on one."""
+        with self._question_lock:
+            pending = self._pending
+            if pending is None or pending.settled.is_set():
+                return False
+            pending.reply = text
+            pending.settled.set()
+        return True
+
+    def _ask(self, text: str) -> str:
+        """The loop's `ask`, on the task's thread: say the question, then wait for the answer or the stop."""
+        pending = _Question(text)
+        with self._question_lock:
+            self._pending = pending
+        try:
+            with self.control.closing_on_cancel(pending.settled.set):  # a stop wakes the wait (and refuses a late question)
+                self._on_question(self, text)
+                pending.settled.wait()
+            self.control.check(wait=False)  # stopped, not answered: the run ends here
+            return pending.reply
+        finally:
+            with self._question_lock:
+                self._pending = None
 
     def start(self, on_done: Callable[[ComputerTask], None] | None = None, release: Callable[[], None] | None = None) -> None:
         self._thread = threading.Thread(target=self._work, args=(on_done, release), name="glide-task", daemon=True)
@@ -220,8 +273,9 @@ class ComputerTask:
             )
 
             def ctx_factory(typesafe, history):
-                # ask=None: nobody can be asked a question in the middle of a run. An input() here would race the
-                # terminal the assistant is reading, and a voice user has no keyboard to answer on.
+                # ask=None unless the assistant opted in: an input() here would race the terminal the assistant is
+                # reading, and a voice user has no keyboard to answer on. The answer comes from `answer`, never from
+                # whatever the user says next.
                 return Context(
                     goal=self.goal,
                     browser=computer_config.browser(),
@@ -229,7 +283,7 @@ class ComputerTask:
                     typesafe=typesafe,
                     writer=writer,
                     history=history,
-                    ask=None,
+                    ask=self._ask if self._on_question is not None else None,
                 )
 
             with abort_on(self.stop_event, self.control):
@@ -262,12 +316,19 @@ class TaskRunner:
         self._runs_dir = Path(runs_dir)
         self.current: ComputerTask | None = None
 
-    def start(self, goal: str, *, act: bool = False, on_done: Callable[[ComputerTask], None] | None = None) -> ComputerTask:
+    def start(
+        self,
+        goal: str,
+        *,
+        act: bool = False,
+        on_done: Callable[[ComputerTask], None] | None = None,
+        on_question: Callable[[ComputerTask, str], None] | None = None,
+    ) -> ComputerTask:
         """Begin a task. Raises `TaskBusy` when one is running (here or in any other assistant of this process)."""
         if not _ACTIVE.acquire(blocking=False):
             raise TaskBusy("a task is already running")
         try:
-            task = ComputerTask(goal, act=act, config=self._config, folder=self._fresh_folder())
+            task = ComputerTask(goal, act=act, config=self._config, folder=self._fresh_folder(), on_question=on_question)
             self.current = task
             task.start(on_done, release=_ACTIVE.release)
         except BaseException:
