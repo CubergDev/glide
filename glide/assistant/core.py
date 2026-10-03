@@ -32,7 +32,7 @@ from ..providers.config import ConfigError
 from ..providers.errors import ProviderError
 from .audio_io import SAMPLE_RATE, Player, rms
 from .phrases import say
-from .router import Route, Router, answer_messages, fast_path, is_stop
+from .router import Route, Router, answer_messages, fast_path, is_stop, stop_phrases
 from .speech import SentenceSplitter, Speaker, detect_language, split_sentences
 from .tasks import DEFAULT_RUNS_DIR, ComputerTask, TaskBusy, TaskResult, TaskRunner
 
@@ -99,8 +99,10 @@ class Assistant:
         runs_dir: Path = DEFAULT_RUNS_DIR,
         history_turns: int = 4,
         clock: Callable[[], float] = time.monotonic,
+        extra_stop_phrases: Iterable[str] = (),
     ) -> None:
         self._config = config
+        self._stops = stop_phrases(extra_stop_phrases)
         self.io = io or IO()
         self._clock = clock
         self._tasks = TaskRunner(config, runs_dir)
@@ -130,7 +132,7 @@ class Assistant:
         text = " ".join(text.split())
         if not text:
             return Reply("none")
-        if fast_path(text) is not None:  # before any model is built or asked: stopping must never wait
+        if fast_path(text, self._stops) is not None:  # before any model is built or asked: stopping must never wait
             self.stop()
             return Reply("stop", timings={"total_s": self._clock() - started})
 
@@ -174,6 +176,7 @@ class Assistant:
         language: str | None = None,
         act: bool = False,
         wait: bool = True,
+        stop_only: bool = False,
     ) -> Reply:
         """Transcribe speech as it is captured, then handle the transcript as text.
 
@@ -184,6 +187,11 @@ class Assistant:
 
         Speech that was begun before a stop or a barge-in is transcribed and then dropped, not answered:
         whoever interrupted wants the newer request.
+
+        `stop_only=True` is a listen for a stop and nothing else: a partial or final transcript that is a stop
+        phrase silences the voice and stops everything, and any other transcript is dropped unheard (not
+        shown, not remembered, not answered). The voice loop opens one while Glide is speaking and a sound is
+        not yet clearly the person, so that Glide's own transcribed echo can never become a request.
         """
         epoch = self._epoch
         try:
@@ -207,7 +215,7 @@ class Assistant:
                     final = transcript
                     continue
                 self.io.partial(transcript.text)
-                if is_stop(transcript.text):
+                if is_stop(transcript.text, self._stops):
                     self._silence()  # a stop that is still being said already silences the voice
         except ProviderError as exc:
             error = exc
@@ -235,6 +243,8 @@ class Assistant:
             return reply
         if epoch != self._epoch:  # the person barged in or said stop while this was being heard: drop it, say nothing
             return Reply("none", heard=heard)
+        if stop_only and not is_stop(heard, self._stops):
+            return Reply("none")  # not a stop: nothing of it is kept
         self.io.heard(heard)
         reply = self._handle(heard, act, wait, spoken_language or language, epoch)
         reply.heard = heard
@@ -256,11 +266,14 @@ class Assistant:
         self._cancel_speech()
         return had_task
 
-    def interrupt_speech(self) -> None:
-        """Barge-in: cut the voice and the answer being written now, and drop any request still being heard or
-        routed. A running task is left alone."""
-        with self._lock:
-            self._epoch += 1
+    def interrupt_speech(self, *, drop_pending: bool = True) -> None:
+        """Barge-in: cut the voice and the answer being written now, and (unless `drop_pending=False`) drop any
+        request still being heard or routed, which a late answer to it would otherwise be spoken over the person.
+        A running task is left alone. The voice loop passes False when an earlier request of the person's is
+        still waiting for its transcript, because that one is wanted."""
+        if drop_pending:
+            with self._lock:
+                self._epoch += 1
         self._silence()
 
     def _silence(self) -> None:
