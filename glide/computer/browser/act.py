@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
+from ..control import checkpoint, controlled
 from .cdp import Session
 from .perceive import Element, Page, perceive
 
@@ -56,11 +58,16 @@ def click(session: Session, index: int, element: Element, page: Page) -> str:
         return f"click {index} FAILED (element gone)"
     x = max(1, min(int(rect["x"]), max(1, int(rect["vw"]) - 2)))
     y = max(1, min(int(rect["y"]), max(1, int(rect["vh"]) - 2)))
-    for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
-        session.call(
-            "Input.dispatchMouseEvent",
-            {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1 if kind != "mouseReleased" else 0},
-        )
+    checkpoint()
+    session.call(
+        "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1}
+    )
+    _paired(
+        session,
+        "Input.dispatchMouseEvent",
+        {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1},
+        {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 0},
+    )
     return f"click [{index}] {element.name[:60]!r} at ({x},{y})"
 
 
@@ -82,6 +89,7 @@ def focus(session: Session, index: int) -> bool:
 def type_text(session: Session, index: int, text: str) -> str:
     if not focus(session, index):
         return f"type FAILED (could not focus [{index}])"
+    checkpoint()
     session.call("Input.insertText", {"text": text})
     return f"type {text!r} into [{index}]"
 
@@ -97,36 +105,42 @@ def field_value(session: Session, index: int) -> str | None:
     return None if value is None else str(value)
 
 
+def _paired(session, method, down, up):
+    """Cancellation may stop a new press, but must never suppress its release."""
+    checkpoint()
+    try:
+        session.call(method, down)
+    finally:
+        with controlled(None):
+            session.call(method, up)
+
+
 def clear_field(session: Session, index: int) -> None:
-    focus(session, index)
-    session.call(
+    checkpoint()
+    if not focus(session, index):
+        return
+    _paired(
+        session,
         "Input.dispatchKeyEvent",
         {"type": "keyDown", "modifiers": 4, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65},
-    )
-    session.call(
-        "Input.dispatchKeyEvent",
         {"type": "keyUp", "modifiers": 4, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65},
     )
+    checkpoint()
     session.call("Input.insertText", {"text": ""})
-    session.call(
-        "Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8}
+    _paired(
+        session,
+        "Input.dispatchKeyEvent",
+        {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
+        {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
     )
-    session.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8})
 
 
 def press(session: Session, key: str) -> str:
     k, text = KEYS[key]
-    for event in ("keyDown", "keyUp"):
-        session.call(
-            "Input.dispatchKeyEvent",
-            {
-                "type": event,
-                "key": k,
-                "text": text if event == "keyDown" else "",
-                "unmodifiedText": text,
-                "windowsVirtualKeyCode": 13 if key == "enter" else 27,
-            },
-        )
+    common = {"key": k, "unmodifiedText": text, "windowsVirtualKeyCode": 13 if key == "enter" else 27}
+    _paired(
+        session, "Input.dispatchKeyEvent", {**common, "type": "keyDown", "text": text}, {**common, "type": "keyUp", "text": ""}
+    )
     return f"press {key}"
 
 
@@ -139,6 +153,11 @@ def scroll(session: Session, lines: int, page: Page) -> str:
 
 
 def navigate(session: Session, url: str, *, timeout_ms: int = 15000) -> str:
+    """Open `url`. Only http(s) addresses: `file:`, `javascript:`, `chrome:` and the like are refused, as is
+    anything that is not an address at all (a tab name, an invented control name)."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"navigation target is not an http(s) address: {parts.scheme or 'no scheme'}")
     session.call("Page.navigate", {"url": url})
     return f"navigate {url}"
 
