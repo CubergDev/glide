@@ -373,3 +373,6 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)

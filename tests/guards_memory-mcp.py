@@ -28,6 +28,14 @@ _SDK_TRANSPORTS = {
 }
 
 
+def _sdk_installed() -> bool:
+    # tests/mcp is importable as a namespace package named "mcp" when the SDK is absent, so ask for a submodule
+    try:
+        return importlib.util.find_spec("mcp.client.stdio") is not None
+    except ImportError:
+        return False
+
+
 def _inside_temp(path: object) -> bool:
     if str(path) == ":memory:":
         return True
@@ -71,7 +79,7 @@ def no_real_memory_or_mcp(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "_prepare_path", prepare)
     monkeypatch.setattr(service, "_private_dir", private)
 
-    if importlib.util.find_spec("mcp") is not None:
+    if _sdk_installed():
         for module_name, names in _SDK_TRANSPORTS.items():
             try:
                 module = importlib.import_module(module_name)

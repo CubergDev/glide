@@ -110,3 +110,6 @@ def test_argument_errors_exit_through_argparse(world):
     with pytest.raises(SystemExit) as caught:
         run(world, "on", "remember", "only-a-key")
     assert caught.value.code == 2
+
+
+from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)

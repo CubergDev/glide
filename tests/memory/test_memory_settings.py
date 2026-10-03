@@ -85,3 +85,6 @@ def test_settings_error_never_echoes_file_content(tmp_path):
         MemorySettings.load({}, config=config)
     assert "sk-should-not" not in str(caught.value)
     assert isinstance(Path(str(config)), Path)
+
+
+from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)

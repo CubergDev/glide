@@ -73,3 +73,6 @@ def test_store_error_types_are_value_errors_not_sqlite_errors(tmp_path, harness)
     with pytest.raises(ValueError):
         ingest_run(harness, SCOPE, run, verified_success=True, strategy_summary="x" * 9000)
     assert not issubclass(ValueError, sqlite3.Error)
+
+
+from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)

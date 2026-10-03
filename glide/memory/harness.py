@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from ._callbacks import adrive, drive
+from ._json import bounded_json
 from .catalog import Catalog
 from .contracts import Model, Plan, Policy, Scope, Tool
 from .events import invocation
@@ -55,13 +56,7 @@ class _Issued:
 
 
 def _json_copy(value: Any, limit: int = 65536) -> Any:
-    try:
-        encoded = json.dumps(value, allow_nan=False, ensure_ascii=True)
-    except (TypeError, ValueError, RecursionError) as error:
-        raise ValueError("host callbacks must supply JSON-compatible values") from error
-    if len(encoded.encode()) > limit:
-        raise ValueError("host callback payload exceeds its byte budget")
-    return json.loads(encoded)
+    return bounded_json(value, limit, ValueError, "host callback payload")
 
 
 def _goal_bound(goal: str) -> int:

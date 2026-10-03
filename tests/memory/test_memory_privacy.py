@@ -74,3 +74,6 @@ def test_no_endpoint_or_model_literals_in_the_packages():
                 if url.search(line):
                     offenders.append(f"{path.relative_to(ROOT)}:{number}")
     assert offenders == []
+
+
+from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)

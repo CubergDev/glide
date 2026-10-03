@@ -90,3 +90,6 @@ def test_closing_closes_the_store(tmp_path):
     service.close()
     with pytest.raises(RuntimeError, match="closed"):
         service.store.memories(SCOPE)
+
+
+from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)
