@@ -66,6 +66,17 @@ def test_wheel_still_ships_exactly_the_glide_package():
     assert PROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["glide"]
 
 
+def test_metadata_has_classifiers_and_blocks_an_accidental_upload():
+    """F4: the wheel metadata had no classifiers. "Private :: Do Not Upload" makes PyPI reject an accidental upload."""
+    classifiers = set(PROJECT["project"]["classifiers"])
+    assert "Private :: Do Not Upload" in classifiers
+    assert {"Programming Language :: Python :: 3.12", "Programming Language :: Python :: 3.13"} <= classifiers
+    assert "Programming Language :: Python :: 3 :: Only" in classifiers
+    # The team decides the license; none is invented here.
+    assert not any(c.startswith("License ::") for c in classifiers)
+    assert "license" not in PROJECT["project"]
+
+
 def test_readme_is_declared_once_it_exists():
     if (ROOT / "README.md").exists():
         assert PROJECT["project"]["readme"] == "README.md"

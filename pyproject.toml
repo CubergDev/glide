@@ -3,6 +3,14 @@ name = "glide"
 version = "0.1.0"
 description = "A voice and text assistant that drives your Mac, on swappable API providers."
 requires-python = ">=3.12"
+# No license is declared: the team decides it, and one is not invented here. "Private :: Do Not Upload" makes PyPI
+# reject an accidental `twine upload` of this package.
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "anthropic==1.6.0",
     "openai==2.54.0",
