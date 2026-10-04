@@ -117,12 +117,13 @@ def candidates(step, observed):
             continue
         if action not in valid:
             valid.append(action)
+    # The limit applies to what is offered, so a page with hundreds of controls still offers its one search form.
+    if step.effect == "query_submitted":
+        valid = [a for a in valid if a.kind == "inspect" or a.parameter_source.startswith(("form:", "query:"))]
+    elif step.effect == "disclosure_expanded":
+        valid = [a for a in valid if a.kind == "inspect" or a.parameter_source.startswith("disclosure:")]
     if len(valid) > MAX_ACTION_CHOICES:
         raise InvalidAction("Observation exceeds the action choice safety limit; narrow the target before execution")
-    if step.effect == "query_submitted":
-        return [a for a in valid if a.kind == "inspect" or a.parameter_source.startswith(("form:", "query:"))]
-    if step.effect == "disclosure_expanded":
-        return [a for a in valid if a.kind == "inspect" or a.parameter_source.startswith("disclosure:")]
     return valid
 
 
