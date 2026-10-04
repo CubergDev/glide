@@ -43,7 +43,7 @@ def harness(store, directory):
 async def test_a_hostile_remote_memory_is_never_a_standing_instruction(tmp_path):
     with Store(tmp_path / "s.sqlite") as store:
         server = await started(store)
-        saved = await call(server, "glide.memory.remember", {"key": "style", "text": HOSTILE, "level": "user"})
+        saved = await call(server, "glide.memory.remember", {"key": "style", "text": HOSTILE})
         assert saved["isError"] is False
         row = store.memories(SCOPE)[0]
         assert row["source"] == "mcp" and row["kind"] != "preference"
