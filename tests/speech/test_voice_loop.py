@@ -49,8 +49,10 @@ class ScriptedDevice:
 
     echo = None  # no canceller: what a headset, or speaker mode without one, reports
     echo_active = False
+    guarding = False  # the microphone is being blanked: speaker mode with no canceller, while Glide speaks
     echo_name = None
     reference_underruns = 0
+    output_faults = 0
 
     def __init__(self, script, *, playing=False):
         self.script = list(script)
@@ -477,3 +479,97 @@ def test_speech_that_is_queued_but_not_audible_yet_is_cut_too():
     r.device.on_frame = hook
     run(r)
     assert epochs[first_b + 2] > epochs[first_b]
+
+
+# -- a loop that cannot go on says so and leaves the microphone off ----------------------------------
+
+
+def test_a_voice_detector_that_raises_ends_listening_loudly_and_closes_the_microphone():
+    """PR6-4175581063: only DeviceFault was handled, so any other error killed the thread silently with the microphone open."""
+
+    def broken(frame: bytes) -> float:
+        raise RuntimeError("model said: secret transcript text")
+
+    r = rig([LOUD, LOUD], ScriptedSTT([]))
+    r.loop._vad = broken
+    r.loop.run()
+    assert r.loop.failure == "Voice detection failed (RuntimeError); hands-free listening stopped."
+    assert r.warned == [r.loop.failure] and "secret" not in r.loop.failure
+    assert r.device.calls == ["pause"]
+
+
+def test_an_idle_callback_that_raises_or_blocks_finds_the_microphone_already_off():
+    """PR6-4175561158: the pause was queued and the callback ran first, so a blocking one left the microphone on and a raising
+    one ended the loop with the pause never applied."""
+    now = [0.0]
+    seen = []
+
+    def on_idle():
+        seen.append(list(r.device.calls))
+        raise RuntimeError("idle callback failed")
+
+    r = rig([None] * 8, ScriptedSTT([]), idle_s=30, clock=lambda: now[0], on_idle=on_idle)
+    r.device.on_frame = lambda left: now.__setitem__(0, now[0] + 10)
+    run(r)
+    assert seen == [["pause"]]  # the microphone was off before the callback was called
+    assert r.warned == ["the idle callback failed (RuntimeError)"] and r.loop._paused
+
+
+def test_glide_speaking_over_a_command_in_half_duplex_discards_it_instead_of_sending_half_of_it():
+    """PR6-4175612955: with no canceller the device blanks the microphone while Glide speaks, and the turn read the zeros as
+    silence and committed what had been said so far."""
+    stt = ScriptedSTT(["open the pod bay doors", "second"])
+    r = rig([*speech(10), *quiet(700), *speech(), *quiet(700)], stt)
+    total, zeros = 20 + 2 * len(quiet(700)), len(quiet(700))
+    # Glide starts speaking after 10 frames of the command, and the device hands over zeros for as long as it does
+    r.device.on_frame = lambda left: setattr(r.device, "guarding", 10 <= total - left < 10 + zeros)
+    run(r)
+    assert r.heard == ["second"] and stt.ended == [1]  # the first stream was aborted, never ended
+    assert r.warned == ["Glide began to speak over your command; it was not sent."]
+
+
+# -- what a pause, a probe and an overlong utterance leave behind --------------------------------------
+
+
+def test_frames_from_before_a_pause_are_not_the_lead_in_of_a_turn_after_it():
+    """PR14-4175428960: the history behind a barge-in turn's lead-in was never cleared by a pause."""
+    r = rig([], ScriptedSTT([]))
+    r.loop._vad = lambda frame: 0.0
+    r.loop._frame(LOUD)
+    r.loop._frame(LOUD)
+    r.loop.pause()
+    r.loop._apply_commands()
+    r.loop.resume()
+    r.loop._apply_commands()
+    for _ in range(3):
+        r.loop._frame(QUIET)
+    assert r.loop._since_onset() == QUIET * 3
+
+
+def test_an_overlong_utterance_is_discarded_whole_not_submitted_from_where_it_was_cut():
+    """PR6-4175247852: the abort reset the detector, so the next voiced frame began a turn out of the tail of what was dropped."""
+    stt = ScriptedSTT(["the tail", "next"])
+    max_frames = 60 * 16000 // 512
+    r = rig([*speech(max_frames + 1), *speech(10), *quiet(700), *speech(), *quiet(700)], stt)
+    run(r)
+    assert r.heard == ["next"] and stt.ended == [1]  # stream 0 was the overlong one, aborted
+    assert len(r.warned) == 1 and "exceeded" in r.warned[0]
+
+
+def test_an_output_fault_is_said_once_and_without_content():
+    r = rig([QUIET] * 4, ScriptedSTT([]))
+    r.device.on_frame = lambda left: setattr(r.device, "output_faults", max(0, 4 - left))  # 0, 1, 2, 3: only ever more
+    run(r)
+    assert r.warned == ["The speaker reported a problem; Glide's speech may have been cut off or garbled."]
+
+
+def test_a_loop_that_ends_on_its_own_says_so_to_its_owner_and_one_that_is_stopped_does_not():
+    told = []
+    r = rig([QUIET, DeviceFault("Microphone overflow")], ScriptedSTT([]))
+    r.loop.on_failure = told.append
+    r.loop.run()
+    assert told == ["Microphone overflow"]
+    r = rig([QUIET, QUIET], ScriptedSTT([]))
+    r.loop.on_failure = told.append
+    r.loop.run()  # the script ends and stops the loop, as stop() would
+    assert told == ["Microphone overflow"]

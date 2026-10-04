@@ -24,12 +24,13 @@ from guards_voice import no_real_audio  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from test_assistant_fakes import WAIT, FakeConfig, FakeLLM, FakeTTS
+from test_assistant_fakes import WAIT, FakeConfig, FakeLLM, FakeTTS, wait_until
 from test_voice_loop import ScriptedDevice, quiet, vad
 
+from glide.assistant.audio_io import rms
 from glide.assistant.core import IO, Assistant
 from glide.providers.base import Transcript
-from glide.speech.echo import EchoStats
+from glide.speech.echo import EchoCanceller, EchoStats
 from glide.speech.session import watch
 from glide.speech.turns import (
     BARGE_LEAD_FRAMES,
@@ -135,6 +136,40 @@ def test_the_gate_freezes_the_cancellers_statistics_while_a_sound_louder_than_th
     for _ in range(40):
         gate.feed(1.0, 150.0, echo)  # voiced, a little above the echo, for longer than a statistic should be held
     assert not gate.armed
+
+
+class _Scripted(EchoCanceller):
+    """A canceller that hands back what it is told: the loud voice survives it, the echo is removed."""
+
+    name = "scripted"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.out = b""
+
+    def _process(self, near, far):
+        return self.out
+
+    def _reset_state(self) -> None:
+        pass
+
+
+def test_the_first_frames_of_a_voice_over_the_echo_are_judged_before_they_teach_the_canceller_anything():
+    """PR14-4175428961: the canceller learned from the voice frame before the gate read its numbers, so one frame took
+    the ERLE from 29 dB under the bar and every later frame was 'waiting for erle': a person talking over Glide never got in."""
+    canceller, gate = _Scripted(), BargeInGate()
+    far = tone(3000)
+    for _ in range(80):  # echo only: 1500 in the microphone, 50 left of it
+        canceller.out = tone(50)
+        gate.feed(0.0, rms(canceller.process(tone(1500), far)), canceller.stats)
+    assert canceller.stats.erle_db > 25
+    verdicts = []
+    for _ in range(gate.min_voiced_frames):  # a voice 12 dB over the echo, which no canceller removes
+        canceller.out = tone(6000)
+        out = canceller.process(tone(7500), far)
+        verdicts.append(gate.feed(1.0, rms(out), canceller.stats))
+        canceller.hold = gate.armed  # what the loop does after every frame
+    assert verdicts[-1].confirm, canceller.stats
 
 
 def test_reset_forgets_the_sound_being_judged():
@@ -406,9 +441,40 @@ def test_probes_are_one_at_a_time_and_rate_limited():
     gap = lambda frames: [bytes(FRAME_BYTES)] * frames  # noqa: E731
     script = quiet(320) + weak_run + gap(14) + weak_run + gap(14) + weak_run + gap(60) + weak_run + quiet(700)
     # the probe ends 12 quiet frames after its sound; the next sound begins 2 frames later, inside the cooldown
-    r = run(rig(script, StopSTT(["x"] * 4), stats=WEAK_ECHO))
+    r = rig(script, StopSTT(["x"] * 4), stats=WEAK_ECHO)
+    # a probe is over when its transcript is: let each one finish before the next sound, as a real transcriber would
+    r.device.on_frame = lambda left: (
+        r.loop._probe is None and wait_until(lambda: all(t.heard.is_set() for t in r.loop._turns if t.probe))
+    )
+    run(r)
     assert r.loop.status()["barge_in"]["probes"] == 2
     assert 60 * FRAME_S > PROBE_COOLDOWN_S  # the long quiet really is longer than the cooldown
+
+
+class _HeldSTT(StopSTT):
+    """Like StopSTT, but the first stream's transcript is held back until `release` is set."""
+
+    def __init__(self, finals):
+        super().__init__(finals)
+        self.release = threading.Event()
+
+    def stream(self, chunks, *, sample_rate=16000, language=None):
+        for transcript in super().stream(chunks, sample_rate=sample_rate, language=language):
+            if len(self.audio) == 1 and not transcript.partial:
+                self.release.wait(WAIT)
+            yield transcript
+
+
+def test_a_second_probe_never_opens_while_the_first_is_still_being_transcribed():
+    """PR14-4175586153: the cooldown ran from the end of the probe's audio, not of its transcript, so a slow transcriber
+    could have two streams of stop-only audio open at once."""
+    stt = _HeldSTT(["x", "y"])
+    weak_run, gap = [WEAK] * 6, lambda frames: [bytes(FRAME_BYTES)] * frames
+    script = quiet(320) + weak_run + gap(14) + gap(60) + weak_run + gap(30)  # the second sound is long after the cooldown
+    r = rig(script, stt, stats=WEAK_ECHO)
+    r.device.on_frame = lambda left: stt.release.set() if left == 0 else None
+    run(r)
+    assert stt.count == 1 and r.loop.status()["barge_in"]["probes"] == 1  # the first one was still waiting for its transcript
 
 
 def test_a_probe_never_outlives_the_sound_it_listens_to():

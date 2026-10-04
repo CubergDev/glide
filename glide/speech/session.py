@@ -25,7 +25,11 @@ from .vad import EnergyProbability, Probability, Silero, VadError
 
 
 def make_vad(settings: SpeechSettings, warn=lambda message: None) -> Probability:
-    if settings.vad == "energy" or (settings.vad == "auto" and not settings.silero_configured):
+    if settings.vad == "energy":
+        return EnergyProbability()
+    if settings.vad == "auto" and not settings.silero_configured:
+        if settings.vad_model_path or settings.vad_model_sha256:  # half a model is not none: say so
+            warn("voice detection falls back to loudness: the Silero model needs both vad_model_path and vad_model_sha256")
         return EnergyProbability()
     try:
         return Silero(Path(settings.vad_model_path).expanduser(), settings.vad_model_sha256)
@@ -46,11 +50,14 @@ def build_voice(
     vad: Probability | None = None,
     on_idle=None,
     assistant_factory: Callable[..., Assistant] = Assistant,
+    ready: Callable[[], bool] = lambda: True,
 ) -> VoiceLoop:
     """A `VoiceLoop`, not yet started: call `start()` (or `run()`), and `stop()` then `loop.assistant.close()` to end.
 
     `act=False` keeps every computer task a dry run, as everywhere else. `assistant_factory(config, io=io)` makes the
-    assistant: a front end that wants to watch what each request came to passes a subclass.
+    assistant: a front end that wants to watch what each request came to passes a subclass. `ready()` is asked just before
+    the device this builds is opened (opening it is what asks for the microphone): False leaves it closed, for a caller whose
+    session was stopped while it was still being built.
     """
     io = io or IO()
     owned = device is None  # a device handed in was started by whoever made it
@@ -82,7 +89,7 @@ def build_voice(
             confirm_phrase=settings.confirm_phrase,
             confirm_timeout_s=settings.confirm_timeout_s,
         )
-        if owned:
+        if owned and ready():
             device.start()
     except BaseException:
         assistant.close()  # closes the Speaker or, with none yet, the device through io.player

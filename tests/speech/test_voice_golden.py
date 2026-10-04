@@ -74,18 +74,18 @@ def gate_trace(seed: int, frames: int = 1600) -> list:
 
 
 GATE_GOLDEN = {
-    0: "30d6a122329ef979",
-    1: "acbd17762415418e",
-    2: "784d9b008c0f9f01",
-    3: "41e3705037245a91",
-    4: "7e878e715759cb2d",
-    5: "c06212f99c4d4bcc",
-    6: "5e84384d6a959f4b",
-    7: "2af2a466776c2f55",
-    8: "ea3300c4f52a1071",
-    9: "ee6179d47122f4f1",
-    10: "917351d32d0ff0dc",
-    11: "e74be6fd583770de",
+    0: "46ca439609b2d4bb",
+    1: "cfe8597b5589418a",
+    2: "d5fc9627bebdff49",
+    3: "a09808213d3400cd",
+    4: "31811332e7693b8f",
+    5: "555c5e163acd5469",
+    6: "0a7b071df40b81b2",
+    7: "5dfffb8bb5eb2981",
+    8: "f3fbf6ff86919dbb",
+    9: "ca3a38c8b129e3a7",
+    10: "54b451c70faf5bd4",
+    11: "5e5bc8b19b5fceef",
 }
 
 
@@ -219,6 +219,8 @@ class _Device:
 
     echo_name = "fake"
     reference_underruns = 0
+    output_faults = 0
+    guarding = False
 
     def hold_echo_stats(self, hold):
         self.log.append(("hold", hold))
@@ -294,15 +296,15 @@ def loop_trace(seed: int, monkeypatch, frames: int = 900) -> list:
 
 
 LOOP_GOLDEN = {
-    0: "c5a9cf095791748b",
-    1: "a1090ec8e546e1b3",
-    2: "97bd8c77e82a6c40",
-    3: "aed6a35577f1dadd",
-    4: "acb91ca7bb5dabe1",
-    5: "86361a7139ad46af",
-    6: "930706fc16c5d395",
-    7: "677114d7e8edab0f",
-    8: "9ec1253afb751241",
+    0: "93e5e9c3088d7a2b",
+    1: "8a2c318110dc8164",
+    2: "3b799c06bbfbed17",
+    3: "0941860f79f0c211",
+    4: "46cef6c199762c12",
+    5: "c11f4e063b9458b4",
+    6: "25a4bd25f82bb632",
+    7: "01e509ac7abde5ad",
+    8: "09d5b02f42682ef5",
     9: "dac6ecf73d99ede1",
 }
 

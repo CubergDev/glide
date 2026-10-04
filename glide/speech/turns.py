@@ -54,6 +54,7 @@ The only exceptions are reported, as their type name only, through `assistant.io
 
 from __future__ import annotations
 
+import contextlib
 import math
 import queue
 import threading
@@ -68,7 +69,7 @@ from .approval import Pending, TaskApproval
 from .audio import DeviceFault
 from .echo import EchoStats
 from .settings import SpeechSettings
-from .vad import FRAME_S, START_PROBABILITY, Probability, TurnDetector, UtteranceTooLong
+from .vad import FRAME_S, START_PROBABILITY, STOP_PROBABILITY, Probability, TurnDetector, UtteranceTooLong
 
 POLL_S = 0.05
 DRY_RUN_WAIT_S = 120.0  # the longest a previewed task is waited for before it is no longer offered
@@ -163,6 +164,7 @@ class BargeInGate:
         self._quiet_since = 0  # frames since the last weak evidence
         self._frame_no = 0
         self._candidate = False
+        self._trusted: EchoStats | None = None  # the canceller's numbers from before the sound under judgement began
         self.counters = {"frames": 0, "candidates": 0, "rejected": 0, "confirmed": 0, "waiting_for_erle": 0}
 
     @property
@@ -191,6 +193,7 @@ class BargeInGate:
         self._weak.clear()
         self._suspect.clear()
         self._sound_start = None
+        self._trusted = None
 
     def _close_candidate(self) -> None:
         if self._candidate:
@@ -200,23 +203,30 @@ class BargeInGate:
     def feed(self, probability: float, level: float, echo: EchoStats | None) -> Verdict:
         self._frame_no += 1
         self.counters["frames"] += 1
-        strong, weak, suspect = self._evidence(probability >= START_PROBABILITY, level, echo)
+        # The canceller has already learned from this frame by the time its numbers arrive, and a voice it cannot remove
+        # drags the ERLE down within that one frame. So a frame is judged on the numbers from before it, and while a sound
+        # is under judgement (`armed`) on the numbers from before the sound began: it is not held against itself.
+        trusted = echo if self._trusted is None else self._trusted
+        strong, weak, suspect = self._evidence(probability >= START_PROBABILITY, level, echo, trusted)
         self._note_sound(weak)
         self._suspect.feed(self._frame_no, suspect)
         self._strong.feed(self._frame_no, strong)
         self._weak.feed(self._frame_no, weak)
+        if not self.armed:
+            self._trusted = echo
         if self._weak.ended_with:
             self._close_candidate()
         return self._verdict(weak, strong)
 
-    def _evidence(self, voiced: bool, level: float, echo: EchoStats | None) -> tuple[bool, bool, bool]:
-        """Whether this frame is strong evidence, weak evidence, and a suspect (louder than the echo expected) of a person."""
-        if not voiced or echo is None:
+    def _evidence(self, voiced: bool, level: float, echo: EchoStats | None, trusted: EchoStats | None) -> tuple[bool, bool, bool]:
+        """Whether this frame is strong evidence, weak evidence, and a suspect (louder than the echo expected) of a person.
+        `trusted` holds the canceller's measure of itself (ERLE, the echo expected); `echo` holds this frame's near level."""
+        if not voiced or echo is None or trusted is None:
             return voiced, voiced, voiced  # with no canceller there is nothing to compare with: the voice detector decides
-        if not echo.measured or (echo.erle_db or 0.0) < self.min_erle_db:
+        if not trusted.measured or (trusted.erle_db or 0.0) < self.min_erle_db:
             self.counters["waiting_for_erle"] += 1
             return False, False, False
-        floor = max(echo.expected_residual_rms, MIN_LEVEL_RMS)
+        floor = max(trusted.expected_residual_rms, MIN_LEVEL_RMS)
         kept = level >= RETAINED_MIN * echo.near_rms  # a frame the canceller all but removed was echo it understood
         return (
             kept and level >= floor * 10 ** (self.margin_db / 20),
@@ -296,9 +306,11 @@ class Device(Protocol):
 
     playing: bool  # audio is queued or still sounding
     echo_active: bool  # Glide's voice may be in the microphone (only with an echo canceller)
+    guarding: bool  # the microphone is being blanked while Glide speaks (speaker mode with no canceller): frames are zeros
     echo: EchoStats | None  # the canceller's latest numbers, or None when there is none
     echo_name: str | None
     reference_underruns: int
+    output_faults: int  # blocks the sound card reported a problem with while speaking
 
     def read(self, timeout: float | None = ...) -> bytes | None: ...
     def pause_input(self) -> None: ...
@@ -342,6 +354,9 @@ class VoiceLoop:
         self._turn: _Turn | None = None
         self._turns: list[_Turn] = []
         self._merging = 0  # frames of quiet left in the merge window; 0 when not merging
+        self._output_faults = 0  # how many the person has been told of: once is enough
+        self._skip_tail = False  # an overlong utterance was discarded: what is left of it is not a request
+        self._tail_quiet = 0
         self._gate = BargeInGate(min_voiced_ms=barge_min_voiced_ms, margin_db=barge_margin_db, min_erle_db=barge_min_erle_db)
         self._recent: deque[bytes] = deque(maxlen=HISTORY_FRAMES)  # what a barge-in turn is started from
         self._probe: _Turn | None = None
@@ -354,6 +369,7 @@ class VoiceLoop:
         self._local = threading.local()
         self._thread: threading.Thread | None = None
         self.failure: str | None = None
+        self.on_failure: Callable[[str], None] | None = None  # told, on the loop's thread, when listening ended on its own
         self._io = assistant.io
         # with `act`, a request to use the machine runs as a dry run until the person says the phrase (approval.py)
         self._approval = (
@@ -438,17 +454,46 @@ class VoiceLoop:
                 try:
                     frame = self._device.read()
                 except DeviceFault as exc:
-                    self._abort()
-                    self.failure = str(exc)
-                    self._assistant.io.warn(self.failure)
+                    self._fail(str(exc))
                     return
+                self._note_output_faults()
                 if frame is not None:
-                    self._frame(frame)
+                    try:
+                        self._frame(frame)
+                    except Exception as exc:  # the voice detector failing must not leave a dead thread and a live microphone
+                        self._fail(f"Voice detection failed ({type(exc).__name__}); hands-free listening stopped.")
+                        return
                 self._check_idle()
         finally:
             self._abort()  # stopping is not an end of speech: a half-said command is discarded, never submitted
             if self._io.heard is self._on_heard:
                 self._io.heard = self._chained_heard
+
+    def _fail(self, message: str) -> None:
+        """Listening cannot go on: the turn in progress is discarded, the person is told, and the microphone is turned off."""
+        self._abort()
+        self.failure = message
+        self._assistant.io.warn(message)
+        with contextlib.suppress(Exception):
+            self._device.pause_input()
+        if self.on_failure is not None:
+            self.on_failure(message)
+
+    def _note_output_faults(self) -> None:
+        """The speaker had trouble (an underflow): what was said may have been cut or garbled. Said once, never counted aloud."""
+        faults = self._device.output_faults
+        if faults and not self._output_faults:
+            self._assistant.io.warn("The speaker reported a problem; Glide's speech may have been cut off or garbled.")
+        self._output_faults = faults
+
+    def _pause(self) -> None:
+        self._cancel_confirmation()
+        self._end_turn()
+        self._settle_gate()
+        self._recent.clear()  # nothing from before the pause is the lead-in of what follows it
+        self._skip_tail = False
+        self._device.pause_input()
+        self._paused = True
 
     def _apply_commands(self) -> None:
         """Run the pause and resume asked for. While paused this waits for one, so a paused loop does not spin."""
@@ -460,11 +505,7 @@ class VoiceLoop:
                 return
             wait = 0.0
             if command == "pause" and not self._paused:
-                self._cancel_confirmation()
-                self._end_turn()
-                self._settle_gate()
-                self._device.pause_input()
-                self._paused = True
+                self._pause()
             elif command == "resume" and self._paused:
                 try:
                     self._device.resume_input()
@@ -477,6 +518,12 @@ class VoiceLoop:
     def _frame(self, frame: bytes) -> None:
         probability = self._vad(frame)
         self._recent.append(frame)
+        if self._turn is not None and self._device.guarding:
+            # Glide began to speak over a command in half-duplex: the microphone now hands over zeros, which the turn would
+            # read as the silence that ends it. Half a command is never sent.
+            self._abort()
+            self._assistant.io.warn("Glide began to speak over your command; it was not sent.")
+            return
         if self._turn is None and self._speaking():
             self._gated(frame, probability)
         else:
@@ -485,6 +532,11 @@ class VoiceLoop:
 
     def _detect(self, frame: bytes, probability: float) -> None:
         """Glide is not being heard, or a turn is running: the voice detector's probability decides where turns begin and end."""
+        if self._skip_tail:  # until the silence that would have ended the utterance, nothing may begin a turn
+            self._tail_quiet = self._tail_quiet + 1 if probability < STOP_PROBABILITY else 0
+            self._skip_tail = self._tail_quiet < self._detector.silence_frames
+            self._detector.feed(frame, 0.0)
+            return
         try:
             started, data, commit = self._detector.feed(frame, probability)
             turn = self._turn
@@ -495,6 +547,8 @@ class VoiceLoop:
             self._extend(turn, frame, started, data, commit)
         except UtteranceTooLong as exc:
             self._abort()
+            self._skip_tail = True
+            self._tail_quiet = 0
             self._assistant.io.warn(str(exc))
 
     def _extend(self, turn: _Turn, frame: bytes, started: bool, data: bytes, commit: bool) -> None:
@@ -582,8 +636,8 @@ class VoiceLoop:
 
     def _open_probe(self) -> None:
         now = self._clock()
-        if now < self._probe_ready_at:
-            return
+        if now < self._probe_ready_at or any(t.probe and not t.heard.is_set() for t in self._turns):
+            return  # one at a time: the last probe's transcript is still on its way
         self._probe = probe = _Turn(probe=True)
         self._probe_quiet = self._probe_frames = 0
         self._probes_opened += 1
@@ -723,6 +777,9 @@ class VoiceLoop:
         if busy:
             self._active_at = now
         elif now - self._active_at >= self._idle_s:
-            self._commands.put("pause")
+            self._pause()  # the microphone is off before anyone is called: a callback that blocks or raises cannot leave it on
             if self._on_idle is not None:
-                self._on_idle()
+                try:
+                    self._on_idle()
+                except Exception as exc:
+                    self._assistant.io.warn(f"the idle callback failed ({type(exc).__name__})")

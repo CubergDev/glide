@@ -14,6 +14,7 @@ import pytest
 from test_assistant_fakes import WAIT, FakeConfig, FakeLLM, FakePlayer, FakeSTT, FakeTTS, route_json, wait_until
 
 from glide.assistant.audio_io import chunked
+from glide.assistant.tasks import OUTCOME_PHRASES, TaskResult
 from glide.computer import runner
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
@@ -35,7 +36,8 @@ def tone(level: int, seconds: float) -> bytes:
 class PetConfig(FakeConfig):
     """FakeConfig plus what the pet reads from a real GlideConfig: the speech settings and the slots."""
 
-    speech = SpeechSettings()
+    voice = SpeechSettings()  # what a real GlideConfig holds for the voice stack (`config.speech` is the providers' view)
+    speech = voice  # still read by glide/assistant/point_cli.py:194, which has the real config's `voice` to read instead (PR15-4175491833)
 
     def slots(self, role):
         return [SimpleNamespace(name=f"{role}-a", state="ready"), SimpleNamespace(name=f"{role}-b", state="skipped")]
@@ -123,6 +125,45 @@ def test_a_failed_task_is_reported_as_failed_and_a_stopped_one_as_stopped(tmp_pa
     seen = events_until(core, lambda es: any(e.type == "task" and e.data["phase"] == "stopped" for e in es))
     assert [e.data["phase"] for e in seen if e.type == "task"] == ["started", "failed", "started", "stopped"]
     core.close()
+
+
+class _EndedTask:
+    """A computer task that has already ended with `result`."""
+
+    act = True
+
+    def __init__(self, result) -> None:
+        self.result = result
+
+    def wait(self, timeout=None) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("result", "phase"),
+    [
+        (TaskResult("g", True, "done", achieved=True), "completed"),
+        (TaskResult("g", False, "dry run"), "completed"),
+        (TaskResult("g", True, "done", stopped=True), "stopped"),
+        (TaskResult("g", True, "done", uncertain=True), "uncertain"),  # a write whose effect was never seen
+        (TaskResult("g", True, "nothing helps", achieved=False), "failed"),
+        (TaskResult("g", True, "done", achieved=False), "failed"),
+        *[(TaskResult("g", True, outcome), "failed") for outcome in OUTCOME_PHRASES if outcome != "done"],
+        (TaskResult("g", True, "aborted (something new)"), "failed"),  # an outcome nobody listed is not a success
+    ],
+)
+def test_only_a_done_and_achieved_task_is_reported_as_completed(result, phase):
+    """PR15-4175491842: stalled, stuck, step limit, low confidence, nothing helps and an unverified write were all 'completed'."""
+    events = []
+    assistant = PetAssistant(PetConfig(llm=FakeLLM()), report=events.append)
+    assistant._await_task(_EndedTask(result))
+    task = next(e for e in events if e.type == "task")
+    assert task.data["phase"] == phase
+    view = PetView()
+    view.apply(task)
+    assert (view.mood == "happy") == (phase == "completed")
+    if phase == "uncertain":
+        assert view.mood == "question" and "nothing will be repeated" in view.status
 
 
 def test_stop_returns_at_once_while_a_task_is_running_and_the_task_ends_stopped(tmp_path, monkeypatch):
@@ -226,6 +267,7 @@ class FakeLoop:
     def __init__(self, assistant) -> None:
         self.assistant = assistant
         self.calls: list[str] = []
+        self.on_failure = None  # set by the pet, called by a real loop when it ends on its own
 
     def start(self):
         self.calls.append("start")
@@ -243,7 +285,7 @@ class FakeLoop:
 def voice_core(tmp_path, **options):
     built = []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         loop = FakeLoop(assistant_factory(config, io=io))
         built.append(SimpleNamespace(loop=loop, settings=settings, act=act, io=io))
         return loop
@@ -268,6 +310,27 @@ def test_voice_builds_once_then_pauses_and_resumes_the_same_loop(tmp_path):
     assert len(built) == 1 and one.loop.calls == ["start", "pause", "resume"]
     core.close()
     assert one.loop.calls[-1] == "stop"
+
+
+def test_a_real_config_gives_the_voice_stack_its_own_settings_not_the_providers_view(tmp_path):
+    """PR15-4175491833: the pet read `config.speech` (the providers' table, silence_ms None by default) where the voice stack
+    takes `config.voice`; the fake config here had `speech` shaped like the voice settings and hid it."""
+    from glide.providers.config import GlideConfig
+
+    config = GlideConfig.from_toml('[speech]\nsilence_ms = 800\nvad = "energy"\n', env={})
+    built = []
+
+    def factory(config, settings, *, io, act, assistant_factory, **_):
+        built.append(settings)
+        return FakeLoop(assistant_factory(config, io=io))
+
+    core = PetCore(config, runs_dir=tmp_path / "runs", voice_factory=factory)
+    assert core.silence_ms == 800
+    core.headset = True
+    core.start_voice()
+    events_until(core, lambda es: ("mic", "") in types(es))
+    assert isinstance(built[0], SpeechSettings) and (built[0].headset, built[0].silence_ms, built[0].vad) == (True, 800, "energy")
+    core.close()
 
 
 def test_a_voice_stack_that_cannot_start_says_what_is_missing_and_never_the_key(tmp_path):
@@ -314,6 +377,19 @@ def test_the_assistant_factory_passes_on_whatever_options_the_voice_stack_gives_
     core.close()
 
 
+def test_nothing_is_created_for_a_typed_request_once_the_core_is_closed(tmp_path):
+    """PR15-4175586927: `send_text` checked `_closed` outside the lock and then asked `_assistant()`, which never rechecked, so a
+    close in between left a fresh assistant that nothing tracked or stopped."""
+    core, _ = make_core(tmp_path)
+    made = []
+    original = core._make_assistant
+    core._make_assistant = lambda *a, **kw: (made.append(1), original(*a, **kw))[1]
+    core.close()
+    assert core._assistant() is None and made == []
+    assert core.send_text("hello") is False and made == [] and core._text is None
+    core.drain()
+
+
 def test_closing_twice_is_harmless(tmp_path):
     core, config = make_core(tmp_path)
     core.close()
@@ -342,7 +418,7 @@ def blocked_voice(tmp_path, **options):
     """A core whose voice factory waits for the test, so a stop can arrive while the stack is still being built."""
     entered, release, loops = threading.Event(), threading.Event(), []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         entered.set()
         assert release.wait(WAIT), "the test never released the voice factory"
         loop = FakeLoop(assistant_factory(config, io=io))
@@ -369,6 +445,63 @@ def test_a_stop_while_the_voice_stack_is_still_opening_wins_and_the_microphone_n
     if how != "close":
         core.start_voice()  # and the slot is free for the next try
         assert wait_until(lambda: len(loops) == 2 and core.voice_active and core._voice is not None)
+    core.close()
+
+
+def test_a_stop_during_the_build_is_known_to_the_stack_before_it_opens_the_microphone(tmp_path):
+    """PR15-4175491836: build_voice opens the device itself, so the epoch check after the build came after the microphone
+    was already open. The factory is now given `ready()`, to ask just before it opens anything."""
+    entered, release, asked = threading.Event(), threading.Event(), []
+
+    def factory(config, settings, *, io, act, assistant_factory, ready):
+        entered.set()
+        assert release.wait(WAIT)
+        asked.append(ready())  # what build_voice does right before device.start()
+        return FakeLoop(assistant_factory(config, io=io))
+
+    core, _ = make_core(tmp_path, voice_factory=factory)
+    core.start_voice()
+    assert entered.wait(WAIT)
+    core.stop()
+    release.set()
+    assert wait_until(lambda: asked and not core._opening)
+    assert asked == [False]
+    core.start_voice()  # a later session is ready
+    assert wait_until(lambda: len(asked) == 2 and core.voice_active)
+    assert asked == [False, True]
+    core.close()
+
+
+def test_a_voice_loop_that_ends_on_its_own_closes_the_microphone_in_the_view_and_frees_the_slot(tmp_path):
+    """PR15-4175491828: nothing watched the loop thread, so a device fault left the view saying the microphone was live and
+    start_voice resumed a dead loop."""
+    core, _, built = voice_core(tmp_path)
+    core.start_voice()
+    events_until(core, lambda es: ("mic", "") in types(es))
+    loop = built[0].loop
+    core.drain()
+    loop.on_failure("Microphone overflow; the incomplete command was discarded.")
+    assert wait_until(lambda: loop.calls[-1:] == ["stop"])
+    assert not core.voice_active
+    assert [e.data for e in core.drain() if e.type == "mic"] == [{"open": False, "detail": "failed"}]
+    view = PetView()
+    view.apply(PetEvent("mic", {"open": True}))
+    view.apply(PetEvent("mic", {"open": False, "detail": "failed"}))
+    assert not view.mic
+    core.start_voice()  # a new session is built, not the dead one resumed
+    assert wait_until(lambda: len(built) == 2 and core.voice_active)
+    assert "resume" not in loop.calls
+    core.close()
+
+
+def test_a_failure_of_a_loop_that_was_already_replaced_or_stopped_is_ignored(tmp_path):
+    core, _, built = voice_core(tmp_path)
+    core.start_voice()
+    events_until(core, lambda es: ("mic", "") in types(es))
+    core.stop()
+    core.drain()
+    built[0].loop.on_failure("late")
+    assert core.drain() == []
     core.close()
 
 

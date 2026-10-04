@@ -51,6 +51,7 @@ class PointMode:
         self._session: PointSession | None = None
         self._voiced = False  # the session was opened with a microphone, which the end of the pin must also end
         self._cancel: threading.Event | None = None  # set while a countdown or capture is under way
+        self._counting_for_voice = False  # that countdown ends by opening a microphone
 
     @property
     def active(self) -> bool:
@@ -73,8 +74,20 @@ class PointMode:
             if self._cancel is not None:
                 return
             self._cancel = cancel = threading.Event()
+            self._counting_for_voice = share and voice
         options = (question.strip(), share, share and with_image, share and voice)
         threading.Thread(target=self._pin, args=(cancel, *options), name="glide-point", daemon=True).start()
+
+    def cancel_voice_countdown(self) -> bool:
+        """The microphone this pin's countdown was going to open is no longer wanted. A countdown for a typed question, or
+        a pin already held, is left alone. True when a countdown was cancelled."""
+        with self._lock:
+            if self._cancel is None or not self._counting_for_voice:
+                return False
+            cancel, self._cancel, self._counting_for_voice = self._cancel, None, False
+        cancel.set()
+        self._emit("status", text="Voice question cancelled.")
+        return True
 
     def ask(self, text: str) -> bool:
         """A follow-up about the pin. False, and a status line, when there is none to ask about."""
@@ -96,6 +109,7 @@ class PointMode:
         """Cancel a countdown, end the session, forget the pin. Returns at once."""
         with self._lock:
             cancel, self._cancel = self._cancel, None
+            self._counting_for_voice = False
             session, self._session = self._session, None
             self._voiced = False
         if cancel is not None:
@@ -125,6 +139,8 @@ class PointMode:
                 self._preview(selection)
             elif not self._open(selection, writer, question, voice, cancel):
                 selection.close()
+                if not self.holding:
+                    self._emit("closed")  # `selected` drew a pin; with no session behind it the view must not keep it
         except PointUnavailable as error:  # our own sentences: protected field, nothing under the pointer
             self._emit("error", text=str(error), closed=True)
         except Exception:  # the adapters' errors can name the screen; the person gets the fixed sentence
@@ -133,6 +149,7 @@ class PointMode:
             with self._lock:
                 if self._cancel is cancel:
                     self._cancel = None
+                    self._counting_for_voice = False
 
     def _disclose(self, share: bool, with_image: bool):
         """Say what is about to be shared, before anything is read. The writer, or None for a local preview."""

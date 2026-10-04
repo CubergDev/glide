@@ -231,6 +231,18 @@ def test_a_voice_stack_that_cannot_start_leaves_no_pin_held():
     assert not rig.mode.holding and "selected" in rig.kinds()
 
 
+def test_a_voice_stack_that_cannot_start_takes_the_pin_off_the_view_too():
+    """PR15-4175491845: `selected` had drawn the pin and 'Pinned: ...', then nothing said it was gone, though `holding` was False."""
+    rig = Rig(voice=False)
+    rig.start("", share=True, voice=True)
+    rig.settle()
+    assert not rig.mode.holding and rig.kinds()[-1] == "closed"
+    view = PetView()
+    for e in rig.events:
+        view.apply(PetEvent("point", e))
+    assert view.pin is None and view.target == ""
+
+
 def test_nothing_is_written_or_logged(tmp_path, monkeypatch, caplog):
     monkeypatch.chdir(tmp_path)
     caplog.set_level(logging.DEBUG)
@@ -295,7 +307,7 @@ def test_the_view_shows_what_the_provider_never_said_and_keeps_markup_as_text():
 def test_a_point_voice_session_uses_the_pets_voice_slot_and_stop_ends_it(tmp_path):
     loops = []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         loop = FakeLoop(assistant_factory(config, io=io))
         loops.append((loop, act))
         return loop
@@ -313,8 +325,40 @@ def test_a_point_voice_session_uses_the_pets_voice_slot_and_stop_ends_it(tmp_pat
     core.close()
 
 
+def test_dismissing_the_voice_bar_during_the_countdown_means_the_microphone_never_opens(tmp_path):
+    """PR15-4175616385: pause_voice only knew a session or one being built, so during the point countdown it did nothing and
+    the microphone opened after the countdown for a bar that had been dismissed."""
+    built = []
+
+    def factory(config, settings, *, io, act, assistant_factory, **_):
+        built.append(1)
+        return FakeLoop(assistant_factory(config, io=io))
+
+    core, config = make_core(tmp_path, capture=capture_point, point_delay_s=30.0, voice_factory=factory)
+    config._writer = reply_writer()
+    with using(SyntheticDesktop()):
+        core.point.start("", share=True, voice=True)
+        assert wait_until(lambda: core.point.active)
+        core.pause_voice()  # the bar's "done" while the countdown runs
+        assert wait_until(lambda: not core.point.active)
+    assert built == [] and not core.voice_active
+    assert not any(e.type == "mic" and e.data.get("open") for e in core.drain())
+    core.close()
+
+
+def test_pausing_does_not_cancel_a_countdown_that_was_not_for_the_microphone(tmp_path):
+    core, config = make_core(tmp_path, capture=capture_point, point_delay_s=30.0)
+    config._writer = reply_writer()
+    with using(SyntheticDesktop()):
+        core.point.start("", share=True)
+        assert wait_until(lambda: core.point.active)
+        core.pause_voice()
+        assert core.point.active
+    core.close()
+
+
 def test_a_point_voice_cannot_start_while_an_ordinary_voice_session_is_open(tmp_path):
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         return FakeLoop(assistant_factory(config, io=io))
 
     core, _, fake = pet_with_point(tmp_path, voice_factory=factory)
@@ -331,7 +375,7 @@ def test_a_point_voice_cannot_start_while_an_ordinary_voice_session_is_open(tmp_
 def test_a_stop_while_a_point_voice_session_is_still_opening_wins_and_nothing_stays_open(tmp_path):
     entered, release, loops = threading.Event(), threading.Event(), []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         entered.set()
         assert release.wait(WAIT)
         loop = FakeLoop(assistant_factory(config, io=io))

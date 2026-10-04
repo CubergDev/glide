@@ -42,10 +42,17 @@ ANSWER_CHARS = 4096  # the answer card
 LABEL_CHARS = 1024
 POINT_IDLE = "Choose Point & ask, then press Ask: the point you aim at stays pinned for follow-up questions."
 PROVIDER_ROLES = ("llm.fast", "llm.smart", "stt", "tts", "classifier")
-# Outcomes of a task that could not run or did not finish for want of something outside the task (assistant/tasks.py).
-FAILED_OUTCOMES = frozenset(
-    {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
-)
+
+
+def task_phase(result) -> str:
+    """How a finished task looks to the person. Only a run that said "done" (or a dry run, which is meant to end so)
+    and was not found wanting is `completed`: every other outcome, those not yet invented included, is `failed`, and
+    a write whose effect was never seen is `uncertain`, never a success."""
+    if result.stopped:
+        return "stopped"
+    if result.uncertain:
+        return "uncertain"
+    return "completed" if result.outcome in ("done", "dry run") and result.achieved is not False else "failed"
 
 
 @dataclass(frozen=True)
@@ -54,7 +61,7 @@ class PetEvent:
 
     - `state`: `assistant` is `idle`, `listening`, `thinking`, `acting`, `speaking` or `error`.
     - `transcript`: `role` (`user` or `assistant`), `text`, `partial`. For display only; never stored.
-    - `task`: `phase` (`started`, `completed`, `failed`, `stopped`), `outcome`, `act`.
+    - `task`: `phase` (`started`, `completed`, `failed`, `stopped`, `uncertain`), `outcome`, `act`.
     - `switch`: `role`, `from_slot`, `to_slot`, `kind`, `reason`. One per provider fallback; none is silent.
     - `mic`: `open`, and `detail` (a short machine reason, never user content).
     - `recording`: `on`. Whether the core keeps content (D3).
@@ -118,8 +125,7 @@ class PetAssistant(Assistant):
         task.wait()
         result = task.result
         if result is not None:
-            phase = "stopped" if result.stopped else "failed" if result.outcome in FAILED_OUTCOMES else "completed"
-            self._report(PetEvent("task", {"phase": phase, "outcome": result.outcome, "act": result.act}))
+            self._report(PetEvent("task", {"phase": task_phase(result), "outcome": result.outcome, "act": result.act}))
         self._settle()
 
     def _settle(self) -> None:
@@ -129,17 +135,18 @@ class PetAssistant(Assistant):
             self._report(PetEvent("state", {"assistant": "idle"}))
 
 
-def _open_voice(config, settings, *, io, act, assistant_factory):
+def _open_voice(config, settings, *, io, act, assistant_factory, ready):
     """The one call that builds real audio hardware: tests replace it (tests/guards_pet-point.py refuses it)."""
     from ..speech.session import build_voice
 
-    return build_voice(config, settings, io=io, act=act, assistant_factory=assistant_factory)
+    return build_voice(config, settings, io=io, act=act, assistant_factory=assistant_factory, ready=ready)
 
 
 class PetCore:
     """Everything the window asks of the core. Methods are safe from any thread and return at once.
 
-    `voice_factory(config, settings, io=, act=, assistant_factory=)` returns a `VoiceLoop`-shaped object; it is
+    `voice_factory(config, settings, io=, act=, assistant_factory=, ready=)` returns a `VoiceLoop`-shaped object (`ready()` is
+    asked just before the microphone is opened, and is False once a stop has come); it is
     `speech.session.build_voice` unless a test passes a fake. `record_content` is opt-in and starts False.
     """
 
@@ -165,7 +172,7 @@ class PetCore:
         self._closed = False
         self.act = False  # computer tasks are dry runs until the person turns this on
         self.headset = False
-        self.silence_ms = config.speech.silence_ms
+        self.silence_ms = config.voice.silence_ms
         config.record_content = bool(record_content)  # D3: off unless asked for, whatever the config object held
         self._unsubscribe = config.on_switch(self._on_switch)
         self.point = PointMode(
@@ -213,9 +220,11 @@ class PetCore:
     def send_text(self, text: str) -> bool:
         """Handle a typed request on a worker thread. False when there is nothing to send or it is too long."""
         text = text.strip()
-        if not text or len(text) > MAX_TEXT or self._closed:
+        if not text or len(text) > MAX_TEXT:
             return False
         assistant = self._assistant()
+        if assistant is None:  # closed: no assistant is made for a window that is gone
+            return False
         self._emit("transcript", role="user", text=text, partial=False)
         threading.Thread(target=self._handle_text, args=(assistant, text, self.act), name="glide-pet-turn", daemon=True).start()
         return True
@@ -264,13 +273,21 @@ class PetCore:
         try:
             if self._abandoned(epoch):
                 return False
-            settings = dataclasses.replace(self._config.speech, headset=self.headset, silence_ms=self.silence_ms)
-            loop = self._voice_factory(self._config, settings, io=self._new_io(), act=act, assistant_factory=assistant_factory)
+            settings = dataclasses.replace(self._config.voice, headset=self.headset, silence_ms=self.silence_ms)
+            loop = self._voice_factory(
+                self._config,
+                settings,
+                io=self._new_io(),
+                act=act,
+                assistant_factory=assistant_factory,
+                ready=lambda: not self._abandoned(epoch),  # a stop during the build must not find the microphone opened
+            )
             if bind is not None:
                 bind(loop.assistant)
             with self._lock:
                 registered = not self._abandoned(epoch)
                 if registered:
+                    loop.on_failure = lambda _message: self._voice_ended(loop)
                     loop.start()  # under the lock: a stop cannot fall between the check and the first frame
                     self._voice = loop
         except Exception as exc:  # AudioUnavailable, ConfigError, VadError: each says what is missing and never a key
@@ -303,6 +320,7 @@ class PetCore:
 
     def pause_voice(self) -> None:
         """Finish what is being said, then turn the microphone off. Answers, speech and tasks go on."""
+        self.point.cancel_voice_countdown()  # a point question by voice that is still counting down never opens the microphone
         with self._lock:
             voice, opening = self._voice, self._opening
             if voice is None and opening:
@@ -345,6 +363,17 @@ class PetCore:
             self._emit("mic", open=False, detail="stopped")
         return voice
 
+    def _voice_ended(self, loop) -> None:
+        """The loop ended on its own (a device fault; the loop has already said why): the microphone is closed, in the view
+        too, and the slot is free, so the next start builds a new session instead of resuming a dead one."""
+        with self._lock:
+            if self._voice is not loop:
+                return  # already stopped, or replaced
+            self._voice_epoch += 1
+            self._voice = None
+        threading.Thread(target=self._end_quietly, args=(loop,), name="glide-pet-stop", daemon=True).start()
+        self._emit("mic", open=False, detail="failed")
+
     def _end_voice_now(self) -> None:
         self._pop_voice()
 
@@ -356,9 +385,11 @@ class PetCore:
 
     # -- plumbing --------------------------------------------------------------------------------
 
-    def _assistant(self) -> PetAssistant:
-        """Where a typed request goes: the voice session's assistant while one runs, else the text one."""
+    def _assistant(self) -> PetAssistant | None:
+        """Where a typed request goes: the voice session's assistant while one runs, else the text one. None once closed."""
         with self._lock:
+            if self._closed:
+                return None
             if self._voice is not None:
                 return self._voice.assistant
             if self._text is None:
@@ -482,8 +513,10 @@ class PetView:
             self.lines.append("task started" + ("" if act else " (dry run: nothing will be clicked)"))
             return
         self.lines.append(f"task {phase}" + (f": {outcome}" if outcome else ""))
-        mood = {"completed": "happy", "failed": "sad"}.get(phase, "idle")
-        status = f"Result · {outcome or phase}" if phase != "stopped" else "Stopped"
+        mood = {"completed": "happy", "failed": "sad", "uncertain": "question"}.get(phase, "idle")
+        status = {"stopped": "Stopped", "uncertain": "Check the screen · nothing will be repeated"}.get(
+            phase, f"Result · {outcome or phase}"
+        )
         self._result = (mood, status)
         self.mood, self.status = self._result
 

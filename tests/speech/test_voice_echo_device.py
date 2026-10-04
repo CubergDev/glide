@@ -136,6 +136,37 @@ def test_a_frame_waits_for_its_reference_and_a_stalled_speaker_is_counted_not_wa
     assert rig.device.reference_underruns == 1 and rig.canceller.pairs[-1][1] == bytes(FRAME_BYTES)
 
 
+def test_a_speaker_that_stays_stalled_costs_one_wait_not_one_wait_per_frame():
+    """PR14-4175617063: each frame was held REF_STALL_S on its own, so with the output stream dead the queue grew faster than
+    it drained and the microphone 'overflowed' into a DeviceFault that ended hands-free listening."""
+    rig = Rig()
+    for _ in range(40):  # 1.3 s of microphone with no output callback at all
+        rig.on_input(frame_of(5), False)
+    start, got = rig.now, 0
+    while got < 40 and rig.now - start < 5:
+        if rig.device.read(timeout=None) is None:
+            rig.now += 0.05  # the loop's own poll
+        else:
+            got += 1
+    assert got == 40 and rig.now - start <= REF_STALL_S + 0.1
+    assert rig.device.reference_underruns == 40 and rig.device.fault is None
+
+
+def test_frames_wait_for_their_reference_again_once_the_speaker_is_back():
+    rig = Rig()
+    for _ in range(3):
+        rig.on_input(frame_of(5), False)
+    assert rig.device.read(timeout=None) is None
+    rig.now += REF_STALL_S + 0.01
+    assert rig.device.read(timeout=None) == frame_of(5)  # the stall: this one and the next go on without a reference
+    assert rig.device.read(timeout=None) == frame_of(5)
+    rig.pull(512 * 3)  # the speaker catches up to the third frame
+    assert rig.device.read(timeout=None) == frame_of(5)
+    rig.on_input(frame_of(6), False)
+    assert rig.device.read(timeout=None) is None  # its reference is not there yet: waiting is the rule again
+    assert rig.device.reference_underruns == 2
+
+
 def test_a_loop_that_falls_far_behind_still_gets_every_frame_with_its_own_reference():
     """Frames queue up while the loop is busy (a pause, a busy CPU) and are paired with their reference later, however late."""
     rig = Rig()
