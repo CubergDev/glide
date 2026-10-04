@@ -117,6 +117,12 @@ def _doctor(config, live: bool) -> int:
     report = features.feature_report(config)
     for name, _, line in report:
         print(f"  {name:<9}{clean(line, config)}")
+    from .assistant.tasks import DEFAULT_RUNS_DIR
+
+    marker = DEFAULT_RUNS_DIR / "unresolved-write"
+    if marker.is_file():
+        print(f"\nwarning: {marker} exists: a write was sent and its effect never seen. Glide will not act again until you")
+        print("look at the screen and the run folder, then delete that file (or clear it in `glide panel`, Status).")
     return 1 if doctor.failed(rows) or not engine_ok or not all(ok for _, ok, _ in report) else 0
 
 

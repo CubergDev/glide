@@ -24,6 +24,7 @@ PanelError = setup_model.SetupError
 MAX_TEXT = 2000
 APPROVAL_WAIT_S = 120.0
 MARKER = "active-run.json"
+ENGINE_MARKER = "unresolved-write"  # written by the engine's ledger in the runs directory
 LOG = "chat-log.jsonl"
 UNCERTAIN = "completion unknown; nothing was retried"
 
@@ -240,10 +241,15 @@ class ChatSession:
     def _marker_clear(self) -> None:
         with contextlib.suppress(OSError):
             (self.state_dir / MARKER).unlink(missing_ok=True)
+            (self.runs_dir / ENGINE_MARKER).unlink(missing_ok=True)
 
     def marker(self) -> dict | None:
         path = self.state_dir / MARKER
         if not path.is_file():
+            engine = self.runs_dir / ENGINE_MARKER  # the engine's own: a write whose outcome was never seen
+            if engine.is_file():
+                started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(engine.stat().st_mtime))
+                return {"path": str(engine), "started": started, "running_now": False}
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
