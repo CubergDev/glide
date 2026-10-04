@@ -24,7 +24,7 @@ _SEARCH_ON = re.compile(r"(?:search|look up|find)\s+(?:for\s+)?(?P<q>.+?)\s+(?:o
 _SEARCH_FOR = re.compile(r"(?:search|look up)\s+for\s+(?P<q>.+)", re.IGNORECASE)
 _SEARCH_ANY = re.compile(r"search\s+(?!for\b)(?P<q>.+)", re.IGNORECASE)
 _DIRECTIONS = re.compile(
-    r"(?:(?:get |give me |show me )?directions|navigate|route)(?:\s+from\s+(?P<o1>.+?))?\s+to\s+(?P<d1>.+?)", re.IGNORECASE
+    r"(?:(?:get |give me |show me )?directions|navigate|route)(?:\s+from\s+(?P<from_>.+?))?\s+to\s+(?P<to_>.+?)", re.IGNORECASE
 )
 _DIRECTIONS_FROM = re.compile(r"(?:get |give me |show me )?directions\s+from\s+(?P<o>.+?)\s+to\s+(?P<d>.+)", re.IGNORECASE)
 _HOW_TO_GET = re.compile(r"how (?:do i|can i|to) get to\s+(?P<d>.+?)\s+from\s+(?P<o>.+)", re.IGNORECASE)
@@ -124,8 +124,8 @@ def _directions(text: str, settings: Settings) -> Compiled | None:
         match = pattern.fullmatch(text)
         if match:
             groups = match.groupdict()
-            origin = groups.get("o") or groups.get("o1")
-            destination = groups.get("d") or groups.get("d1")
+            origin = groups.get("o") or groups.get("from_")
+            destination = groups.get("d") or groups.get("to_")
             break
     origin, destination = _clean(origin) if origin else None, _clean(destination)
     if not destination:
