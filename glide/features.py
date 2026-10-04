@@ -122,7 +122,6 @@ def _webhooks(glide_config, env) -> str:
 
 def _mcp(glide_config, env) -> str:
     from .mcp.config import McpSettings
-
     from .memory.settings import MemorySettings
 
     settings = McpSettings.from_mapping(table(glide_config, "mcp"))

@@ -68,7 +68,9 @@ def test_a_writer_that_is_unavailable_at_review_time_ends_the_run_as_generation_
     assert result.spoken() == say("provider")
 
 
-@pytest.mark.parametrize("error", [ProviderError("no reply", kind="timeout", provider="llm"), GenerationUnavailable("account spent")])
+@pytest.mark.parametrize(
+    "error", [ProviderError("no reply", kind="timeout", provider="llm"), GenerationUnavailable("account spent")]
+)
 def test_a_model_that_fails_after_a_write_was_sent_leaves_it_uncertain_and_says_so(monkeypatch, tmp_path, error):
     # PR4-4175632210: verify_typed asks the classifier after the field was filled; the failure used to be spoken as
     # the plain provider phrase, which invites a retry of a write whose effect was never observed.
