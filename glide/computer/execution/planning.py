@@ -48,11 +48,13 @@ def grounded_origins(goal, reply, observed, steps, search_url):
 
 _URL = r"https?://[^\s;,]+"
 _OPEN = re.compile(rf"^\s*open\s+({_URL})\s*$", re.IGNORECASE)
-_OPEN_CLICK = re.compile(
-    rf"^\s*open\s+({_URL})\s+and\s+click\s+(?:on\s+)?(?:the\s+)?link\s+(.+?)\s*[;,]\s*success\s+means\s+(?:the\s+)?"
-    rf"(?:address|url)\s+is\s+({_URL})\s*$",
-    re.IGNORECASE,
+_CLICK = (
+    rf"(?:and\s+)?click\s+(?:on\s+)?(?:the\s+)?link\s+(.+?)\s*[;,]\s*success\s+means\s+(?:the\s+)?(?:address|url)\s+is\s+({_URL})"
 )
+_OPEN_CLICKS = re.compile(
+    rf"^\s*open\s+({_URL})\s+(?P<rest>{_CLICK}(?:\s*[;,.]?\s*(?:and\s+)?then\s+{_CLICK})*)\s*$", re.IGNORECASE
+)
+_CLICK_ONE = re.compile(_CLICK, re.IGNORECASE)
 
 
 def compile_goal(goal):
@@ -71,27 +73,30 @@ def compile_goal(goal):
                 "quantity": 1,
             }
         ]
-    if match := _OPEN_CLICK.match(text):
-        opened, label, landing = (g.rstrip(".!?") for g in match.groups())
-        label = label.strip(" \"'\u201c\u201d")
-        return [
+    if match := _OPEN_CLICKS.match(text):
+        steps = [
             {
                 "id": "open-page",
                 "goal": "Open the requested page.",
                 "effect": "url",
                 "target": "",
-                "value": opened,
+                "value": match.group(1).rstrip(".!?"),
                 "quantity": 1,
-            },
-            {
-                "id": "follow-link",
-                "goal": f"Follow the link {label}.",
-                "effect": "url",
-                "target": f"link {label}",
-                "value": landing,
-                "quantity": 1,
-            },
+            }
         ]
+        for number, (label, landing) in enumerate(_CLICK_ONE.findall(match.group("rest")), 1):
+            label = label.strip(" \"'\u201c\u201d")
+            steps.append(
+                {
+                    "id": f"follow-link-{number}",
+                    "goal": f"Follow the link {label}.",
+                    "effect": "url",
+                    "target": f"link {label}",
+                    "value": landing.rstrip(".!?"),
+                    "quantity": 1,
+                }
+            )
+        return steps
     return None
 
 
