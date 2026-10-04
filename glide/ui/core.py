@@ -320,6 +320,7 @@ class PetCore:
 
     def pause_voice(self) -> None:
         """Finish what is being said, then turn the microphone off. Answers, speech and tasks go on."""
+        self.point.cancel_voice_countdown()  # a point question by voice that is still counting down never opens the microphone
         with self._lock:
             voice, opening = self._voice, self._opening
             if voice is None and opening:
