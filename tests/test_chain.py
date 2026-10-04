@@ -123,6 +123,48 @@ def test_when_everything_rests_the_one_that_recovers_first_is_still_tried():
     assert run(c) == "B"  # b rests for less time, so it goes first even though both rest
 
 
+def test_a_call_served_by_a_later_slot_because_the_first_is_resting_is_announced_once_per_rest():
+    clock, seen = Clock(), []
+    a = Fake(err(), err(), err("rate_limit", retry_after=40), "A")
+    c = chain(a, Fake("B"), policy=ChainPolicy(fail_threshold=2, cooldown_s=30), clock=clock, on_event=seen.append)
+    run(c), run(c)  # a fails twice and starts resting; each failure was announced
+    assert [e.kind for e in c.events] == ["server", "server"]
+    assert run(c) == "B" and a.calls == 2  # skipped while it rests: not silent
+    resting = c.events[-1]
+    assert (resting.from_slot, resting.to_slot, resting.kind) == ("a", "b", "resting")
+    assert "resting" in resting.reason and "server failure" in resting.reason
+    assert run(c) == "B" and run(c) == "B" and len(c.events) == 3  # once for this rest, not on every call
+    clock.advance(31)
+    assert run(c) == "B" and a.calls == 3  # the probe fails: announced as a failure, and a rests again at once
+    assert [e.kind for e in c.events][-1:] == ["rate_limit"]
+    assert run(c) == "B" and [e.kind for e in c.events][-2:] == ["rate_limit", "resting"]  # a new rest, announced anew
+    assert seen == list(c.events)
+
+
+def test_a_stream_served_by_a_later_slot_because_the_first_is_resting_is_announced_too():
+    clock = Clock()
+    c = Chain(
+        "llm",
+        [Slot("a", Fake(err(), err())), Slot("b", lambda: iter("B"))],  # a raises before it yields anything
+        ChainPolicy(fail_threshold=2, cooldown_s=30),
+        clock=clock,
+    )
+    assert list(c.stream(lambda s: s.client())) == ["B"] and list(c.stream(lambda s: s.client())) == ["B"]
+    assert list(c.stream(lambda s: s.client())) == ["B"]
+    assert [e.kind for e in c.events] == ["server", "server", "resting"]
+
+
+def test_nothing_is_announced_when_the_first_slot_answers_or_when_everything_rests():
+    clock = Clock()
+    c = chain(Fake("A"), Fake("B"), clock=clock)
+    assert run(c) == "A" and not c.events
+    c = chain(Fake(err("rate_limit", retry_after=60), "A"), Fake(err("rate_limit", retry_after=10), "B"), clock=clock)
+    with pytest.raises(AllProvidersFailed):
+        run(c)
+    before = len(c.events)
+    assert run(c) == "B" and len(c.events) == before  # the last resort is a try, not a skip
+
+
 def test_a_pin_moves_a_provider_first_and_keeps_the_rest_as_fallbacks():
     a, b = Fake("A"), Fake(err(), "B")
     c = chain(a, b)

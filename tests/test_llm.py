@@ -6,6 +6,8 @@ that the test starts itself, to check what a mock cannot: connection reuse, chun
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import json
 import logging
 import socket
@@ -1508,12 +1510,34 @@ def test_a_role_only_first_delta_does_not_commit_the_chain_to_a_provider_that_th
     assert list(llm.stream(MSG)) == ["ok"] and llm.chain.events[0].from_slot == "a"
 
 
-def test_dropping_a_facade_stream_early_closes_the_connection():
+def _two_token_stream(held: list | None = None):
+    """A facade stream over two tokens. Generators handed to `held` stay referenced, so only an explicit close ends them."""
     body = Pieces([event(delta("one")), event(delta("two")), b"data: [DONE]\n\n"])
     a, _ = make(lambda: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body), name="a")
-    stream = llm_of(a).stream(MSG)
+    if held is not None:
+        original = a.stream
+        a.stream = lambda *args, **kwargs: held.append(original(*args, **kwargs)) or held[-1]
+    return body, llm_of(a).stream(MSG)
+
+
+def test_dropping_a_facade_stream_early_closes_the_connection():
+    """The explicit path: whoever stops reading closes the stream, and the chain closes the client's own stream with it,
+    though something else still holds that one, so the connection is not left to a collector."""
+    held: list = []
+    body, stream = _two_token_stream(held)
+    with contextlib.closing(stream):
+        assert next(stream) == "one"
+        assert not body.closed  # still open while it is being read
+    assert body.closed
+
+
+def test_a_collected_facade_stream_closes_the_connection():
+    """The best-effort path, for a caller that forgets to close: collection closes the generator. The collection is
+    forced here, so the test does not depend on when an interpreter happens to run it."""
+    body, stream = _two_token_stream()
     assert next(stream) == "one"
-    stream.close()
+    del stream
+    gc.collect()
     assert body.closed
 
 
@@ -1685,3 +1709,49 @@ def test_over_real_http_the_error_status_and_body_come_through(loopback, caplog)
             error = error_of(call)
             assert error.kind == "auth" and error.status == 401 and "Incorrect API key" in str(error) and KEY not in str(error)
     assert KEY not in caplog.text and "Authorization" not in caplog.text
+
+
+# -- exact_json: the whole reply is the one JSON value ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        JSON_REPLY,
+        f"  {JSON_REPLY}\n",
+        f"```json\n{JSON_REPLY}\n```",
+        f"```\n{JSON_REPLY}\n```\n",
+        f"<think>an {{aside}} first</think>\n{JSON_REPLY}",
+        f"Sure, here it is:\n```json\n{JSON_REPLY}\n```\nHope that helps.",  # prose with no JSON in it, round one fence
+    ],
+)
+def test_exact_json_takes_a_reply_that_is_the_one_value(content):
+    client, _ = make(ok(content))
+    assert json.loads(client.chat(MSG, schema=SCHEMA, exact_json=True).text) == {"ok": True, "reason": "fine"}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"Sure: {JSON_REPLY}",
+        f"{JSON_REPLY} Hope that helps.",
+        f"{JSON_REPLY}{JSON_REPLY}",
+        '{"ok": false} but actually ' + JSON_REPLY,  # the first value fails the schema: the second must not be picked
+        f"[{JSON_REPLY}]",
+        '{"ok": true}',  # a required field missing
+        "```json\n" + JSON_REPLY + "\n``` and " + JSON_REPLY,
+        "```json\n" + JSON_REPLY + "\n```\n```json\n" + JSON_REPLY + "\n```",  # two fences: which one is the answer?
+        "Use {braces} freely: ```json\n" + JSON_REPLY + "\n```",  # prose outside the fence holding JSON-looking text
+        "null",
+        "",
+    ],
+)
+def test_exact_json_refuses_text_around_the_value_or_a_second_one(content):
+    client, _ = make(ok(content or " "))
+    error = error_of(lambda: client.chat(MSG, schema=SCHEMA, exact_json=True))
+    assert error.kind == "content" and "ok" not in str(error).replace("exactly one", "")  # never the reply itself
+
+
+def test_without_exact_json_the_first_value_that_fits_is_still_picked_out_of_the_reply():
+    client, _ = make(ok('{"ok": false} but actually ' + JSON_REPLY))
+    assert json.loads(client.chat(MSG, schema=SCHEMA).text)["reason"] == "fine"

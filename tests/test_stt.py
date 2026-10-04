@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import gc
 import hashlib
 import io
 import json
@@ -928,11 +929,29 @@ def test_the_real_adapter_replays_the_utterance_to_the_next_provider(sockets):
 
 
 def test_abandoning_the_facade_stream_closes_the_provider_socket(sockets):
+    """The explicit path: whoever stops reading closes the stream, and the facade closes the client's own stream with it,
+    though something else still holds that one, so the socket is not left to a collector."""
+    ws = FakeSocket(on_audio={1: [partial("a")]})
+    sockets.add(ws)
+    client, held = ElevenLabsSTT("el", "scribe_v2_realtime", KEY), []
+    original = client.stream
+    client.stream = lambda *args, **kwargs: held.append(original(*args, **kwargs)) or held[-1]
+    stream = facade(client).stream(sleepy())
+    with contextlib.closing(stream):
+        assert next(stream).text == "a"
+        assert not ws.closed  # still open while it is being read
+    assert ws.closed
+
+
+def test_a_collected_facade_stream_closes_the_provider_socket(sockets):
+    """The best-effort path, for a caller that forgets to close: collection closes the generator. The collection is
+    forced here, so the test does not depend on when an interpreter happens to run it."""
     ws = FakeSocket(on_audio={1: [partial("a")]})
     sockets.add(ws)
     stream = facade(ElevenLabsSTT("el", "scribe_v2_realtime", KEY)).stream(sleepy())
     assert next(stream).text == "a"
-    stream.close()
+    del stream
+    gc.collect()
     assert ws.closed
 
 

@@ -65,7 +65,7 @@ class Facade:
     def __init__(self, script=()):
         self.script, self.calls = list(script), []
 
-    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, timeout=None):
+    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, timeout=None, exact_json=False):
         self.calls.append({"messages": list(messages), "schema": schema, "timeout": timeout})
         assert self.script, "this facade was not expected to be called"
         return ChatResult(

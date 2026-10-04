@@ -13,8 +13,7 @@ by the words it carries, so a reply is used whole or not at all: a connection th
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Protocol
+from collections.abc import Mapping
 
 from glide.computer.control import RunControl, checkpoint, controlled, current_control
 from glide.computer.generation import (
@@ -26,7 +25,7 @@ from glide.computer.generation import (
     image_url,
 )
 
-from .base import ChatResult, Usage
+from .base import ChatFacade, Usage
 from .errors import AllProvidersFailed, ProviderError
 
 # Which LLM facade serves which `GenerationRequest.role`. A role is a job, never a model: the chain decides which
@@ -39,20 +38,6 @@ RESEARCH_PREFIX = "research"
 # A reply that ended for one of these reasons is cut short, not finished. (An ordinary stop, or a provider
 # that names no reason, is finished.)
 CUT_SHORT = frozenset({"length", "content_filter", "error"})
-
-
-class ChatFacade(Protocol):
-    """What `ChainWriter` needs from an LLM facade: its `chat`, which fails over inside itself."""
-
-    def chat(
-        self,
-        messages: Sequence[dict],
-        *,
-        max_tokens: int = 512,
-        temperature: float = 0.0,
-        schema: dict | None = None,
-        timeout: float | None = None,
-    ) -> ChatResult: ...
 
 
 class ChainWriter:
@@ -122,6 +107,7 @@ class ChainWriter:
                     temperature=0.0,
                     schema=request.schema,
                     timeout=self._deadline(request, label),
+                    exact_json=True,  # a reply is read whole: the prompt carries text that someone else may have written
                 )
         except ProviderError as error:
             checkpoint(cancel, wait=False)  # a call a cancel cut short is an `Abort`, not an unavailable writer
@@ -166,14 +152,22 @@ def _generation_error(error: ProviderError) -> GenerationError:
 def _messages(request: GenerationRequest) -> list[dict]:
     """The request as OpenAI chat messages: the instructions as the system prompt, then the user's turn.
 
-    The schema is not written into the prompt here: a facade given a `schema` enforces it where it can, and asks
+    The user's turn is the request's data, fenced (`_fenced`). The schema is not written into the prompt here: a facade given a `schema` enforces it where it can, and asks
     for JSON in the prompt where it cannot (llm.py).
     """
-    content: list[dict] = [{"type": "text", "text": request.text}]
+    content: list[dict] = [{"type": "text", "text": _fenced(request.text)}]
     if request.image is not None:
         content.insert(0, {"type": "image_url", "image_url": {"url": image_url(request.image)}})
     system = [{"role": "system", "content": request.instructions}] if request.instructions else []
     return [*system, {"role": "user", "content": content}]
+
+
+def _fenced(text: str) -> str:
+    """The request's JSON between <data> tags, which its instructions call untrusted data (writer.UNTRUSTED).
+
+    `</` becomes `<\\/`, which JSON reads as the same two characters, so nothing in the data can write the closing tag.
+    """
+    return "<data>\n" + text.replace("</", "<\\/") + "\n</data>"
 
 
 def _usage(usage: Usage | None) -> TokenUsage:

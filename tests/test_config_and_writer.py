@@ -25,10 +25,9 @@ def test_dotenv_missing_file_is_fine(tmp_path):
     [
         ('{"fill": true}', {"fill": True}),
         ('```json\n{"fill": false}\n```', {"fill": False}),
-        ('Sure thing:\n{"fill": true, "text": "hi"}\nHope that helps.', {"fill": True, "text": "hi"}),
     ],
 )
-def test_the_writer_reply_is_read_whether_or_not_it_came_plain(reply, expected):
+def test_the_writer_reply_is_read_plain_or_in_a_code_fence(reply, expected):
     assert parse_json(reply) == expected
 
 

@@ -150,6 +150,20 @@ def test_a_chat_still_waiting_for_its_first_byte_returns_at_once_and_is_never_se
     assert server.requests == 1 and list(llm.chain.events) == []
 
 
+def test_the_connection_that_arrives_after_the_cancel_is_closed_on_arrival():
+    """While connecting there is no socket to shut (interrupt.py): the late response is given back the moment it arrives."""
+    server = Server(headers={"content-type": "application/json"}, block_before_headers=True)
+    server.body = HeldBody(COMPLETION)
+    llm, control = llm_over(server), RunControl()
+    done, box = under(control, lambda: llm.chat([{"role": "user", "content": "hello"}]))
+    assert server.entered.wait(WAIT)
+    control.cancel("stopped by the user")
+    assert done.wait(WAIT) and box["error"].kind == CANCELLED
+    assert not server.body.closed.is_set()  # nothing has arrived yet
+    server.release.set()
+    assert server.body.closed.wait(WAIT), "the late response was left open"
+
+
 def test_a_connection_closed_by_the_cancel_is_not_treated_as_a_stale_one_to_retry():
     """`RemoteProtocolError` is what a closed socket raises, and is also what a kept-alive connection the server had
     closed raises, which the client answers with one more request. After a cancel it must not."""

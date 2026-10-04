@@ -52,7 +52,7 @@ import json
 import math
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -75,9 +75,9 @@ from typesafe_sdk import (
 
 from glide.computer.control import checkpoint
 
-from .base import ChatResult, ProviderSpec, Usage
+from .base import ChatFacade, ChatResult, ProviderSpec, Usage
 from .chain import Chain, ChainPolicy, Slot, SwitchEvent
-from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, from_status, snippet
+from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, redact, snippet, status_error
 
 TOP_N = 3  # options each Choice is asked to rank
 ROLE = "classifier"
@@ -242,7 +242,15 @@ def _prompt(state: Any, asks: Sequence[_Ask]) -> list[dict]:
 
 
 class _Invalid(Exception):
-    """A reply that cannot be used, said in words the model can act on. Never leaves this module."""
+    """A reply that cannot be used, said in words the model can act on. Never leaves this module.
+
+    `str()` goes back to the model, which may be told what it wrote; `safe` is the same without any of it, and is the
+    only form that reaches a ProviderError (no reply text in an error message).
+    """
+
+    def __init__(self, message: str, safe: str | None = None):
+        super().__init__(message)
+        self.safe = safe or message
 
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -291,7 +299,10 @@ def _choice(ask: _Ask, raw: Any) -> ChoiceAnswer:
             raise _Invalid(f"{ask.name}: each entry of `top` must be an object with `option` and `p`")
         key = _option(entry.get("option"), ask.criteria)
         if key is None:
-            raise _Invalid(f"{ask.name}: {repr(entry.get('option'))[:OPTION_ECHO]} is not one of the options")
+            raise _Invalid(
+                f"{ask.name}: {repr(entry.get('option'))[:OPTION_ECHO]} is not one of the options",
+                f"{ask.name}: an option that is not one of the options",
+            )
         p = _number(entry.get("p"))
         if p is None or p < 0 or p > 1:  # not a percentage: 30 would read as 100% once it was scaled
             raise _Invalid(f"{ask.name}: p for {key!r} must be a probability from 0 to 1")
@@ -327,20 +338,6 @@ def _answers(text: str, asks: Sequence[_Ask]) -> dict[str, ChoiceAnswer | NoulAn
 # ---------------------------------------------------------------------------------------------
 # LLMClassifier
 # ---------------------------------------------------------------------------------------------
-
-
-class ChatFacade(Protocol):
-    """What `LLMClassifier` needs of an LLM: the `chat` of base.LLMClient, or a facade over a chain of them."""
-
-    def chat(
-        self,
-        messages: Sequence[dict],
-        *,
-        max_tokens: int = ...,
-        temperature: float = ...,
-        schema: dict | None = ...,
-        timeout: float | None = ...,
-    ) -> ChatResult: ...
 
 
 class LLMClassifier:
@@ -405,7 +402,7 @@ class LLMClassifier:
         schema, messages = _schema(asked), _prompt(state, asked)
         budget = self._max_tokens or 96 + 80 * sum(a.kind == "choice" for a in asked) + 24 * sum(a.kind == "noul" for a in asked)
         usage = Usage()
-        problem = ""
+        problem = problem_safe = ""
         result: ChatResult | None = None
         for attempt in range(2):
             sent = messages
@@ -423,12 +420,12 @@ class LLMClassifier:
             try:
                 parsed = _answers(result.text, asked)
             except _Invalid as bad:
-                problem = str(bad)
+                problem, problem_safe = str(bad), bad.safe
                 continue
             parsed.update(settled)
             return ClassifierReply({ask.name: parsed[ask.name] for ask in asks}, usage, result.model or self.model)
         who = (result.provider if result is not None else "") or self.name
-        raise ProviderError(f"{who} gave an unusable classifier answer twice: {problem}", kind="content", provider=who)
+        raise ProviderError(f"{who} gave an unusable classifier answer twice: {problem_safe}", kind="content", provider=who)
 
 
 def _add(total: Usage, more: Any) -> None:
@@ -442,22 +439,36 @@ def _add(total: Usage, more: Any) -> None:
 # ---------------------------------------------------------------------------------------------
 
 _PASSTHROUGH = ("retry", "timeout", "extra_headers", "extra_body")
-_MIN_SECRET = 4  # shorter than this and a "key" would mangle ordinary words when scrubbed out of a message
 
 
-def _scrub(text: str, secrets: Sequence[str]) -> str:
-    for secret in secrets:
-        if len(secret) >= _MIN_SECRET:
-            text = text.replace(secret, "[redacted]")
-    return text
+def _leaves(value: Any) -> Iterator[str]:
+    """Every string in a state or a question, and the whole of it as JSON, for an error reply that quotes any of them."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _leaves(key)
+            yield from _leaves(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _leaves(item)
+    elif value is not None:
+        for attribute in ("instructions", "criteria"):  # a Choice or Noul of the SDK
+            yield from _leaves(getattr(value, attribute, None))
 
 
-def typesafe_error(exc: BaseException, provider: str = "", secrets: Sequence[str] = ()) -> ProviderError:
+def _request_texts(state: Any, questions: Mapping[str, Any]) -> list[str]:
+    return [*_leaves(state), json.dumps(state, default=str), *_leaves(dict(questions))]
+
+
+def typesafe_error(
+    exc: BaseException, provider: str = "", secrets: Sequence[str] = (), request_texts: Sequence[str] = ()
+) -> ProviderError:
     """The `ProviderError` for an exception from the TypeSafe SDK.
 
     Order matters: a timeout is a kind of connection error, and a reply that does not fit the schema
-    is an API error that carries status 200. The message holds the status and a snippet of what the
-    server said (the SDK's own text names the endpoint without credentials), with any key scrubbed.
+    is an API error that carries status 200. A failed status is made safe to show as every provider's is
+    (errors.status_error): the server's message, with the key and any quoted part of the request cut out.
     """
     if isinstance(exc, ProviderError):
         return exc
@@ -472,12 +483,13 @@ def typesafe_error(exc: BaseException, provider: str = "", secrets: Sequence[str
             f"{name} sent a reply this client cannot read (at {exc.field_path})", kind="content", provider=provider
         )
     if isinstance(exc, TypeSafeAPIError):
-        after = None
+        body = exc.body if isinstance(exc.body, str) else "" if exc.body is None else json.dumps(exc.body, default=str)
+        error = status_error(exc.status, body, provider=provider, secrets=secrets, request_texts=request_texts)
         if isinstance(exc, TypeSafeRateLimitError) and exc.retry_after_ms is not None:
-            after = exc.retry_after_ms / 1000
-        return from_status(exc.status, _scrub(str(exc), secrets), provider=provider, retry_after=after)
+            error.retry_after = exc.retry_after_ms / 1000
+        return error
     return ProviderError(
-        f"{name} refused the request: {snippet(_scrub(str(exc), secrets))}", kind="bad_request", provider=provider
+        f"{name} refused the request: {snippet(redact(str(exc), secrets))}", kind="bad_request", provider=provider
     )
 
 
@@ -512,7 +524,7 @@ class TypeSafeClassifier:
         try:
             return self._client.system_one(state=state, questions=questions, model=model, **extra)
         except TypeSafeError as e:
-            raise typesafe_error(e, self.name, self._secrets) from None
+            raise typesafe_error(e, self.name, self._secrets, _request_texts(state, questions)) from None
 
 
 def build_client(
@@ -558,7 +570,7 @@ def build_client(
         )
     except TypeSafeError as e:
         raise ProviderError(
-            f"{name} could not be set up: {snippet(_scrub(str(e), [api_key]))}", kind="bad_request", provider=name
+            f"{name} could not be set up: {snippet(redact(str(e), [api_key]))}", kind="bad_request", provider=name
         ) from None
     return TypeSafeClassifier(client, name=name, model=model or constants.DEFAULT_MODEL, secrets=[api_key, api_key.strip()])
 
@@ -593,7 +605,7 @@ class ChainedClassifier:
     def __init__(self, chain: Chain[ClassifierClient]):
         self.chain = chain
         self.last_slot: str | None = None
-        self._clients = [slot.client for slot in chain._slots]
+        self._clients = chain.clients
 
     @classmethod
     def from_clients(
@@ -643,7 +655,7 @@ class ChainedClassifier:
                     raise
                 raise converted from e
             except TypeSafeError as e:  # a bare SDK client in a slot: still a provider failure, not a bug
-                raise typesafe_error(e, slot.name) from None
+                raise typesafe_error(e, slot.name, request_texts=_request_texts(state, questions)) from None
 
         try:
             name, reply = self.chain.call(ask, hedge=True)

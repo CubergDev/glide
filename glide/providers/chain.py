@@ -89,7 +89,7 @@ class SwitchEvent:
     role: str
     from_slot: str
     to_slot: str | None
-    kind: str  # the error kind, or "slow" for a hedge
+    kind: str  # the error kind, "slow" for a hedge, or "resting" for a slot passed over while it rests
     reason: str
 
 
@@ -124,6 +124,7 @@ class Chain[T]:
         self._health = {s.name: _Health() for s in slots}
         self._pinned: str | None = None
         self._strict = False
+        self._announced: dict[str, float] = {}  # slot name to the rest that has been announced
         self._clock = clock
         self._on_event = on_event
         self._lock = threading.RLock()
@@ -133,6 +134,10 @@ class Chain[T]:
     @property
     def names(self) -> list[str]:
         return [s.name for s in self._slots]
+
+    @property
+    def clients(self) -> list[T]:
+        return [s.client for s in self._slots]
 
     @property
     def pinned(self) -> str | None:
@@ -181,6 +186,7 @@ class Chain[T]:
         only does anything when the policy sets `hedge_after_s`. Never hedge an action on the world.
         """
         order = self._order()
+        self._announce_resting(order)
         errors: list[tuple[str, ProviderError]] = []
         if hedge and self.policy.hedge_after_s is not None and len(order) > 1:
             return self._hedged(fn, order, errors)
@@ -208,6 +214,7 @@ class Chain[T]:
 
     def _stream[R](self, fn: Callable[[Slot[T]], Iterator[R]], control: RunControl | None) -> Iterator[R]:
         order = self._order()
+        self._announce_resting(order)
         errors: list[tuple[str, ProviderError]] = []
         for i, slot in enumerate(order):
             started = self._clock()
@@ -265,6 +272,29 @@ class Chain[T]:
                 ready.sort(key=lambda s: s.name != self._pinned)  # stable: only the pinned slot moves up
                 resting.sort(key=lambda s: s.name != self._pinned)
             return ready + resting
+
+    def _announce_resting(self, order: list[Slot[T]]) -> None:
+        """Say, once for each rest, that a slot resting after failures is being passed over for the one that takes this call.
+
+        `_order` moves a resting slot to the end without a word, and its failures were announced only when they
+        happened, so later calls served by another slot would otherwise show nothing. When every slot left is
+        resting, the first one is tried as a last resort: that is a try, not a skip.
+        """
+        now = self._clock()
+        with self._lock:
+            if not order or self._health[order[0].name].rest_until > now:
+                return
+            usable = {s.name for s in order}
+            news = [
+                (s.name, h.rest_until, h.last_error)
+                for s in self._slots
+                if s.name in usable
+                and (h := self._health[s.name]).rest_until > now
+                and self._announced.get(s.name) != h.rest_until
+            ]
+            self._announced.update({name: until for name, until, _ in news})
+        for name, _, last in news:
+            self._emit_raw(name, order[0].name, "resting", f"{name} is resting after {last or 'earlier failures'}")
 
     def _attempt[R](self, fn: Callable[[Slot[T]], R], slot: Slot[T], control: RunControl | None, *, hop: bool = True) -> R:
         started = self._clock()
@@ -336,7 +366,8 @@ class Chain[T]:
                             batch.append(finished.get_nowait())
                         except queue.Empty:
                             break
-                    if None in batch:
+                    cancelled_now = parent is not None and parent.cancelled.is_set()
+                    if None in batch or cancelled_now:  # an answer that arrived with the cancel is dropped
                         raise cancelled(order[0].name, parent.reason if parent else "")
                     pending.difference_update(batch)
                     for future in sorted(batch, key=lambda f: f.exception() is not None):
@@ -347,7 +378,12 @@ class Chain[T]:
                             errors.append((slot.name, e))
                             if e.kind not in self.policy.failover_kinds:
                                 raise
-                            self._emit(slot.name, order[launched].name if launched < len(order) else None, e)
+                            carrying_on = [slots[f].name for f in pending]  # a racer in flight takes over before a new one does
+                            self._emit(
+                                slot.name,
+                                carrying_on[0] if carrying_on else order[launched].name if launched < len(order) else None,
+                                e,
+                            )
                     if not pending and launched < len(order):
                         pending.add(launch())
                 raise AllProvidersFailed(self.role, errors)

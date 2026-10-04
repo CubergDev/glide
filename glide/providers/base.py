@@ -63,11 +63,14 @@ class LLMClient(Protocol):
         schema: dict | None = None,
         logprobs: bool = False,
         timeout: float | None = None,
+        exact_json: bool = False,
     ) -> ChatResult:
         """`messages` are OpenAI chat messages. Content may be a string or a list of parts:
         {"type": "text", "text": ...} and {"type": "image_url", "image_url": {"url": "data:..."}}.
         `schema`, when given, is a JSON Schema the reply must satisfy; a provider without native
-        support asks for JSON in the prompt instead, and the reply is still returned as text."""
+        support asks for JSON in the prompt instead, and the reply is still returned as text.
+        With `exact_json` the whole reply (a code fence round it allowed) must be that one JSON value: text around
+        it, or a second value, is a "content" error. Without it the first value that fits is picked out of the reply."""
         ...
 
     def stream(
@@ -80,6 +83,22 @@ class LLMClient(Protocol):
     ) -> Iterator[str]:
         """Text deltas as they arrive. Reasoning text is never yielded."""
         ...
+
+
+class ChatFacade(Protocol):
+    """What a caller of an LLM needs: its `chat`. An `LLMClient`, or the `LLM` facade over a chain of them, which
+    fails over inside itself (the writer and the classifier take either)."""
+
+    def chat(
+        self,
+        messages: Sequence[dict],
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        schema: dict | None = None,
+        timeout: float | None = None,
+        exact_json: bool = False,
+    ) -> ChatResult: ...
 
 
 @dataclass(frozen=True)

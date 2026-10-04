@@ -14,7 +14,6 @@ an HTTP read can end in the middle of a 16-bit sample, and a player fed half a s
 from __future__ import annotations
 
 import contextlib
-import json
 import re
 import subprocess
 import tempfile
@@ -22,7 +21,6 @@ import threading
 import time
 import wave
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -32,7 +30,8 @@ import httpx
 from . import interrupt
 from .base import ProviderSpec, SpeechAudio, TTSClient
 from .chain import Chain
-from .errors import ProviderError, from_exception, from_status, snippet
+from .errors import ProviderError, snippet, status_error
+from .http import read_body, streaming, translated
 
 # -- Protocol constants -----------------------------------------------------------------------------
 # Everything a vendor decides lives in this block, so a changed endpoint or model is a one-place edit.
@@ -80,9 +79,6 @@ SAY_DEFAULT_VOICES = {"yue": "Sinji", "zh-hk": "Sinji", "zh": "Tingting", "cmn":
 DEFAULT_TIMEOUT_S = 30.0
 ERROR_BODY_LIMIT = 4096  # bytes of an error reply read before giving up on the rest
 SAMPLE_BYTES = 2  # 16-bit mono
-# A server that echoes our text back has it replaced in the error message. Short text is left alone:
-# replacing "No." everywhere in a reply would garble it, and says nothing worth hiding.
-MIN_SCRUBBED_TEXT = 10
 
 
 class SpeechChunk(NamedTuple):
@@ -128,56 +124,6 @@ def _rate_from(source: Mapping, default: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"sample_rate must be a positive whole number of Hz, not {value!r}")
     return value
-
-
-@contextlib.contextmanager
-def _provider_errors(name: str) -> Iterator[None]:
-    """Turn what httpx raises into a ProviderError that carries no request detail.
-
-    The new error is raised `from None`: an httpx exception holds the request, and a traceback that
-    chained to it could show headers.
-    """
-    try:
-        yield
-    except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as exc:
-        interrupt.check(name)  # a connection closed by a cancel is not a transport fault
-        error = from_exception(exc, provider=name)
-        raise error from None
-
-
-def _retry_after(response: httpx.Response) -> float | None:
-    value = response.headers.get("retry-after", "")
-    return float(value) if value.replace(".", "", 1).isdigit() else None
-
-
-def _describe(raw: str, secrets: Iterable[str]) -> str:
-    """What a server said, safe for an error message: the reason only, and no secret or input echoed.
-
-    Validation errors (FastAPI style `detail` lists) keep where and why but drop `input`, which can be
-    the text we sent. Whatever is left has each secret replaced.
-    """
-    text = raw
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        body = None
-    if isinstance(body, dict):
-        detail = body.get("detail", body.get("error", body.get("message")))
-        if isinstance(detail, list):
-            parts = []
-            for item in detail:
-                if isinstance(item, dict):
-                    where = ".".join(map(str, item["loc"])) if isinstance(item.get("loc"), list) else ""
-                    parts.append(f"{where}: {item.get('msg', '')}".strip(": "))
-            text = "; ".join(parts)
-        elif isinstance(detail, dict):
-            text = str(detail.get("message") or detail.get("status") or "")
-        elif isinstance(detail, str):
-            text = detail
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, "***")
-    return text
 
 
 class _HTTPStreamTTS:
@@ -256,16 +202,18 @@ class _HTTPStreamTTS:
     def _chunks(self, text: str, voice: str | None, language: str | None, timeout: float) -> Iterator[bytes]:
         if not text.strip():
             return
-        request = self._request(text, voice, language)
-        carry = b""
         produced = False
-        call = interrupt.Call(self._http)
-        with (
-            _provider_errors(self.name),
-            interrupt.closing(call.abort, self.name),  # until the first byte there is no response to close
-            self._http.stream("POST", timeout=timeout, extensions=call.extensions, **request) as response,
-            interrupt.closing(partial(interrupt.abort_response, response), self.name),
-        ):
+        for pcm in translated(self.name, self._pcm(text, self._request(text, voice, language), timeout)):
+            produced = True
+            yield pcm
+        interrupt.check(self.name)  # a body that a cancel cut short ends quietly: it is not a finished sentence
+        if not produced:
+            raise ProviderError(f"{self.name} returned no audio", kind="content", provider=self.name)
+
+    def _pcm(self, text: str, request: dict, timeout: float) -> Iterator[bytes]:
+        """The reply's audio in chunks of whole samples: an HTTP read can end in the middle of one."""
+        carry = b""
+        with streaming(self._http, self.name, "POST", timeout=timeout, **request) as response:
             if response.status_code != 200:
                 raise self._status_error(response, text)
             for data in response.iter_bytes():
@@ -273,25 +221,19 @@ class _HTTPStreamTTS:
                 keep = len(data) % SAMPLE_BYTES
                 data, carry = (data[:-keep], data[-keep:]) if keep else (data, b"")
                 if data:
-                    produced = True
                     yield data
-        interrupt.check(self.name)  # a body that a cancel cut short ends quietly: it is not a finished sentence
-        if not produced:
-            raise ProviderError(f"{self.name} returned no audio", kind="content", provider=self.name)
 
     def _status_error(self, response: httpx.Response, text: str) -> ProviderError:
         """The error for a non-200 reply. A streaming body is not read until asked, so read it first."""
-        body = bytearray()
-        for part in response.iter_bytes():
-            body += part
-            if len(body) >= ERROR_BODY_LIMIT:
-                break
-        raw = bytes(body[:ERROR_BODY_LIMIT]).decode("utf-8", "replace")
-        return from_status(
+        body = read_body(response, provider=self.name, limit=ERROR_BODY_LIMIT)[:ERROR_BODY_LIMIT]
+        return status_error(
             response.status_code,
-            snippet(_describe(raw, (self._key, text if len(text) >= MIN_SCRUBBED_TEXT else ""))),
+            body.decode("utf-8", "replace"),
             provider=self.name,
-            retry_after=_retry_after(response),
+            headers=response.headers,
+            secrets=[self._key],
+            request_texts=[text],
+            mark="***",
         )
 
 
