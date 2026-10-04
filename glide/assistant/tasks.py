@@ -170,9 +170,17 @@ class ComputerTask:
     """
 
     def __init__(
-        self, goal: str, *, act: bool, config, folder: Path, on_question: Callable[[ComputerTask, str], None] | None = None
+        self,
+        goal: str,
+        *,
+        act: bool,
+        config,
+        folder: Path,
+        on_question: Callable[[ComputerTask, str], None] | None = None,
+        route: str = "",
     ) -> None:
         self.goal = goal
+        self.route = route  # what the router decided ("execute" or "research"); "" when nothing did
         self.act = act
         self.folder = folder
         self.stop_event = threading.Event()
@@ -292,7 +300,11 @@ class ComputerTask:
         try:
             writer = self._config.writer()
             cfg = runner.RunConfig(
-                goal=self.goal, out=self.folder, act=self.act, record_content=bool(getattr(self._config, "record_content", False))
+                goal=self.goal,
+                out=self.folder,
+                act=self.act,
+                record_content=bool(getattr(self._config, "record_content", False)),
+                route=self.route,
             )
 
             def ctx_factory(typesafe, history):
@@ -346,6 +358,7 @@ class TaskRunner:
         goal: str,
         *,
         act: bool = False,
+        route: str = "",
         on_done: Callable[[ComputerTask], None] | None = None,
         on_question: Callable[[ComputerTask, str], None] | None = None,
     ) -> ComputerTask:
@@ -353,7 +366,9 @@ class TaskRunner:
         if not _ACTIVE.acquire(blocking=False):
             raise TaskBusy("a task is already running")
         try:
-            task = ComputerTask(goal, act=act, config=self._config, folder=self._fresh_folder(), on_question=on_question)
+            task = ComputerTask(
+                goal, act=act, config=self._config, folder=self._fresh_folder(), on_question=on_question, route=route
+            )
             self.current = task
             task.start(on_done, release=_ACTIVE.release)
         except BaseException:
