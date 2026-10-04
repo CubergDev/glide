@@ -47,7 +47,6 @@ for one because the error kind is `unsupported`.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import re
@@ -415,7 +414,9 @@ class LLMClassifier:
                 ]
                 if result is not None and result.finish_reason == "length":
                     budget *= 2  # it ran out of room, so the same room would run out again
-            result = self._llm.chat(sent, max_tokens=budget, temperature=self._temperature, schema=schema, timeout=self._timeout, exact_json=True)
+            result = self._llm.chat(
+                sent, max_tokens=budget, temperature=self._temperature, schema=schema, timeout=self._timeout, exact_json=True
+            )
             _add(usage, result.usage)
             try:
                 parsed = _answers(result.text, asked)

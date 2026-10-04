@@ -155,10 +155,10 @@ def validate_plan(data, observed, steps=(), *, allowed_effects=None, grounded=No
                     "Do not append descriptions or use the controlled panel ID. Navigate or scroll and observe "
                     "the controller before planning expansion."
                 )
-        if grounded is not None and milestone.effect in {"url", "url_query", "tab_created"}:
-            # url_query carries its address in target (policy.candidates navigates to it)
-            if _origin(milestone.target if milestone.effect == "url_query" else milestone.value) not in grounded:
-                raise InvalidAction(NOT_GROUNDED)
+        # url_query carries its address in target (policy.candidates navigates to it)
+        where = milestone.target if milestone.effect == "url_query" else milestone.value
+        if grounded is not None and milestone.effect in {"url", "url_query", "tab_created"} and _origin(where) not in grounded:
+            raise InvalidAction(NOT_GROUNDED)
         if milestone.effect in {"url", "tab_created"}:
             has_page = True
             known_tab_urls.add(milestone.value)

@@ -790,7 +790,32 @@ _BARE_SITE = re.compile(  # a site written without a scheme: localhost, an addre
 )
 # A dotted name ending in one of these is a file the screen shows, not a site. Any other ending is read as a top-level
 # domain: a list of known ones goes stale and a false alarm costs a stop, a false pass sends the agent elsewhere.
-_FILE_ENDINGS = frozenset("txt pdf doc docx xls xlsx ppt pptx png jpg jpeg gif csv json md py js html htm exe dmg pkg".split())
+_FILE_ENDINGS = frozenset(
+    [
+        "txt",
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "csv",
+        "json",
+        "md",
+        "py",
+        "js",
+        "html",
+        "htm",
+        "exe",
+        "dmg",
+        "pkg",
+    ]
+)
 _SPACED_DOT = re.compile(r"\s+\.\s+|\s*[\u3002\uff0e\uff61]\s*")  # "evil . com", and the ideographic and full-width stops
 
 
