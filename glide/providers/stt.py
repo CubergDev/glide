@@ -29,16 +29,16 @@ import time
 import wave
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
-from functools import partial
 from urllib.parse import urlencode
 
 import httpx
 import websocket
 
-from . import errors, interrupt
+from . import interrupt
 from .base import Audio, ProviderSpec, STTClient, Transcript
 from .chain import Chain
-from .errors import ProviderError, snippet
+from .errors import ProviderError, redact, snippet, status_error
+from .http import streaming, translate
 
 # ---------------------------------------------------------------------------------------------------
 # ElevenLabs wire protocol. Every vendor-specific string is here. Verified against the docs on
@@ -231,9 +231,11 @@ def is_error_event(kind: str) -> bool:
     return kind in ERROR_EVENT_KINDS or kind.endswith("_error")
 
 
-def error_for_event(event: Event, provider: str) -> ProviderError:
+def error_for_event(event: Event, provider: str, key: str = "") -> ProviderError:
+    """The error for a server error event. The event's text may quote the key, which is cut out."""
     kind = ERROR_EVENT_KINDS.get(event.type, UNKNOWN_ERROR_KIND)
-    return ProviderError(f"{provider} reported {event.type}: {snippet(event.error)}".rstrip(": "), kind=kind, provider=provider)
+    said = snippet(redact(event.error, [key], "***"))
+    return ProviderError(f"{provider} reported {event.type}: {said}".rstrip(": "), kind=kind, provider=provider)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -283,19 +285,6 @@ def _join(left: str, right: str) -> str:
 # ---------------------------------------------------------------------------------------------------
 
 
-def _scrub(error: ProviderError, key: str) -> ProviderError:
-    """The same error with the key removed from its message, in case a server echoed it back."""
-    if not key or key not in str(error):
-        return error
-    return ProviderError(
-        str(error).replace(key, "***"),
-        kind=error.kind,
-        provider=error.provider,
-        status=error.status,
-        retry_after=error.retry_after,
-    )
-
-
 def _text(body: object) -> str:
     if isinstance(body, bytes):
         return body.decode("utf-8", "replace")
@@ -318,55 +307,37 @@ class _HTTPAdapter:
     def close(self) -> None:
         self._http.close()
 
-    def _error(self, error: ProviderError) -> ProviderError:
-        return _scrub(error, self._key)
-
     def _post(self, url: str, *, headers: dict, data: dict, wav: bytes, timeout: float | None) -> tuple[dict, float]:
-        """POST the audio as multipart and return the JSON reply and how long it took, or raise a ProviderError.
-
-        The error is raised outside the `except` block on purpose. Inside it, the httpx exception would be
-        kept as `__context__`, and that exception holds the request and so the key header.
-        """
-        failure: ProviderError | None = None
-        reply: dict | None = None
+        """POST the audio as multipart and return the JSON reply and how long it took, or raise a ProviderError."""
         started = time.monotonic()
-        try:
-            call = interrupt.Call(self._http)
-            request = self._http.build_request(
-                "POST",
-                url,
-                headers=headers,
-                data=data,
-                files={"file": ("audio.wav", wav, "audio/wav")},
-                timeout=timeout or self._timeout_s,
-                extensions=call.extensions,
+        # ValueError: a base_url (or a key) that httpx cannot make a request of
+        body = translate(self.name, lambda: self._exchange(url, headers, data, wav, timeout), also=(ValueError,))
+        if not isinstance(body, dict):
+            raise ProviderError(
+                f"{self.name} answered with something other than a JSON object", kind="content", provider=self.name
             )
-            with interrupt.closing(call.abort, self.name):  # the answer is awaited here, before any header
-                response = self._http.send(request, stream=True)  # streamed, so a cancel can close the body too
-            try:
-                with interrupt.closing(partial(interrupt.abort_response, response), self.name):
-                    response.read()
-                    response.raise_for_status()
-            finally:
-                response.close()
-        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:  # ValueError: a base_url httpx cannot make a request of
-            interrupt.check(self.name)  # a connection closed by a cancel is not a transport fault
-            failure = errors.from_exception(e, provider=self.name)
-        if failure is None:
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
-            if isinstance(body, dict):
-                reply = body
-            else:
-                failure = ProviderError(
-                    f"{self.name} answered with something other than a JSON object", kind="content", provider=self.name
+        return body, time.monotonic() - started
+
+    def _exchange(self, url: str, headers: dict, data: dict, wav: bytes, timeout: float | None) -> object:
+        """One request. The reply's JSON, or None when it is not JSON; a failed status is the ProviderError it maps to."""
+        files = {"file": ("audio.wav", wav, "audio/wav")}
+        with streaming(
+            self._http, self.name, "POST", url=url, headers=headers, data=data, files=files, timeout=timeout or self._timeout_s
+        ) as response:  # streamed, so a cancel can close the body too
+            response.read()
+            if not response.is_success:
+                raise status_error(
+                    response.status_code,
+                    response.text,
+                    provider=self.name,
+                    headers=response.headers,
+                    secrets=[self._key],
+                    mark="***",
                 )
-        if failure is not None:
-            raise self._error(failure)
-        assert reply is not None
-        return reply, time.monotonic() - started
+            try:
+                return response.json()
+            except ValueError:
+                return None
 
     def _empty(self, model: str, language: str | None) -> Transcript:
         return Transcript(
@@ -432,7 +403,7 @@ class ElevenLabsSTT(_HTTPAdapter):
         )
         text = reply.get("text")
         if not isinstance(text, str):
-            raise self._error(ProviderError(f"{self.name} answered without a transcript", kind="content", provider=self.name))
+            raise ProviderError(f"{self.name} answered without a transcript", kind="content", provider=self.name)
         spoken = reply.get("language_code")
         return Transcript(
             text=text.strip(),
@@ -454,12 +425,10 @@ class ElevenLabsSTT(_HTTPAdapter):
         """
         self._need_key()
         if sample_rate not in PCM_RATES:
-            raise self._error(
-                ProviderError(
-                    f"{self.name} cannot take {sample_rate} Hz audio (it takes {', '.join(map(str, PCM_RATES))})",
-                    kind="unsupported",
-                    provider=self.name,
-                )
+            raise ProviderError(
+                f"{self.name} cannot take {sample_rate} Hz audio (it takes {', '.join(map(str, PCM_RATES))})",
+                kind="unsupported",
+                provider=self.name,
             )
         url = realtime_url(
             self.base_url,
@@ -505,7 +474,7 @@ class ElevenLabsSTT(_HTTPAdapter):
         except websocket.WebSocketBadStatusException as e:
             # Never str(e): it carries the response headers. Status and body are all that is needed.
             if e.status_code >= 400:
-                failure = errors.from_status(e.status_code, _text(e.resp_body), provider=self.name)
+                failure = status_error(e.status_code, _text(e.resp_body), provider=self.name, secrets=[self._key], mark="***")
             else:
                 failure = ProviderError(
                     f"{self.name} did not upgrade the connection ({e.status_code})", kind="transport", provider=self.name
@@ -517,7 +486,7 @@ class ElevenLabsSTT(_HTTPAdapter):
                 f"{self.name} could not be reached ({type(e).__name__})", kind="transport", provider=self.name
             )
         if failure is not None:
-            raise self._error(failure)
+            raise failure
         # The connect timeout would otherwise stay on the socket and make a silent pause in speech raise.
         # Deadlines are enforced by the queue the reader feeds, not by the socket.
         ws.settimeout(None)
@@ -641,10 +610,10 @@ class _Run:
             except queue.Empty:
                 break
             if isinstance(item, Event) and is_error_event(item.type):
-                return self.client._error(error_for_event(item, self.client.name))
+                return error_for_event(item, self.client.name, self.client._key)
             if isinstance(item, (_Closed, _Broken)):
                 break
-        return self.client._error(_socket_error(self.client.name, exc))
+        return _socket_error(self.client.name, exc)
 
     # -- receiving ------------------------------------------------------------------------------
 
@@ -666,12 +635,10 @@ class _Run:
             try:
                 item = self.inbox.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                raise self.client._error(
-                    ProviderError(
-                        f"{self.client.name} gave no transcript within {self.client.final_timeout_s:g}s of the end of the audio",
-                        kind="timeout",
-                        provider=self.client.name,
-                    )
+                raise ProviderError(
+                    f"{self.client.name} gave no transcript within {self.client.final_timeout_s:g}s of the end of the audio",
+                    kind="timeout",
+                    provider=self.client.name,
                 ) from None
             transcript = self._handle(item)
             if transcript is not None:
@@ -683,14 +650,14 @@ class _Run:
         if isinstance(item, (_Closed, _Broken)):
             interrupt.check(name)  # the socket was closed by a cancel, not by the server
         if isinstance(item, _Closed):
-            raise self.client._error(
-                ProviderError(f"{name} closed the connection before the transcript was complete", kind="transport", provider=name)
+            raise ProviderError(
+                f"{name} closed the connection before the transcript was complete", kind="transport", provider=name
             )
         if isinstance(item, _Broken):
-            raise self.client._error(_socket_error(name, item.exc))
+            raise _socket_error(name, item.exc)
         assert isinstance(item, Event)
         if is_error_event(item.type):
-            raise self.client._error(error_for_event(item, name))
+            raise error_for_event(item, name, self.client._key)
         if item.type == EVENT_PARTIAL:
             self.asm.partial = item.text.strip()
             text = self.asm.text
@@ -811,7 +778,7 @@ class OpenAICompatSTT(_HTTPAdapter):
         )
         text = reply.get("text")
         if not isinstance(text, str):
-            raise self._error(ProviderError(f"{self.name} answered without a transcript", kind="content", provider=self.name))
+            raise ProviderError(f"{self.name} answered without a transcript", kind="content", provider=self.name)
         spoken = reply.get("language")  # only a verbose_json reply has it
         return Transcript(
             text=text.strip(),

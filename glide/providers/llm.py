@@ -24,14 +24,11 @@ import codecs
 import contextlib
 import copy
 import json
-import math
 import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from functools import partial
 from urllib.parse import urlsplit
 
@@ -40,7 +37,8 @@ import httpx
 from . import interrupt
 from .base import ChatResult, LLMClient, ProviderSpec, Usage
 from .chain import Chain
-from .errors import ProviderError, from_exception, from_status, snippet, spent
+from .errors import ProviderError, echoed, from_exception, scrub, snippet, status_error
+from .http import HTTPX_ERRORS, open_response, read_body, translate, translated
 
 DEFAULT_TIMEOUT_S = 30.0
 CONNECT_TIMEOUT_S = 5.0
@@ -64,11 +62,7 @@ SCHEMA_PROMPT = "Answer with a single JSON object and nothing else, matching thi
 OPEN_TAG, CLOSE_TAG = "<think>", "</think>"
 
 _clock = time.monotonic  # a seam for tests
-_LONG_BLOB = re.compile(r"[A-Za-z0-9+/=_-]{80,}")  # base64 of an image, or any other long token a server may echo
-_BEARER = re.compile(r"(?i)bearer\s+\S+")
-MIN_ECHO = 12  # shorter request text than this is too common a string to cut out of an error reply
 _EOL = re.compile(r"\r\n|\n|\r")  # the line ends of the SSE spec, and no others
-_HTTPX_ERRORS = (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError)
 
 
 class _Secret:
@@ -220,6 +214,7 @@ class OpenAICompatLLM:
         limit = DEFAULT_TIMEOUT_S if timeout is None else timeout
         started = _clock()
         prepared = _with_schema(messages, schema) if schema is not None else list(messages)
+        echo = _texts(prepared)
         response = self._open(
             lambda mode: self._body(
                 prepared, mode, max_tokens=max_tokens, temperature=temperature, schema=schema, logprobs=logprobs, stream=False
@@ -228,19 +223,16 @@ class OpenAICompatLLM:
             stream=False,
             limit=limit,
             started=started,
-            echo=_texts(prepared),
+            echo=echo,
         )
         try:
             with interrupt.closing(partial(interrupt.abort_response, response), self.name):
-                raw = self._drain(response, deadline=started + limit)
-        except _HTTPX_ERRORS as e:
-            interrupt.check(self.name)  # a connection closed by a cancel is not a transport fault
-            raise from_exception(e, provider=self.name) from e
+                raw = translate(self.name, lambda: self._read(response, deadline=started + limit))
         finally:
             response.close()
-        reply = self._completion(raw, want_logprobs=logprobs)
+        reply = self._completion(raw, want_logprobs=logprobs, echo=echo)
         if not reply.text:
-            raise self._empty(reply.finish_reason, reply.refusal)
+            raise self._empty(reply.finish_reason, reply.refusal, echo)
         text = self._json_in(reply.text, schema, reply.finish_reason) if schema is not None else reply.text
         return ChatResult(
             text=text,
@@ -265,6 +257,7 @@ class OpenAICompatLLM:
         started = _clock()
         self.last_ttft_s = self.last_usage = self.last_finish_reason = None
         prepared = list(messages)
+        echo = _texts(prepared)
         response = self._open(
             lambda mode: self._body(
                 prepared, mode, max_tokens=max_tokens, temperature=temperature, schema=None, logprobs=False, stream=True
@@ -273,14 +266,11 @@ class OpenAICompatLLM:
             stream=True,
             limit=limit,
             started=started,
-            echo=_texts(prepared),
+            echo=echo,
         )
         try:
             with interrupt.closing(partial(interrupt.abort_response, response), self.name):
-                yield from self._events(response, started, started + limit)
-        except _HTTPX_ERRORS as e:
-            interrupt.check(self.name)
-            raise from_exception(e, provider=self.name) from e
+                yield from translated(self.name, self._events(response, started, started + limit, echo))
         finally:
             response.close()
 
@@ -339,34 +329,41 @@ class OpenAICompatLLM:
             interrupt.check(self.name)
             with self._lock:
                 mode = self._mode
-            call = interrupt.Call(self._client)
-            request = self._client.build_request(
-                "POST",
-                self._url,
-                json=build(mode),
-                headers=self._headers(stream),
-                timeout=_timeout(limit),
-                extensions=call.extensions,
-            )
             sent = _clock()
+            failure: ProviderError | None = None
             try:
-                with interrupt.closing(call.abort, self.name):  # a model's answer is awaited here, before any header
-                    response = self._client.send(request, stream=True)
-            except _HTTPX_ERRORS as e:
+                response = open_response(
+                    self._client,
+                    self.name,
+                    "POST",
+                    url=self._url,
+                    json=build(mode),
+                    headers=self._headers(stream),
+                    timeout=_timeout(limit),
+                )
+            except HTTPX_ERRORS as e:
+                failure, stale = from_exception(e, provider=self.name), isinstance(e, STALE)
+            if failure is not None:
                 interrupt.check(self.name)
                 # A kept-alive connection that the server had closed fails at once, and a fresh one will do. A reset
                 # after a long wait is the server giving up on a real request: asking again would break the timeout
                 # and may be billed twice.
-                quick = _clock() - sent <= CONNECT_TIMEOUT_S and _clock() < started + limit
-                if isinstance(e, STALE) and not stale_retried and quick:
+                if stale and not stale_retried and _clock() - sent <= CONNECT_TIMEOUT_S and _clock() < started + limit:
                     stale_retried = True
                     continue
-                raise from_exception(e, provider=self.name) from e
+                raise failure
             with interrupt.closing(partial(interrupt.abort_response, response), self.name):  # a cancel while the answer is read
                 if response.is_success:
                     return response
-                text = _without(self._error_text(response, started + limit), echo)
-            error = self._status_error(response.status_code, text, response.headers)
+                text = self._error_text(response, started + limit)
+            error = status_error(
+                response.status_code,
+                text,
+                provider=self.name,
+                headers=response.headers,
+                secrets=[self._key.reveal()],
+                request_texts=echo,
+            )
             sent_format = schema is not None and mode.response_format != "none"
             if response.status_code in ADAPTABLE_STATUS and self._adapt(mode, text.lower(), sent_format):
                 continue
@@ -398,19 +395,11 @@ class OpenAICompatLLM:
 
     # -- errors -----------------------------------------------------------------------------------
 
-    def _scrub(self, text: str) -> str:
-        """`text` without this client's key and without anything that looks like an encoded image or token."""
-        if key := self._key.reveal():
-            text = text.replace(key, "[redacted]")
-        return _LONG_BLOB.sub("[...]", text)
+    def _safe(self, text: str, echo: Sequence[str]) -> str:
+        """Provider text for an error message: without the key, an encoded blob, or any part of the request it quotes."""
+        return echoed(scrub(text, [self._key.reveal()]), echo)
 
-    def _status_error(self, status: int, body: str, headers: Mapping[str, str]) -> ProviderError:
-        # A spent account (a 402, or a 429 that says so, in the code of the reply) comes back from errors.from_status
-        # as `auth` with fixed text, so it is judged on the whole reply. Any other message is only what the server said.
-        said = self._scrub(body) if spent(status, body) else _what_it_said(self._scrub(body))
-        return from_status(status, said, provider=self.name, retry_after=_retry_after(headers))
-
-    def _body_error(self, error: object) -> ProviderError:
+    def _body_error(self, error: object, echo: Sequence[str]) -> ProviderError:
         """An error a server reported inside a 200 reply or a stream (OpenRouter does), mapped as its status would be."""
         message = error.get("message") if isinstance(error, dict) else error
         code = error.get("code") if isinstance(error, dict) else None
@@ -420,15 +409,17 @@ class OpenAICompatLLM:
         except (TypeError, ValueError):
             status = 0
         if 400 <= status < 600:
-            return self._status_error(status, text, {})
+            return status_error(status, text, provider=self.name, secrets=[self._key.reveal()], request_texts=echo)
         return ProviderError(
-            f"{self.name} reported an error: {snippet(self._scrub(text))}".rstrip(": "), kind="server", provider=self.name
+            f"{self.name} reported an error: {snippet(self._safe(text, echo))}".rstrip(": "),
+            kind="server",
+            provider=self.name,
         )
 
     def _content_error(self, detail: str) -> ProviderError:
         return ProviderError(f"{self.name} {detail}", kind="content", provider=self.name)
 
-    def _empty(self, finish_reason: str | None, refusal: str | None) -> ProviderError:
+    def _empty(self, finish_reason: str | None, refusal: str | None, echo: Sequence[str]) -> ProviderError:
         """A reply with nothing in it to use."""
         if finish_reason == "length":
             return self._content_error(
@@ -436,28 +427,20 @@ class OpenAICompatLLM:
                 "(raise max_tokens or turn reasoning_effort down)"
             )
         if refusal:
-            return self._content_error(f"refused to answer: {snippet(self._scrub(refusal))}")
+            return self._content_error(f"refused to answer: {snippet(self._safe(refusal, echo))}")
         return self._content_error(f"answered with no text (finish_reason {finish_reason})")
 
     def _error_text(self, response: httpx.Response, deadline: float) -> str:
         """The body of a failed response, closing it. What could not be read is simply missing: the status is the news."""
         try:
-            return self._scrub(self._drain(response, limit=ERROR_BODY_LIMIT, deadline=deadline).decode("utf-8", "replace"))
-        except (*_HTTPX_ERRORS, ProviderError):
+            return self._read(response, limit=ERROR_BODY_LIMIT, deadline=deadline).decode("utf-8", "replace")
+        except (*HTTPX_ERRORS, ProviderError):
             return ""
         finally:
             response.close()
 
-    def _drain(self, response: httpx.Response, *, limit: int | None = None, deadline: float | None = None) -> bytes:
-        """The body, read in pieces so the deadline holds against a server that dribbles bytes forever."""
-        out = bytearray()
-        for chunk in response.iter_bytes():
-            out += chunk
-            if limit is not None and len(out) >= limit:
-                break
-            if deadline is not None and _clock() > deadline:
-                raise ProviderError(f"{self.name} timed out", kind="timeout", provider=self.name)
-        return bytes(out)
+    def _read(self, response: httpx.Response, *, limit: int | None = None, deadline: float | None = None) -> bytes:
+        return read_body(response, provider=self.name, limit=limit, deadline=deadline, clock=_clock)
 
     # -- reading a reply --------------------------------------------------------------------------
 
@@ -470,18 +453,18 @@ class OpenAICompatLLM:
             raise self._content_error("answered with JSON that is not a chat completion")
         return data
 
-    def _completion(self, raw: bytes, *, want_logprobs: bool) -> _Reply:
+    def _completion(self, raw: bytes, *, want_logprobs: bool, echo: Sequence[str]) -> _Reply:
         """A non-streaming reply's text, usage and finish reason; its reasoning fields are never looked at."""
         data = self._json(raw)
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             if data.get("error"):  # a 200 with the error in the body
-                raise self._body_error(data["error"])
+                raise self._body_error(data["error"], echo)
             raise self._content_error("answered without choices")
         choice = choices[0]
         finish = choice.get("finish_reason") if isinstance(choice.get("finish_reason"), str) else None
         if choice.get("error") or finish == "error":
-            raise self._body_error(choice.get("error") or "the model stopped with an error")
+            raise self._body_error(choice.get("error") or "the model stopped with an error", echo)
         message = choice.get("message")
         if not isinstance(message, dict):
             raise self._content_error("answered without a message")
@@ -514,12 +497,12 @@ class OpenAICompatLLM:
         cut = " (the reply was cut off at the token limit)" if finish_reason == "length" else ""
         raise self._content_error(f"answered without JSON that fits the schema{cut}")  # never the reply itself
 
-    def _events(self, response: httpx.Response, started: float, deadline: float) -> Iterator[str]:
+    def _events(self, response: httpx.Response, started: float, deadline: float, echo: Sequence[str]) -> Iterator[str]:
         """The text deltas of a stream, or of a plain JSON reply from a server that ignored `stream`."""
         if "json" in response.headers.get("content-type", "").lower():
-            reply = self._completion(self._drain(response, deadline=deadline), want_logprobs=False)
+            reply = self._completion(self._read(response, deadline=deadline), want_logprobs=False, echo=echo)
             if not reply.text:
-                raise self._empty(reply.finish_reason, reply.refusal)
+                raise self._empty(reply.finish_reason, reply.refusal, echo)
             self.last_usage, self.last_finish_reason = reply.usage, reply.finish_reason
             self.last_ttft_s = _clock() - started
             yield reply.text
@@ -551,7 +534,7 @@ class OpenAICompatLLM:
             if not isinstance(chunk, dict):
                 raise self._content_error("sent a stream event that is not an object")
             if event == "error" or chunk.get("error"):
-                raise self._body_error(chunk.get("error") or chunk)
+                raise self._body_error(chunk.get("error") or chunk, echo)
             if isinstance(chunk.get("usage"), dict):
                 self.last_usage = _usage(chunk["usage"])
             choices = chunk.get("choices")
@@ -559,7 +542,7 @@ class OpenAICompatLLM:
                 continue  # the usage-only chunk at the end has none
             choice = choices[0]
             if choice.get("error") or choice.get("finish_reason") == "error":
-                raise self._body_error(choice.get("error") or "the model stopped with an error")
+                raise self._body_error(choice.get("error") or "the model stopped with an error", echo)
             if isinstance(choice.get("finish_reason"), str):
                 finish = choice["finish_reason"]
             delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
@@ -579,57 +562,33 @@ class OpenAICompatLLM:
         if done:
             # Read on to the end of the body, which is only its closing frame, so that the connection goes back to
             # the pool: closed half-read it would be dropped, and a stream per question would pay a handshake each.
-            with contextlib.suppress(*_HTTPX_ERRORS):
-                spent = 0
+            with contextlib.suppress(*HTTPX_ERRORS):
+                drained = 0
                 for piece in body:
-                    spent += len(piece)
-                    if spent > ERROR_BODY_LIMIT:
+                    drained += len(piece)
+                    if drained > ERROR_BODY_LIMIT:
                         break
         if not (done or finish):
             raise ProviderError(f"{self.name} ended the stream without finishing it", kind="transport", provider=self.name)
         self.last_finish_reason = finish
         if not emitted:
-            raise self._empty(finish, refusal)
+            raise self._empty(finish, refusal, echo)
 
 
 # -- helpers --------------------------------------------------------------------------------------
 
 
 def _texts(messages: Sequence[dict]) -> list[str]:
-    """Every piece of text in a request, longest first, so an error reply that quotes it can be cleaned."""
+    """Every piece of text in a request, so an error reply that quotes it can be cleaned (errors.echoed)."""
     found: list[str] = []
     for message in messages:
         content = message.get("content")
         parts = content if isinstance(content, list) else [content]
         for part in parts:
             text = part.get("text") if isinstance(part, dict) else part
-            if isinstance(text, str) and len(text) >= MIN_ECHO:
+            if isinstance(text, str):
                 found.append(text)
-    return sorted(set(found), key=len, reverse=True)
-
-
-def _without(text: str, echo: Sequence[str]) -> str:
-    """`text` with each piece of the request that it quotes cut out: a request body must not reach an error message.
-
-    A server may quote the request inside a JSON string, where quotes and newlines are escaped, so that form is cut too.
-    """
-    for piece in echo:
-        for form in (piece, json.dumps(piece)[1:-1]):
-            text = text.replace(form, "[request text]")
-    return text
-
-
-def _what_it_said(body: str) -> str:
-    """The message of an error reply. A JSON reply is reduced to its `error.message` (or `message`): the rest of it
-    may be a quoted request, headers or credentials, which no error message may carry. Anything else is kept as is
-    (a plain-text reply), after a bearer token, if one was quoted, is cut out."""
-    try:
-        data = json.loads(body)
-    except ValueError:
-        return _BEARER.sub("Bearer [redacted]", body)
-    error = data.get("error", data) if isinstance(data, dict) else data
-    message = error.get("message") if isinstance(error, dict) else error
-    return _BEARER.sub("Bearer [redacted]", message) if isinstance(message, str) else "(no message in the reply)"
+    return found
 
 
 def _timeout(limit: float) -> httpx.Timeout:
@@ -713,25 +672,6 @@ def _usage(raw: object) -> Usage:
         output_tokens=_int(raw.get("completion_tokens", raw.get("output_tokens"))),
         cached_input_tokens=cached,
     )
-
-
-def _retry_after(headers: Mapping[str, str]) -> float | None:
-    """Seconds the server asked us to wait: `retry-after-ms` (OpenAI sends it), or `retry-after` as seconds or a date."""
-    get = headers.get
-    try:
-        if ms := get("retry-after-ms"):
-            seconds = float(ms) / 1000
-        elif value := get("retry-after"):
-            try:
-                seconds = float(value)
-            except ValueError:
-                when = parsedate_to_datetime(value)
-                seconds = (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp() - datetime.now(UTC).timestamp()
-        else:
-            return None
-    except (TypeError, ValueError):
-        return None
-    return max(seconds, 0.0) if math.isfinite(seconds) else None
 
 
 def _split_lines(chunks: Iterable[bytes]) -> Iterator[str]:

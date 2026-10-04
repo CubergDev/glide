@@ -51,7 +51,7 @@ from . import tts as tts_mod
 from .base import ProviderSpec
 from .chain import ORDERS, Chain, ChainPolicy, Slot, SwitchEvent
 from .classifier import ChainedClassifier, LLMClassifier
-from .errors import ProviderError
+from .errors import ProviderError, redact
 from .llm import LLM
 from .stt import STT
 from .tts import TTS
@@ -584,11 +584,8 @@ class GlideConfig:
 
     def scrub(self, text: str) -> str:
         """`text` with every key this configuration can read replaced by '***', for anything about to be shown."""
-        for spec in self.providers.values():
-            key = self._key(spec.api_key_env) if spec.api_key_env else ""
-            if len(key) >= MIN_SECRET:
-                text = text.replace(key, "***")
-        return text
+        keys = (self._key(spec.api_key_env) for spec in self.providers.values() if spec.api_key_env)
+        return redact(text, keys, "***", min_len=MIN_SECRET)
 
     # -- the slots -----------------------------------------------------------------------------
 
