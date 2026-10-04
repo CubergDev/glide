@@ -310,6 +310,7 @@ class Device(Protocol):
     echo: EchoStats | None  # the canceller's latest numbers, or None when there is none
     echo_name: str | None
     reference_underruns: int
+    output_faults: int  # blocks the sound card reported a problem with while speaking
 
     def read(self, timeout: float | None = ...) -> bytes | None: ...
     def pause_input(self) -> None: ...
@@ -353,6 +354,7 @@ class VoiceLoop:
         self._turn: _Turn | None = None
         self._turns: list[_Turn] = []
         self._merging = 0  # frames of quiet left in the merge window; 0 when not merging
+        self._output_faults = 0  # how many the person has been told of: once is enough
         self._skip_tail = False  # an overlong utterance was discarded: what is left of it is not a request
         self._tail_quiet = 0
         self._gate = BargeInGate(min_voiced_ms=barge_min_voiced_ms, margin_db=barge_margin_db, min_erle_db=barge_min_erle_db)
@@ -453,6 +455,7 @@ class VoiceLoop:
                 except DeviceFault as exc:
                     self._fail(str(exc))
                     return
+                self._note_output_faults()
                 if frame is not None:
                     try:
                         self._frame(frame)
@@ -472,6 +475,13 @@ class VoiceLoop:
         self._assistant.io.warn(message)
         with contextlib.suppress(Exception):
             self._device.pause_input()
+
+    def _note_output_faults(self) -> None:
+        """The speaker had trouble (an underflow): what was said may have been cut or garbled. Said once, never counted aloud."""
+        faults = self._device.output_faults
+        if faults and not self._output_faults:
+            self._assistant.io.warn("The speaker reported a problem; Glide's speech may have been cut off or garbled.")
+        self._output_faults = faults
 
     def _pause(self) -> None:
         self._cancel_confirmation()

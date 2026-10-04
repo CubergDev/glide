@@ -52,6 +52,7 @@ class ScriptedDevice:
     guarding = False  # the microphone is being blanked: speaker mode with no canceller, while Glide speaks
     echo_name = None
     reference_underruns = 0
+    output_faults = 0
 
     def __init__(self, script, *, playing=False):
         self.script = list(script)
@@ -553,3 +554,10 @@ def test_an_overlong_utterance_is_discarded_whole_not_submitted_from_where_it_wa
     run(r)
     assert r.heard == ["next"] and stt.ended == [1]  # stream 0 was the overlong one, aborted
     assert len(r.warned) == 1 and "exceeded" in r.warned[0]
+
+
+def test_an_output_fault_is_said_once_and_without_content():
+    r = rig([QUIET] * 4, ScriptedSTT([]))
+    r.device.on_frame = lambda left: setattr(r.device, "output_faults", max(0, 4 - left))  # 0, 1, 2, 3: only ever more
+    run(r)
+    assert r.warned == ["The speaker reported a problem; Glide's speech may have been cut off or garbled."]

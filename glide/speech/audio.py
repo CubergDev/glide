@@ -76,7 +76,7 @@ class Stream(Protocol):
 
 
 InputFactory = Callable[[Callable[[bytes, bool], None]], Stream]  # (on_input) -> an input stream, not yet started
-OutputFactory = Callable[[Callable[[int], bytes], int], Stream]  # (on_output, sample_rate) -> an output stream
+OutputFactory = Callable[[Callable[[int, bool], bytes], int], Stream]  # (on_output(size, fault), sample_rate) -> an output stream
 
 
 def resample(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
@@ -145,9 +145,9 @@ def sounddevice_factories(input_device=None, output_device=None) -> tuple[InputF
             samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME_SAMPLES, device=input_device, callback=callback
         )
 
-    def make_output(on_output: Callable[[int], bytes], rate: int) -> Stream:
+    def make_output(on_output: Callable[[int, bool], bytes], rate: int) -> Stream:
         def callback(outdata, frames, timing, status) -> None:
-            outdata[:] = on_output(len(outdata))
+            outdata[:] = on_output(len(outdata), bool(status))
 
         return sd.RawOutputStream(
             samplerate=rate, channels=1, dtype="int16", blocksize=FRAME_SAMPLES, device=output_device, callback=callback
@@ -191,6 +191,7 @@ class FullDuplexDevice:
         self._input_shift: int | None = None  # the speaker's count when the first microphone frame arrived
         self._input_total = 0  # microphone samples so far
         self.reference_underruns = 0  # frames that went to the canceller with part of their reference missing
+        self.output_faults = 0  # blocks the sound card reported a problem with (an underflow): speech may have glitched
         self._carry = b""
         self._output: deque[bytes] = deque()
         self._queued = 0  # bytes waiting to be played
@@ -443,10 +444,11 @@ class FullDuplexDevice:
                 self._output.append(piece)
                 self._queued += len(piece)
 
-    def _on_output(self, size: int) -> bytes:
+    def _on_output(self, size: int, fault: bool = False) -> bytes:
         """The sound card's output callback: the next `size` bytes, padded with silence. Never blocks."""
         block = bytearray(size)
         with self._cond:
+            self.output_faults += fault
             offset = 0
             while self._output and offset < size:
                 piece = self._output.popleft()

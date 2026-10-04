@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from guards_voice import no_real_audio  # noqa: F401
 
+from glide.speech import audio
 from glide.speech.audio import DeviceFault, FullDuplexDevice, resample
 from glide.speech.vad import FRAME_BYTES
 
@@ -213,3 +214,26 @@ def test_a_close_that_lands_while_the_microphone_is_being_resumed_leaves_no_open
     assert ("late", "start") in rig.log
     assert ("late", "stop") in rig.log and ("late", "close") in rig.log  # nothing is left open
     assert rig.device.input_paused and rig.device._input is None
+
+
+def test_a_problem_the_sound_card_reports_while_speaking_is_counted_not_ignored(monkeypatch):
+    """PR6-4175581062: the output callback dropped `status`, so an underflow was invisible and wait_idle reported success."""
+    made = {}
+
+    class FakeSoundDevice:
+        class RawInputStream:
+            def __init__(self, **kw): ...
+
+        class RawOutputStream:
+            def __init__(self, **kw):
+                made["callback"] = kw["callback"]
+
+    monkeypatch.setattr(audio, "load_sounddevice", lambda: FakeSoundDevice)
+    _, make_output = audio.sounddevice_factories()
+    device = audio.FullDuplexDevice()
+    make_output(device._on_output, device.output_rate)
+    outdata = bytearray(1024)
+    made["callback"](outdata, 512, None, False)
+    assert device.output_faults == 0
+    made["callback"](outdata, 512, None, "output underflow")
+    assert device.output_faults == 1 and len(outdata) == 1024

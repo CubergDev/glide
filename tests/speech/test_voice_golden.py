@@ -219,6 +219,7 @@ class _Device:
 
     echo_name = "fake"
     reference_underruns = 0
+    output_faults = 0
     guarding = False
 
     def hold_echo_stats(self, hold):
