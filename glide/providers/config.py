@@ -129,7 +129,7 @@ SPEECH_KEYS = ("language", "silence_ms", "headset", "vad_model_path", "vad_model
 # Tables another module reads for itself (`glide.memory.settings`, `glide.mcp.config`, `glide.webhooks.cli`, `glide.computer.browser_settings`,
 # `glide.computer.config`): known
 # here so the file does not warn about them, and not parsed here, so the one reader of each stays the only one.
-OWN_TABLES = ("memory", "mcp", "webhooks", "browser", "research")
+OWN_TABLES = ("memory", "mcp", "webhooks", "browser", "research", "computer")
 KNOWN_TABLES = ("providers", "llm", "stt", "tts", "classifier", "speech", *OWN_TABLES)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
