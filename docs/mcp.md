@@ -47,9 +47,11 @@ it over a `request(method, params)` coroutine, such as `session_request(sdk_sess
   code, never a key, header, argument or the server's error text. Kinds: `unsupported` (-32601), `bad_request`
   (-32600/-32602/-32700), `server` (other codes), `timeout`, `transport`, `content` (unusable reply), plus the
   httpx mappings (`auth`, `rate_limit`, ...).
-- A tool call is a write that may have run. It is never retried. `MCPCallError.outcome_unknown` is `True` when the
-  failure could have come after the server started it (timeout, dropped connection, unusable reply): stop and
-  reconcile from a fresh observation; do not replay.
+- A tool call is a write that may have run. It is never retried. `MCPCallError.outcome_unknown` is `False` only for an
+  explicit refusal made before anything ran (JSON-RPC -32600/-32601/-32602/-32700, or HTTP 400/401/403/404/405/413/415/422).
+  Every other failure of a sent call is `True` and its message says the call may or may not have happened: any 5xx,
+  408, 429, -32603 and -32000..-32099, a timeout, a dropped connection, an unusable reply, an unrecognized error.
+  Stop and reconcile from a fresh observation; do not replay.
 - A tool's own `isError: true` result is feedback in the returned dict, not an exception. Media payloads are
   projected to metadata. Tool descriptions and results are untrusted data, never instructions.
 - `open_stdio_client(spec, approve=...)` is the only code that starts a process. It needs the SDK and `approve(spec)`
@@ -58,7 +60,10 @@ it over a `request(method, params)` coroutine, such as `session_request(sdk_sess
 `MCPBridge` (`glide.mcp.bridge`) is the harness-level client: it turns a connected server's tools into `Tool`
 descriptors for `glide.memory.Harness`, with generation checks so a stale tool list cannot be called after
 `tools/list_changed`. Its errors are the host's own (the harness audits them); use `SessionClient` where you want
-the ProviderError discipline.
+the ProviderError discipline. A failed `tools/call` keeps its type and message but is marked: it gets an
+`outcome_unknown` attribute (same rule as above) and, when it may have run, a note saying so. `Harness.invoke` and
+`dispatch` turn such a failure into `ToolOutcomeUnknown` ("tool X may or may not have happened; do not repeat it"),
+chained from the original, record `outcome_unknown: true` in the `tool_finished` event, and stop the turn.
 
 ## SDK versions
 

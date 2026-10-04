@@ -10,7 +10,7 @@ the intent router (stop / answer / act); that is a separate component.
 from .catalog import Catalog
 from .contracts import Model, Plan, Policy, Scope, Tool
 from .events import Event, EventBus, SQLiteEventSink
-from .harness import Harness, Reply, Request, ToolCall
+from .harness import Harness, Reply, Request, ToolCall, ToolOutcomeUnknown
 from .runs import ingest_run
 from .service import MemoryService
 from .settings import MemorySettings, SettingsError
@@ -34,5 +34,6 @@ __all__ = [
     "Store",
     "Tool",
     "ToolCall",
+    "ToolOutcomeUnknown",
     "ingest_run",
 ]

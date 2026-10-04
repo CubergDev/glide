@@ -46,6 +46,18 @@ class Request:
     max_output_tokens: int
 
 
+class ToolOutcomeUnknown(RuntimeError):
+    """A tool failed in a way that leaves it unknown whether it ran (`__cause__` is what it raised).
+
+    Stop and reconcile from a fresh observation. Never call the tool again to find out.
+    """
+
+    outcome_unknown = True
+
+    def __init__(self, tool_id: str):
+        super().__init__(f"tool {tool_id} may or may not have happened; do not repeat it, check its effect first")
+
+
 @dataclass
 class _Issued:
     plan: Plan
@@ -252,17 +264,16 @@ class Harness:
         result: Any = None,
         error: BaseException | None = None,
     ) -> None:
-        self._audit(
-            scope,
-            "tool_finished",
-            {
-                "plan_id": plan_id,
-                "tool_id": tool_id,
-                "call_id": call_id,
-                "ok": error is None and not (isinstance(result, dict) and result.get("isError") is True),
-                "cancelled": isinstance(error, asyncio.CancelledError),
-            },
-        )
+        payload = {
+            "plan_id": plan_id,
+            "tool_id": tool_id,
+            "call_id": call_id,
+            "ok": error is None and not (isinstance(result, dict) and result.get("isError") is True),
+            "cancelled": isinstance(error, asyncio.CancelledError),
+        }
+        if getattr(error, "outcome_unknown", False) is True:
+            payload["outcome_unknown"] = True
+        self._audit(scope, "tool_finished", payload)
 
     def _invoke_steps(
         self,
@@ -295,6 +306,8 @@ class Harness:
                 result = yield partial(tool.invoke, arguments)
         except BaseException as error:
             self._finished(scope, plan_id, tool_id, identifier, error=error)
+            if isinstance(error, Exception) and getattr(error, "outcome_unknown", False) is True:
+                raise ToolOutcomeUnknown(tool_id) from error
             raise
         self._finished(scope, plan_id, tool_id, identifier, result=result)
         return result

@@ -46,6 +46,34 @@ def _protocol_failure(error: BaseException) -> bool:
     return isinstance(error, MCPProtocolError) or rpc_code(error) is not None
 
 
+# A tool call is a write. Only an explicit refusal made before anything ran leaves its outcome known: a JSON-RPC
+# request, method, params or parse error, or an HTTP status for a request that is malformed, unauthorized, unknown or
+# unacceptable. Every other failure of a call that was sent (any 5xx, 408, 429, -32603, -32000..-32099, a timeout, a
+# dropped connection, an unusable reply, anything unrecognized) may have come after the tool ran.
+REFUSED_RPC_CODES = frozenset({-32600, -32601, -32602, -32700})
+REFUSED_HTTP_STATUSES = frozenset({400, 401, 403, 404, 405, 413, 415, 422})
+OUTCOME_UNKNOWN_NOTE = "the call may or may not have happened; do not repeat it without checking its effect first"
+
+
+def refused_before_running(error: BaseException) -> bool:
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return rpc_code(error) in REFUSED_RPC_CODES or (type(status) is int and status in REFUSED_HTTP_STATUSES)
+
+
+def mark_call_outcome(error: BaseException) -> None:
+    """Say on an exception from a sent call whether it may have run: `outcome_unknown`, and a note when it is True.
+
+    The exception keeps its type and its message; an exception that already carries the flag is left alone.
+    """
+    if hasattr(error, "outcome_unknown"):
+        return
+    unknown = not refused_before_running(error)
+    with suppress(AttributeError, TypeError):  # an exception type that refuses new attributes stays unmarked
+        error.outcome_unknown = unknown
+        if unknown:
+            error.add_note(OUTCOME_UNKNOWN_NOTE)
+
+
 def _response(value, asynchronous):
     if asynchronous and not inspect.isawaitable(value):
         raise TypeError("asynchronous MCP callback must return an awaitable")
@@ -463,6 +491,7 @@ class MCPBridge:
             response = yield lambda: _response(self.request("tools/call", params), self.asynchronous)
             result = _validate_result(response, schema, self.validate_output)
         except BaseException as error:
+            mark_call_outcome(error)
             self._finish(token, active, error=error)
             raise
         self._finish(token, active, result=result)
