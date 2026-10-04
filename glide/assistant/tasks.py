@@ -292,7 +292,11 @@ class ComputerTask:
         try:
             writer = self._config.writer()
             cfg = runner.RunConfig(
-                goal=self.goal, out=self.folder, act=self.act, record_content=bool(getattr(self._config, "record_content", False))
+                goal=self.goal,
+                out=self.folder,
+                act=self.act,
+                record_content=bool(getattr(self._config, "record_content", False)),
+                journal=self.folder.parent,  # one journal for every run folder under the runs directory
             )
 
             def ctx_factory(typesafe, history):

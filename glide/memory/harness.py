@@ -350,6 +350,10 @@ class Harness:
             with invocation(scope, plan_id, identifier):
                 result = yield partial(tool.invoke, arguments)
         except BaseException as error:
+            if isinstance(error, asyncio.CancelledError | KeyboardInterrupt):
+                # Cancellation must still propagate as itself, but the call had been sent: say its outcome is unknown, on
+                # the error the host sees and in the audit event, so no host replays it as a clean stop.
+                error.outcome_unknown = True
             self._finished(scope, plan_id, tool_id, identifier, error=error)
             if isinstance(error, Exception) and getattr(error, "outcome_unknown", False) is True:
                 raise ToolOutcomeUnknown(tool_id) from error
