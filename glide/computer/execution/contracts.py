@@ -10,6 +10,7 @@ from typing import Protocol
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ..config import MAX_OPTIONS
+from ..diagnostics import redact_address
 from ..writer import looks_credential
 
 KINDS = {"inspect", "click", "type", "key", "navigate", "tab_create", "tab_switch", "tab_close", "scroll"}
@@ -68,6 +69,12 @@ def safe_url(value: str) -> bool:
         )
     except ValueError:
         return False
+
+
+def public_url(value: str) -> str:
+    """An address as a model may see it: no user or password, no value of a credential-named query parameter, and no
+    configured secret. Comparisons inside the engine keep the raw value."""
+    return redact_address(value) if value else value
 
 
 def canonical_url(value: str) -> str:
@@ -198,23 +205,25 @@ class Observation:
         return {
             "app": self.app,
             "owner": self.owner,
-            "url": self.url,
+            "url": public_url(self.url),
             "active_tab": self.active_tab,
-            "tabs": self.tabs,
-            "elements": [e.public() for e in self.elements.values()],
+            "tabs": {tab: public_url(url) for tab, url in self.tabs.items()},
+            "elements": [{**e.public(), "href": public_url(e.href)} for e in self.elements.values()],
             "containers": [
                 {"id": c.id, "label": c.label, "position": c.position, "maximum": c.maximum} for c in self.containers.values()
             ],
             "query_forms": [
-                {"id": f.id, "field": f.field, "action": f.action, "parameter": f.parameter, "values": f.values}
+                {"id": f.id, "field": f.field, "action": public_url(f.action), "parameter": f.parameter, "values": f.values}
                 for f in self.forms.values()
             ],
             "media": [vars(item) for item in self.media.values()],
             "focus": self.focus,
             "capabilities": sorted(self.capabilities),
             "available_after_navigation": sorted(self.available_after_navigation),
-            "navigation": vars(self.navigation) if self.navigation else None,
-            "canonical_url": self.canonical_url,
+            "navigation": {**vars(self.navigation), "requested_url": public_url(self.navigation.requested_url)}
+            if self.navigation
+            else None,
+            "canonical_url": public_url(self.canonical_url),
             "ready": self.ready,
             "browser_front": self.browser_front,
             "parameter_domains": {

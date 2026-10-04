@@ -6,7 +6,7 @@ import sqlite3
 from execution_world import Computer, Reasoner, drive, response
 
 from glide.computer.control import RunControl
-from glide.computer.execution.contracts import Action, Milestone
+from glide.computer.execution.contracts import Action, Element, Milestone, Navigation, Observation
 from glide.computer.execution.progress import Ledger
 
 
@@ -52,3 +52,24 @@ def test_planner_milestone_ids_stay_out_of_stored_run_data(monkeypatch, tmp_path
     assert json.loads((tmp_path / "run.json").read_text())["progress"][0]["id"] == "m1"
     with sqlite3.connect(tmp_path / "progress.sqlite3") as db:
         assert sentinel not in str(list(db.iterdump()))
+
+
+def test_observation_packet_redacts_credentials_in_every_address(monkeypatch):
+    """PR10-4175625125: model packets carry no credential-bearing query value, user info or configured secret."""
+    monkeypatch.setenv("GLIDE_TEST_API_KEY", "configured-secret-value")
+    page = "https://example.org/cb?access_token=tok123&page=2&note=configured-secret-value"
+    obs = Observation(
+        "browser",
+        "doc:1",
+        page,
+        "t1",
+        {"t1": page, "t2": "https://user:hunter2@example.org/x?api_key=abc123"},
+        {"link": Element("link", "Next", "link", href="https://example.org/n?password=pw9&x=1")},
+        navigation=Navigation("https://example.org/r?token=nav1", "t1", "f", "l"),
+        canonical_url="https://example.org/c?secret=can1",
+    )
+    packet = json.dumps(obs.packet())
+    for leaked in ("tok123", "abc123", "hunter2", "pw9", "nav1", "can1", "configured-secret-value"):
+        assert leaked not in packet
+    assert "page=2" in packet and "x=1" in packet  # the rest of the address stays useful
+    assert obs.url == page  # the engine itself keeps the raw value
