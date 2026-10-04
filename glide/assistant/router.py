@@ -14,6 +14,7 @@ routed, and when an earlier task's result is part of the history it is labelled 
 from __future__ import annotations
 
 import json
+import re
 import time
 import unicodedata
 from collections.abc import Sequence
@@ -161,20 +162,25 @@ def fast_path(text: str, extra: frozenset[str] = frozenset()) -> Route | None:
 # -- The model's route ------------------------------------------------------------------------------
 
 
-def _first_object(raw: str) -> dict | None:
-    """The first JSON object in a reply, which may be wrapped in a code fence or a sentence."""
-    decoder = json.JSONDecoder()
-    start = raw.find("{")
-    while start != -1:
-        try:
-            value, _ = decoder.raw_decode(raw, start)
-        except ValueError:
-            start = raw.find("{", start + 1)
-            continue
-        if isinstance(value, dict):
-            return value
-        start = raw.find("{", start + 1)
-    return None
+_FENCE = re.compile(r"```[A-Za-z]*[ \t]*\n(?P<body>.*)\n[ \t]*```", re.DOTALL)
+
+
+def _whole_object(raw: str) -> dict | None:
+    """The reply as one JSON object, or None. Nothing else counts: not an object inside a sentence, not the first of two.
+
+    A reply may be wrapped in ONE code fence and nothing more. The reply can quote text a page or an app showed, so an
+    object found anywhere in it would let that text pick the route; whatever is not exactly the object is unparseable,
+    and unparseable is an answer.
+    """
+    text = raw.strip()
+    fenced = _FENCE.fullmatch(text)
+    if fenced is not None:
+        text = fenced["body"].strip()
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _text(value: object, limit: int) -> str:
@@ -184,10 +190,10 @@ def _text(value: object, limit: int) -> str:
 def parse_route(raw: str, text: str) -> Route:
     """A `Route` from the router model's reply to the user's `text`.
 
-    The reply is data, not trusted: an unreadable one, or a route that is not one of the three, is an
-    answer. A computer route with no goal uses the user's own words as the goal.
+    The reply is data, not trusted: one that is not exactly one JSON object (see `_whole_object`), or a route that is
+    not one of the three, is an answer. A computer route with no goal uses the user's own words as the goal.
     """
-    data = _first_object(raw)
+    data = _whole_object(raw)
     if data is None or data.get("route") not in ROUTES:
         return Route("answer", source="fallback")
     language = _text(data.get("language"), 12).lower().replace("_", "-") or None
