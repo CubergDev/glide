@@ -37,7 +37,7 @@ from .config import ALL_ROLES, ConfigError, GlideConfig, SlotInfo, load_config
 from .errors import AllProvidersFailed, ProviderError
 
 PROBE_PROMPT = "Reply with the single word: ok"
-PROBE_TOKENS = 5  # a few tokens: the point is that the slot answers, not what it says
+PROBE_TOKENS = 16  # a few tokens: the point is that the slot answers, not what it says (an OpenAI-style model refuses fewer)
 PROBE_WORD = "Hello"
 PROBE_STATE = "A traffic light is lit. Its colour is green."
 PROBE_OPTIONS = ("yes", "no")  # two or more: a one-option question is settled without asking anyone

@@ -137,7 +137,10 @@ function drawRoles(){const root=clear($("roles"));
       const m=el("input",null,{type:"text",size:28,value:s.model,placeholder:"model id (free text)"});m.oninput=()=>{s.model=m.value};
       const nm=el("input",null,{type:"text",size:10,value:s.name,placeholder:"label (optional)"});nm.oninput=()=>{s.name=nm.value};
       const o=el("input",null,{type:"text",size:24,value:s.optionsText.replace(/\n/g,"; "),placeholder:"options a=b; c=d"});o.oninput=()=>{s.optionsText=o.value.split(";").map(x=>x.trim()).join("\n")};
-      card.append(el("div",null,{class:"row"},el("span",String(i+1)+"."),prov,m,nm,o,
+      const eff=el("select");eff.append(el("option","effort: default",{value:""}));for(const e of ["minimal","low","medium","high","xhigh"])eff.append(el("option","effort: "+e,{value:e}));
+      const rows=()=>s.optionsText.split("\n").filter(x=>x.trim());const cur=rows().find(x=>x.trim().startsWith("reasoning_effort="));eff.value=cur?cur.split("=")[1].trim():"";
+      eff.onchange=()=>{const rest=rows().filter(x=>!x.trim().startsWith("reasoning_effort="));if(eff.value)rest.push("reasoning_effort="+eff.value);s.optionsText=rest.join("\n");drawRoles()};
+      card.append(el("div",null,{class:"row"},el("span",String(i+1)+"."),prov,m,nm,eff,o,
         el("button","up",{onclick:()=>{if(i>0){[d.chain[i-1],d.chain[i]]=[d.chain[i],d.chain[i-1]];drawRoles()}}}),
         el("button","down",{onclick:()=>{if(i<d.chain.length-1){[d.chain[i+1],d.chain[i]]=[d.chain[i],d.chain[i+1]];drawRoles()}}}),
         el("button","remove",{class:"danger",onclick:()=>{d.chain.splice(i,1);drawRoles()}})))});
