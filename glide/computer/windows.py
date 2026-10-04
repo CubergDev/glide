@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import time
 import webbrowser
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 
 import psutil
@@ -27,12 +27,14 @@ import win32api
 import win32con
 import win32gui
 import win32process
+import win32ui
 import winocr
 from PIL import Image, ImageGrab
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
 from .config import ABORT_CORNER_PX
-from .models import Abort, AxNode, Field, Missed
+from .models import Abort, AxNode, Box, Field, Missed
+from .point_types import PointTarget, point_box
 
 with suppress(AttributeError, OSError):  # pre-8.1 Windows without shcore, or awareness set by the host process
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
@@ -471,6 +473,48 @@ def display_scale(image: Image.Image) -> float:
     """Per-monitor DPI awareness keeps every coordinate in physical pixels, so a screen point
     already is a capture pixel; unlike macOS, there is no separate points-vs-pixels scale."""
     return 1.0
+
+
+def point_target(point: tuple[float, float]) -> PointTarget | None:
+    """Read the UIA control at this physical screen point; do not activate its window."""
+    element = auto.ControlFromPoint(*map(round, point))
+    if element is None:
+        return None
+    role = role_for(element.ControlTypeName)
+    if element.IsPassword:
+        return PointTarget(role, protected=True)  # decided before any content is read
+    return PointTarget(
+        role=role,
+        label=element.Name or "",
+        value=_ui_value(element) or "",
+        help=element.HelpText or "",
+    )
+
+
+def point_region(point: tuple[float, float], radius: float) -> tuple[Image.Image, Box]:
+    """Capture only a bounded primary-monitor rectangle in physical pixels."""
+    box = point_box(point, radius, (0.0, 0.0, float(win32api.GetSystemMetrics(0)), float(win32api.GetSystemMetrics(1))))
+    left, top, right, bottom = map(int, box)
+    width, height = right - left, bottom - top
+    # ImageGrab's Windows backend captures the full screen before cropping.
+    # Copy only this rectangle into an equally small bitmap instead.
+    with ExitStack() as cleanup:
+        handle = win32gui.CreateDC("DISPLAY", None, None)
+        cleanup.callback(win32gui.DeleteDC, handle)
+        source = win32ui.CreateDCFromHandle(handle)
+        memory = source.CreateCompatibleDC()
+        cleanup.callback(memory.DeleteDC)
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(source, width, height)
+        cleanup.callback(win32gui.DeleteObject, bitmap.GetHandle())
+        previous = memory.SelectObject(bitmap)
+        cleanup.callback(memory.SelectObject, previous)
+        memory.BitBlt((0, 0), (width, height), source, (left, top), win32con.SRCCOPY)
+        info = bitmap.GetInfo()
+        if info["bmBitsPixel"] != 32:
+            raise RuntimeError("Unsupported display pixel format for a point crop.")
+        image = Image.frombytes("RGB", (width, height), bitmap.GetBitmapBits(True), "raw", "BGRX", info["bmWidthBytes"], 1)
+    return image, box
 
 
 def recognize_text(image: Image.Image) -> list[tuple[str, float, tuple[float, float, float, float]]]:

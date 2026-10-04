@@ -48,6 +48,7 @@ class GenerationResult:
     model: str
     usage: TokenUsage = field(default_factory=TokenUsage)
     completed: bool = True
+    stop_reason: str | None = None  # why the model stopped, when the provider says; a strict reader checks it
 
 
 class ModelProvider(Protocol):
@@ -110,4 +111,5 @@ class AnthropicProvider:
                 getattr(usage, "output_tokens", 0) or 0,
             ),
             completed=getattr(reply, "stop_reason", None) not in {"max_tokens", "refusal"},
+            stop_reason=getattr(reply, "stop_reason", None),
         )

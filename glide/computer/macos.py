@@ -22,7 +22,8 @@ from PIL import Image
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
 from .config import ABORT_CORNER_PX
-from .models import Abort, AxNode, DesktopError, DesktopPermissionError, Field
+from .models import Abort, AxNode, Box, DesktopError, DesktopPermissionError, Field
+from .point_types import PointTarget, point_box
 
 KEYCODES = {"return": 36, "tab": 48, "escape": 53, "a": 0, "delete": 51, "[": 33}
 SHORTCUT_CODES = {
@@ -262,6 +263,41 @@ def screenshot() -> Image.Image:
 def display_scale(image: Image.Image) -> float:
     points_wide = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID()).size.width
     return image.width / points_wide
+
+
+def point_target(point: tuple[float, float]) -> PointTarget | None:
+    """Read the exact AX element under the pointer, without focusing or pressing it."""
+    system = AS.AXUIElementCreateSystemWide()
+    AS.AXUIElementSetMessagingTimeout(system, AX_MESSAGE_TIMEOUT)
+    error, element = AS.AXUIElementCopyElementAtPosition(system, *point, None)
+    if error:
+        raise RuntimeError("Accessibility hit test failed; check permissions and point again.")
+    if element is None:
+        return None
+    role = str(_ax_attr(element, AS.kAXRoleAttribute) or "")
+    protected = role == "AXSecureTextField" or _ax_attr(element, "AXSubrole") == "AXSecureTextField"
+    if protected:
+        return PointTarget(role, protected=True)  # decided before any content is read
+    value = _ax_attr(element, AS.kAXValueAttribute)
+    return PointTarget(
+        role=role,
+        label=_ax_label(element),
+        value=value if isinstance(value, str) else "",
+        help=str(_ax_attr(element, "AXHelp") or ""),
+    )
+
+
+def point_region(point: tuple[float, float], radius: float) -> tuple[Image.Image, Box]:
+    """Capture just a primary-display region; the temporary file is deleted on every path."""
+    bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+    box = point_box(point, radius, (0.0, 0.0, float(bounds.size.width), float(bounds.size.height)))
+    left, top, right, bottom = box
+    region = f"{left},{top},{right - left},{bottom - top}"
+    with tempfile.TemporaryDirectory(prefix="glide-point-") as folder:
+        path = Path(folder) / "region.png"
+        subprocess.run(["screencapture", "-x", f"-R{region}", str(path)], check=True, capture_output=True, timeout=10)
+        with Image.open(path) as image:
+            return image.convert("RGB"), box
 
 
 def recognize_text(image: Image.Image) -> list[tuple[str, float, tuple[float, float, float, float]]]:

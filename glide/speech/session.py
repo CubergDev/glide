@@ -13,6 +13,7 @@ fallback it took, or that speaker mode stays half duplex. A headset gets none: i
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from ..assistant.core import IO, Assistant
@@ -44,10 +45,12 @@ def build_voice(
     device=None,
     vad: Probability | None = None,
     on_idle=None,
+    assistant_factory: Callable[..., Assistant] = Assistant,
 ) -> VoiceLoop:
     """A `VoiceLoop`, not yet started: call `start()` (or `run()`), and `stop()` then `loop.assistant.close()` to end.
 
-    `act=False` keeps every computer task a dry run, as everywhere else.
+    `act=False` keeps every computer task a dry run, as everywhere else. `assistant_factory(config, io=io)` makes the
+    assistant: a front end that wants to watch what each request came to passes a subclass.
     """
     io = io or IO()
     owned = device is None  # a device handed in was started by whoever made it
@@ -60,7 +63,7 @@ def build_voice(
         canceller=None if settings.headset else make_canceller(settings.echo_canceller, io.warn),
     )
     io.player = device
-    assistant = Assistant(config, io=io, extra_stop_phrases=settings.stop_phrases)
+    assistant = assistant_factory(config, io=io, extra_stop_phrases=settings.stop_phrases)
     try:
         loop = VoiceLoop(
             assistant,
