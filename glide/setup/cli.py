@@ -34,4 +34,6 @@ def main(argv: Sequence[str] | None = None, *, opener: Callable[[str], object] =
         threading.Thread(target=opener, args=(server.url,), daemon=True).start()
     with contextlib.suppress(KeyboardInterrupt):
         server.serve()
+    if path.is_file():
+        print(f"Next time use the control panel, which edits {path} and more: glide panel")
     return 0

@@ -9,6 +9,7 @@
     glide status                   the chains: slots, pins, resting slots, recent switches
     glide computer GOAL [--act]    drive the screen toward a goal (a dry run without --act); `glide-computer` too
     glide inspect [GOAL]           capture the screen and show what the classifier would be sent; `glide-inspect` too
+    glide panel [--no-open]        a local control panel: providers, chains, features, chat, files, status
     glide memory ...               local memory administration (off unless [memory] enabled = true)
     glide mcp ...                  serve Glide over MCP and show the MCP settings
     glide webhooks serve|work|reconcile ...  the webhook listener, its worker, a verdict on an uncertain run
@@ -527,6 +528,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return setup_main(_forward(args))
 
 
+def cmd_panel(args: argparse.Namespace) -> int:
+    from .panel.cli import main as panel_main
+
+    return panel_main(_forward(args))
+
+
 def cmd_memory(args: argparse.Namespace) -> int:
     from .memory import cli as memory
 
@@ -712,6 +719,13 @@ def build_parser() -> argparse.ArgumentParser:
     passthrough(commands, "inspect", cmd_inspect, "capture the screen and show what the classifier would be sent")
     passthrough(
         commands, "setup", cmd_setup, "first-run wizard: writes glide.toml, never a key (`glide setup --text`)", config=True
+    )
+    passthrough(
+        commands,
+        "panel",
+        cmd_panel,
+        "a persistent local control panel: providers, chains, features, chat, files, status",
+        config=True,
     )
     passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)
     passthrough(commands, "mcp", cmd_mcp, "serve Glide over MCP, show the MCP settings (`glide mcp --help`)", config=True)
