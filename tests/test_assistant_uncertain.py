@@ -118,3 +118,19 @@ def test_the_sentence_exists_in_every_language_and_overrides_the_outcome(languag
 
 def test_the_english_sentence_is_the_fixed_one():
     assert PHRASES["uncertain"]["en"] == HONEST
+
+
+@pytest.mark.parametrize(
+    ("outcome", "key"),
+    [
+        ("provider failure", "provider"),
+        ("generation unavailable", "provider"),
+        ("desktop unavailable", "desktop"),
+        ("crashed", "crashed"),
+    ],
+)
+def test_a_run_that_fails_after_an_earlier_answer_says_the_failure_not_the_stale_answer(outcome, key):
+    # PR4-4175615764: the answer of an earlier stop of the same run survives in the run state when it later fails
+    result = TaskResult("g", True, outcome, answer="old unachieved answer", failure="The provider said no.")
+    assert result.spoken() == say(key) and "old unachieved" not in result.spoken()
+    assert TaskResult("g", True, "stalled", answer="what the screen shows").spoken() == "what the screen shows"

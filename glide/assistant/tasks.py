@@ -110,7 +110,7 @@ class TaskResult:
             return say("uncertain", language)
         if self.stopped:
             return ""
-        if self.answer and self.outcome not in ("provider failure", "crashed"):
+        if self.answer and not self.failure and self.outcome not in UNANSWERED:  # an answer kept from an earlier stop is stale
             return self.answer
         if self.outcome == "dry run":
             return say("dry_run", language, what=self.would_do) if self.would_do else say("dry_run_plain", language)
@@ -133,6 +133,9 @@ class TaskResult:
             lines.append(f"run folder: {self.folder}")
         return "\n".join(lines)
 
+
+# Outcomes that end a run on a failure: whatever answer an earlier stop of the same run left is not what happened.
+UNANSWERED = ("provider failure", "generation unavailable", "desktop unavailable", "crashed")
 
 OUTCOME_PHRASES = {
     "done": "done",
