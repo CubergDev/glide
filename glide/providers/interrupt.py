@@ -13,8 +13,10 @@ over `RunControl.closing_on_cancel` and `checkpoint`, and nothing more:
 - `Call(client)` is the `close` for a request that is still waiting for its headers, which is where a model spends
   most of a non-streaming call: no response exists yet to close. It finds the one connection that carries this
   request in httpcore's pool and shuts that down, and nothing else (a client's other requests are not touched). It
-  reads two private attributes of httpcore 1.0.x (`_pool`, `_connection`/`_network_stream`) and does nothing if
-  they are not there; tests/test_cancel_wire.py fails if a new httpcore moves them, over a real loopback socket.
+  reads private attributes of httpcore 1.0.x (`_pool`, `_requests`, `_connection`, `_network_stream`) and does
+  nothing if they are not there (`Call.socket()` is then None). That is the one silent degrade, and it lives only
+  here: `test_httpx_alone_has_what_the_helper_reads` in tests/test_cancel_wire.py fails loudly, over a real loopback
+  socket, the day a new httpcore moves them.
 
 An adapter raises only `ProviderError`, so a cancel leaves here as kind "cancelled" (errors.py). What the closed
 connection makes httpx raise afterwards is still mapped by the adapter as usual; the chain (chain.py) turns anything
@@ -83,10 +85,19 @@ class Call:
         self._token = object()
         self.extensions: dict[str, object] = {"glide_call": self._token}  # httpcore carries these to its own Request
 
-    def abort(self) -> None:
-        """Shut down the connection that carries this request, whether or not its headers have arrived."""
-        with contextlib.suppress(Exception):  # private attributes of httpcore: if they moved, there is nothing to shut
+    def socket(self) -> object | None:
+        """The socket of the connection that carries this request, or None when there is none yet or it cannot be found.
+
+        This reads private attributes of httpcore, and where a new httpcore has moved them it finds nothing, so a
+        cancel degrades to closing what the adapter can reach itself. tests/test_cancel_wire.py fails if that happens.
+        """
+        with contextlib.suppress(Exception):
             pool = self._client._transport._pool
             for queued in list(pool._requests):
                 if queued.request.extensions.get("glide_call") is self._token and queued.connection is not None:
-                    _shutdown(queued.connection._connection._network_stream.get_extra_info("socket"))
+                    return queued.connection._connection._network_stream.get_extra_info("socket")
+        return None
+
+    def abort(self) -> None:
+        """Shut down the connection that carries this request, whether or not its headers have arrived."""
+        _shutdown(self.socket())

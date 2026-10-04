@@ -8,7 +8,7 @@ on 127.0.0.1 and nothing else (conftest refuses any other address).
 Two things are checked that no fake can check. A request that has no response yet is found in httpcore's pool and
 its connection shut down, also when the connection is a kept-alive one used before; and an open response is shut
 down so that the thread blocked reading it ends instead of waiting for its deadline. If a new httpcore moves the
-private attributes `interrupt.Call` reads, `test_a_request_waiting_for_its_first_byte...` fails.
+private attributes `interrupt.Call` reads, `test_httpx_alone_has_what_the_helper_reads` (the tripwire) fails.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import httpx
 import pytest
 
 from glide.computer.control import RunControl, controlled
+from glide.providers import interrupt
 from glide.providers.chain import Chain, Slot
 from glide.providers.errors import CANCELLED
 from glide.providers.llm import LLM, OpenAICompatLLM
@@ -237,8 +238,24 @@ def test_a_client_whose_request_was_cut_is_still_usable_for_the_next_one(wire):
     assert llm.chat(MESSAGES).text == "ok" and server.accepted == 2
 
 
-def test_httpx_alone_has_what_the_helper_reads():
-    """The tripwire for a new httpcore: the pool, its queue of requests, and a connection's stream and socket."""
+def test_httpx_alone_has_what_the_helper_reads(wire):
+    """THE tripwire for a new httpcore, and the only place a moved private attribute may be noticed: `interrupt.Call`
+    degrades silently (it finds no socket and shuts nothing down), so this test is what fails instead.
+
+    A request is held by a real server, and the helper must find, through httpcore's pool, the one socket that
+    carries it, and shut it down so that the server sees the connection go."""
+    server = wire("silent")
     with httpx.Client() as client:
-        pool = client._transport._pool
-        assert isinstance(pool._requests, list)
+        assert isinstance(client._transport._pool._requests, list)
+        call = interrupt.Call(client)
+        assert call.socket() is None  # nothing is in flight yet
+        request = client.build_request("POST", server.url, content=b"{}", extensions=call.extensions)
+        done, box = in_thread(lambda: client.send(request, stream=True))
+        assert server.entered.wait(WAIT)
+        assert call.socket() is not None, (
+            "httpcore moved what interrupt.Call reads: a cancel can no longer reach a waiting request"
+        )
+        call.abort()
+        assert server.gone.wait(WAIT), "the socket was found but shutting it down did not reach the server"
+        assert done.wait(WAIT)
+        assert isinstance(box.get("error"), httpx.HTTPError)  # the caller is woken with an error, not left to its deadline
