@@ -616,6 +616,8 @@ def repeating(state: RunState, what: str, waiting: bool, log: Log) -> bool:
     if state.repeats >= MAX_REPEATS:
         log(f"  {MAX_REPEATS} actions in a row already taken on the same screen; stopping")
         state.outcome = "stalled"
+        # An unchanged screen after a click is the unknown-outcome case, not proof it did nothing: say so, so it is not retried.
+        state.uncertain, state.readback = True, "the same action was repeated on an unchanged screen; completion unknown"
         return True
     return False
 
