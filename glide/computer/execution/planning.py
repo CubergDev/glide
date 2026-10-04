@@ -100,11 +100,36 @@ def compile_goal(goal):
     return None
 
 
+def compile_site(goal):
+    """ "open youtube", "search amazon for headphones", "weather in London": the shipped request compilers of `glide.direct`
+    (their address tables are configuration) give the one address to open. Returns (steps, origin) or None."""
+    from glide.direct import resolve
+
+    text = " ".join(goal.split()).rstrip(".!?")
+    text = re.sub(r"\s+(?:in|on|with)\s+(?:the\s+|my\s+)?(?:browser|chrome|safari|web)$", "", text, flags=re.IGNORECASE)
+    found = resolve(text)
+    if found is None or not found.url or found.kind not in {"open", "search", "maps", "weather", "stock"}:
+        return None
+    step = {
+        "id": "open-page",
+        "goal": "Open the requested page.",
+        "effect": "url",
+        "target": "",
+        "value": found.url,
+        "quantity": 1,
+    }
+    return [step], _origin(found.url)
+
+
 def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", context=None):
-    if not steps and not context and not reason and (compiled := compile_goal(goal)) is not None:
-        grounded = grounded_origins(goal, reply, observed, steps, browser_settings.current().search_url)
-        diagnostics.event("plan_compiled", step_count=len(compiled))
-        return validate_plan({"question": "", "steps": compiled}, observed, steps, grounded=grounded)
+    if not steps and not context and not reason:
+        compiled, extra = compile_goal(goal), set()
+        if compiled is None and (site := compile_site(goal)) is not None:
+            compiled, extra = site[0], {site[1]}  # an address from the shipped table: as grounded as the code's own catalog
+        if compiled is not None:
+            grounded = grounded_origins(goal, reply, observed, steps, browser_settings.current().search_url) | extra
+            diagnostics.event("plan_compiled", step_count=len(compiled))
+            return validate_plan({"question": "", "steps": compiled}, observed, steps, grounded=grounded)
     if writer is None:
         raise InvalidAction("This goal needs planning, but the configured model provider is unavailable")
     packet = {
