@@ -44,7 +44,9 @@ WEBSOCKETS_CALLS = (
 
 def _refusal(what: str):
     def refuse(*args, **kwargs):
-        raise RuntimeError(f"a test reached the real machine through {what}; give the code a fake instead")
+        from conftest import refusal  # this file is loaded under two names; the ledger lives in conftest
+
+        raise refusal(what, "give the code a fake instead")
 
     return refuse
 

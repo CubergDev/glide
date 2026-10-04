@@ -56,7 +56,9 @@ LATER_MODULES = (("glide.computer.execution.dom", ("_get_json",)),)
 
 def _refuse(what: str):
     def call(*args, **kwargs):
-        raise RuntimeError(f"a test reached the real machine through {what}; patch it in the test")
+        from conftest import refusal  # the shared ledger lives in conftest: this file is loaded under two names
+
+        raise refusal(what)
 
     return call
 

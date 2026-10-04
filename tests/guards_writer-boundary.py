@@ -19,7 +19,13 @@ import pytest
 def no_vendor_sdk_client(monkeypatch):
     def refuse(vendor: str):
         def build(*args, **kwargs):
-            raise AssertionError(f"a test built the {vendor} SDK client; the writer goes through glide.providers")
+            from conftest import refusal
+
+            raise refusal(
+                f"the {vendor} SDK client",
+                kind=AssertionError,
+                message=f"a test built the {vendor} SDK client; the writer goes through glide.providers",
+            )
 
         return build
 
