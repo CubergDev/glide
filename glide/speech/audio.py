@@ -407,8 +407,10 @@ class FullDuplexDevice:
             _shut(stream)
             raise
         with self._cond:
-            self._input = stream
-            self._paused = False
+            if not self._closed:
+                self._input, self._paused = stream, False
+                return
+        _shut(stream)  # close() ran while the stream was starting: nothing may be left open
 
     # -- speaker (the shape `Speaker` expects of a player) --------------------------------------
 

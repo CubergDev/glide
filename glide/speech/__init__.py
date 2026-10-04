@@ -12,7 +12,6 @@ piece takes its hardware or model as an argument so tests give it a fake.
 - `turns.py`: `VoiceLoop`, which turns frames into turns, hands each to `Assistant.handle_audio`, and
   decides barge-in (`BargeInGate`), self-correction and idleness.
 - `session.py`: builds the real thing from settings.
-- `elevenlabs.py`: an optional realtime text-to-speech adapter that speaks the `providers/tts` shape.
 
 Speech to text is not here: the assistant asks `config.stt()`, so every transcriber stays swappable.
 """
