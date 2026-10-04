@@ -15,15 +15,23 @@ callers on a fake desktop that records whether `dispatch` was on the stack.
 from __future__ import annotations
 
 import ast
+import sys
 import warnings
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from execution_world import SCENARIOS, Computer, Jev, Reasoner, drive, response
+from PIL import Image
 from test_exec_backends_guard import process_starts
 
 import glide
+from glide.computer import actions, control, runner
+from glide.computer.models import AxNode, Field, Item, Popup, Screen
+from glide.computer.platform_adapter import Desktop, desktop
+from glide.computer.writer import Answer
 
 GLIDE = Path(glide.__file__).resolve().parent
 ROOT = GLIDE.parent
@@ -212,3 +220,310 @@ def test_the_removal_patch_deletes_the_launcher_and_the_guards_on_it():
     assert 'guard.strict(cdp, "find_chrome", "cdp.find_chrome")' in removed  # tests/conftest.py
     assert "lambda tmp: cdp.find_chrome()," in removed  # tests/test_no_real_machine.py
     assert not [line for line in removed if "Popen" in line and "refuse" in line]  # the Popen refusal stays
+
+
+# ------------------------------------------------------------------ input goes through dispatch
+
+# Every `Desktop` call that moves the pointer, types, presses, activates or opens something, or acts on another app's
+# element. A new Desktop method must be put in one of the two sets, or the first test below fails.
+INPUT = {
+    "click_at",
+    "press",
+    "type_text",
+    "clear_field",
+    "scroll",
+    "activate",
+    "open_url",
+    "open_path",
+    "ax_press",
+    "ax_focus",
+    "ax_set_value",
+    "execution_tab",
+    "execution_shortcut",
+    "execution_scroll",
+    "request_permissions",
+}
+READS = {
+    "check_abort",
+    "abort_hint",
+    "sleep_watching",
+    "accessibility_trusted",
+    "screen_capture_trusted",
+    "frontmost_app_and_pid",
+    "browser_url",
+    "frontmost_window_bounds",
+    "screenshot",
+    "display_scale",
+    "recognize_text",
+    "focused_field",
+    "actionable_elements",
+    "ax_value",
+    "execution_tabs",
+    "execution_scrolls",
+    "execution_labels",
+}
+RECEIVERS = {"desktop", "host", "adapter", "macos", "windows"}
+ADAPTERS = {"glide/computer/macos.py", "glide/computer/windows.py", "glide/computer/platform_adapter.py"}  # they implement it
+
+
+def input_uses(source: str) -> list[tuple[str, str]]:
+    """(function, primitive) for each reference to an input primitive that is not the first argument of `dispatch(...)`.
+
+    A reference is `desktop.click_at`, called or not (so `x = desktop.click_at` counts), on a receiver named in
+    RECEIVERS, on `current()`, or on `<module>.desktop`; also `getattr(desktop, ...)`, and importing a primitive by name
+    from an adapter module.
+    """
+    tree = ast.parse(source)
+    dispatched = {
+        id(call.args[0])
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and (getattr(call.func, "id", None) == "dispatch" or getattr(call.func, "attr", None) == "dispatch")
+        and call.args
+    }
+
+    def on_desktop(value) -> bool:
+        return (
+            (isinstance(value, ast.Name) and value.id in RECEIVERS)
+            or (isinstance(value, ast.Call) and getattr(value.func, "id", None) == "current")
+            or (isinstance(value, ast.Attribute) and value.attr == "desktop")
+        )
+
+    found: list[tuple[str, str]] = []
+
+    def visit(node, scope: tuple[str, ...]) -> None:
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            scope += (node.name,)
+        where = ".".join(scope) or "<module>"
+        if isinstance(node, ast.Attribute) and node.attr in INPUT and on_desktop(node.value) and id(node) not in dispatched:
+            found.append((where, node.attr))
+        elif (
+            isinstance(node, ast.Call) and getattr(node.func, "id", None) == "getattr" and node.args and on_desktop(node.args[0])
+        ):
+            found.append((where, "getattr"))
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] in {"macos", "windows", "platform_adapter"}:
+            found.extend((where, a.name) for a in node.names if a.name in INPUT)
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, ())
+    return found
+
+
+def test_every_desktop_method_is_classified_as_input_or_a_read():
+    methods = {n for n, v in vars(Desktop).items() if callable(v) and not n.startswith("_")}
+    assert methods == INPUT | READS and not INPUT & READS, (
+        f"classify these in INPUT or READS: {sorted(methods - INPUT - READS)}; gone from Desktop: {sorted((INPUT | READS) - methods)}"
+    )
+
+
+def test_the_input_scan_tells_dispatched_references_from_the_rest():
+    assert input_uses("def f():\n    dispatch(desktop.click_at, (1, 2))\n    control.dispatch(desktop.press, 'a')") == []
+    assert input_uses("def f():\n    desktop.click_at((1, 2))") == [("f", "click_at")]
+    assert input_uses("class C:\n    def m(self):\n        run = desktop.type_text") == [("C.m", "type_text")]
+    assert input_uses("def f():\n    dispatch(g, desktop.press)") == [("f", "press")]  # only the first argument is gated
+    assert input_uses("def f():\n    getattr(desktop, name)(1)") == [("f", "getattr")]
+    assert input_uses("def f():\n    platform_adapter.desktop.activate('x')") == [("f", "activate")]
+    assert input_uses("def f():\n    current().open_url('b', 'u')") == [("f", "open_url")]
+    assert input_uses("from .macos import click_at, screenshot") == [("<module>", "click_at")]
+    assert input_uses("def f():\n    desktop.screenshot()\n    recorder.activate()\n    scroller.scroll(3)") == []
+
+
+@dataclass(frozen=True)
+class Outside:
+    uses: frozenset[str]
+    reason: str
+    owner: str
+    gap: bool = False  # a real hole, listed so it cannot grow; the entry may go once it is fixed
+
+
+INPUT_ALLOWED: dict[tuple[str, str], Outside] = {
+    ("glide/computer/execution/native.py", "NativeBackend.execute"): Outside(
+        frozenset(
+            {"open_url", "execution_tab", "execution_shortcut", "execution_scroll", "ax_press", "click_at", "ax_focus"}
+            | {"ax_set_value", "clear_field", "type_text"}
+        ),
+        "the native backend's one write path; the engine calls it only as `dispatch(backend.execute, ...)` "
+        "(execution/engine.py, `_dispatch`; test_the_engine_dispatches_every_write below)",
+        "engine",
+    ),
+    ("glide/computer/runner.py", "hand_off"): Outside(
+        frozenset({"activate"}),
+        "GAP: after the user answers a question the terminal is in front, and `desktop.activate(state.view[0].app)` puts the "
+        "work back with no checkpoint and no in_flight mark. Fix: `dispatch(desktop.activate, state.view[0].app)`",
+        "engine (runner.py)",
+        gap=True,
+    ),
+    ("glide/computer/cli.py", "inspect"): Outside(
+        frozenset({"open_path"}),
+        "`glide-inspect` shows its own output files to the user unless `--no-open`; it runs no task and has no RunControl",
+        "cli",
+    ),
+    ("glide/computer/desktop_access.py", "prepare_desktop"): Outside(
+        frozenset({"request_permissions"}),
+        "asks macOS for Screen Recording and Accessibility before a voice session starts; no task, no input to another app",
+        "voice",
+    ),
+}
+
+
+def test_no_production_module_sends_input_outside_dispatch():
+    found = {}
+    for path, source in sources().items():
+        if path in ADAPTERS:
+            continue
+        for where, name in input_uses(source):
+            found.setdefault((path, where), set()).add(name)
+    unexpected = {}
+    for key, names in found.items():
+        entry = INPUT_ALLOWED.get(key)
+        extra = names - (entry.uses if entry else frozenset())
+        if extra:
+            unexpected[f"{key[0]}:{key[1]}"] = sorted(extra)
+    assert not unexpected, (
+        "input outside control.dispatch. Wrap it as dispatch(desktop.<call>, ...) or, when it cannot be, add an "
+        f"INPUT_ALLOWED entry with the reason: {unexpected}"
+    )
+    for key, entry in INPUT_ALLOWED.items():
+        if not entry.reason or not entry.owner:
+            pytest.fail(f"{key} needs a reason and an owner")
+        if key not in found or entry.uses - found[key]:
+            gone = sorted(entry.uses - found.get(key, set()))
+            warnings.warn(f"{key[0]}:{key[1]} no longer uses {gone}: trim its INPUT_ALLOWED entry", stacklevel=1)
+
+
+CDP_WRITES = ("Input.", "Page.navigate", "Target.createTarget", "Target.activateTarget", "Target.closeTarget")
+CDP_WRITERS = {
+    "glide/computer/execution/dom.py": "DomBackend.execute and what it calls; the engine dispatches it like the native one",
+    "glide/computer/execution/playwright_cli.py": "names the methods the bridge may relay (`WRITES`), and relays them for DomBackend",
+    "glide/computer/browser/act.py": "GAP, legacy: the old DOM loop sends input with no dispatch at all. Unreachable from production "
+    "(docs/notes/legacy-browser-loop.md); it goes with that loop",
+}
+
+
+def test_browser_writes_over_cdp_come_only_from_the_dispatched_backends():
+    found = set()
+    for path, source in sources().items():
+        for node in ast.walk(ast.parse(source)):
+            is_write = isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith(CDP_WRITES)
+            if is_write and path != "glide/computer/browser/cdp.py":  # which only compares a method name to time its deadline
+                found.add(path)
+    assert found <= set(CDP_WRITERS), (
+        f"new module sending browser input or navigation over CDP: {sorted(found - set(CDP_WRITERS))}"
+    )
+
+
+# -- at run time: a fake desktop that sees whether `dispatch` is on the stack
+
+
+def dispatch_active() -> bool:
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code is control.dispatch.__code__:
+            return True
+        frame = frame.f_back
+    return False
+
+
+@pytest.fixture
+def machine(monkeypatch):
+    """Every input primitive recorded with whether `dispatch` was running when it was called. Reads stay quiet."""
+    log: list[tuple[str, bool]] = []
+
+    def recorder(name):
+        def record(*args, **kwargs):
+            log.append((name, dispatch_active()))
+            return name in {"ax_press", "ax_focus", "ax_set_value", "activate", "open_url"}
+
+        return record
+
+    for name in INPUT:
+        monkeypatch.setattr(desktop, name, recorder(name))
+    monkeypatch.setattr(desktop, "sleep_watching", lambda seconds: None)
+    monkeypatch.setattr(desktop, "ax_value", lambda ref: "hello")
+    monkeypatch.setattr(desktop, "focused_field", lambda: None)
+    return log
+
+
+def blank_screen(field: Field | None = None, **changes) -> Screen:
+    return Screen(image=Image.new("RGB", (2000, 1200)), scale=2.0, app="Google Chrome", field=field, url=None, **changes)
+
+
+def test_every_action_the_legacy_loop_performs_runs_under_dispatch(machine, monkeypatch):
+    ref = object()
+    text_field = Field("AXTextField", "Search", "", "", 10, 20, 200, 30, ref=ref)
+    plain_field = replace(text_field, ref=None)
+    link = Item(3, "Register", 1.0, 100, 100, 300, 140, role="link", source="ax")
+    node = AxNode(role="AXLink", label="Hidden", x=0.0, y=-4200.0, w=120.0, h=32.0, pressable=True, ref=ref)
+    close = AxNode(role="AXButton", label="Close", x=1800.0, y=100.0, w=20.0, h=20.0, pressable=True, ref=None)
+    bubble = Popup("Restore pages?", 1700.0, 90.0, 300.0, 100.0, close=close)
+    monkeypatch.setattr(actions, "compose_text", lambda *a: SimpleNamespace(text="hello", submit=True))
+    monkeypatch.setattr(actions, "compose_url", lambda *a: "https://example.com/")
+    ctx = actions.Context("goal", "Google Chrome", "me@example.org", None, object(), [])
+    cases = [
+        ("click_item pressed", lambda: actions.click_item(link, blank_screen(ax_refs={3: ref}))),
+        ("click_item clicked", lambda: actions.click_item(link, blank_screen())),
+        ("click_item under a popup", lambda: actions.click_item(link, blank_screen(covered={3: bubble}))),
+        ("close_popup with Escape", lambda: actions.close_popup(replace(bubble, close=None))),
+        ("press_offscreen", lambda: actions.press_offscreen("0", blank_screen(offscreen=[node]))),
+        ("fill_field by value", lambda: actions.fill_field(text_field, "x")),
+        ("fill_field by keystrokes", lambda: actions.fill_field(plain_field, "x")),
+        ("restore_field", lambda: actions.restore_field(text_field, "hello")),
+    ]
+    for chosen, extra in [
+        ("use_browser", {"site": SimpleNamespace(choice="none")}),
+        ("use_browser", {"site": SimpleNamespace(choice="github")}),
+        ("use_browser", {"site": SimpleNamespace(choice="other")}),
+        ("type_email", {}),
+        ("type_text", {}),
+        ("press_enter", {}),
+        ("press_escape", {}),
+        ("go_back", {}),
+        ("scroll_down", {}),
+        ("scroll_up", {}),
+        ("wait", {}),
+    ]:
+        decision = SimpleNamespace(chosen=chosen, **extra)
+        cases.append((chosen, lambda decision=decision: actions.perform(decision, blank_screen(field=text_field), [], ctx)))
+    for label, run in cases:
+        machine.clear()
+        run()
+        assert all(on for _, on in machine), f"{label}: input outside dispatch: {machine}"
+    # The check can fail: a call made straight on the desktop is seen.
+    machine.clear()
+    desktop.click_at((1, 2))
+    assert machine == [("click_at", False)]
+
+
+def test_the_engine_dispatches_every_write(monkeypatch, tmp_path):
+    class Watched(Computer):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def execute(self, action, observed):
+            self.calls.append((action.kind, dispatch_active()))
+            return super().execute(action, observed)
+
+    computer = Watched()
+    drive(monkeypatch, tmp_path, computer, Reasoner([response(*SCENARIOS["edit and save a desktop form"])]), Jev("plan"))
+    writes = [(kind, on) for kind, on in computer.calls if kind != "inspect"]
+    assert writes, "the scenario made no write"
+    assert all(on for _, on in writes), f"a write reached the backend outside dispatch: {computer.calls}"
+    assert not any(on for kind, on in computer.calls if kind == "inspect"), "reads are not writes"
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="runner.py hand_off calls desktop.activate directly after the user answers a question; "
+    "fix: dispatch(desktop.activate, ...) (see INPUT_ALLOWED)",
+)
+def test_putting_the_work_back_in_front_after_a_question_goes_through_dispatch(machine, monkeypatch, tmp_path):
+    answers = iter([Answer("which one?", False, question="which one?"), Answer("done", True)])
+    monkeypatch.setattr(runner, "review", lambda *a: next(answers))
+    ctx = actions.Context("goal", "Google Chrome", None, None, object(), [], ask=lambda question: "the second")
+    state = runner.RunState(outcome="done")
+    state.view = (blank_screen(), [])
+    cfg = runner.RunConfig(goal="goal", out=tmp_path, act=True)
+    runner.hand_off(cfg, ctx, state, 1, lambda *a, **k: None)
+    assert machine == [("activate", True)]
