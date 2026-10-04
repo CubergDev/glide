@@ -173,11 +173,14 @@ class TurnDetector:
         self.silent = self.silent + 1 if probability < STOP_PROBABILITY else 0
         if self.frames > self.max_frames:
             self.active = False
-            raise UtteranceTooLong(f"Utterance exceeded {self.max_frames * FRAME_S:.0f} seconds; it was not submitted.")
+            raise self.too_long()
         commit = self.silent >= self.silence_frames
         if commit:
             self.active = False
         return started, pcm, commit
+
+    def too_long(self) -> UtteranceTooLong:
+        return UtteranceTooLong(f"Utterance exceeded {self.max_frames * FRAME_S:.0f} seconds; it was not submitted.")
 
     def finish(self) -> bool:
         """End the turn now, as a silence would. True only if a turn was running, so a second call (or a call

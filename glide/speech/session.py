@@ -75,6 +75,9 @@ def build_voice(
             barge_min_voiced_ms=settings.barge_min_voiced_ms,
             barge_margin_db=settings.barge_margin_db,
             barge_min_erle_db=settings.barge_min_erle_db,
+            confirm_tasks=settings.confirm_tasks,
+            confirm_phrase=settings.confirm_phrase,
+            confirm_timeout_s=settings.confirm_timeout_s,
         )
         if owned:
             device.start()

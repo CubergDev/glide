@@ -144,31 +144,8 @@ class EchoCanceller(ABC):
         self._recent_far.append(far_rms)
         far_recent = max(self._recent_far)
         if far_recent >= FAR_ACTIVE_RMS and not self.hold:  # echo may be in the microphone: the room outlasts the sound
-            first = self._tracked == 0
-            weight = 1.0 if first else min(1.0, FRAME_S / ERLE_WINDOW_S)
-            self._near_energy += weight * (near_rms**2 - self._near_energy)
-            self._out_energy += weight * (out_rms**2 - self._out_energy)
-            self._tracked += 1
-            self._ratios.append(out_rms / far_recent)
-            self._levels.append(out_rms)
+            self._learn(near_rms, out_rms, far_recent)
         measured = self._tracked >= ERLE_MIN_FRAMES
-        erle = None
-        if self._tracked and self._out_energy > 0 and self._near_energy > 0:
-            erle = 10 * math.log10(max(self._near_energy / self._out_energy, 1e-3))
-        # The echo that should be left in this frame is the larger of two things, each a high percentile of what was
-        # seen lately and not an average, because the residual of a canceller comes in bursts and a bar at the average
-        # would be crossed by Glide's own echo: the reference's recent loudness (the room's echo outlasts the sound that
-        # made it) times the usual residual-over-reference ratio, which follows the speaker's loudness; and the cleaned
-        # level itself, which holds what does not follow it (a residual that hangs on while the reference dips). A path
-        # change shows within a few frames, since a handful of large values is all it takes to move a percentile.
-        # Statistics are frozen while a voice is being judged, so the voice does not teach them that echo is louder.
-        expected = 0.0
-        if measured and self._ratios:
-            ratios, levels = sorted(self._ratios), sorted(self._levels)
-            expected = max(
-                far_recent * ratios[-max(1, round(len(ratios) * (1 - RATIO_PERCENTILE)))],
-                levels[min(len(levels) - 1, int(len(levels) * LEVEL_PERCENTILE))],
-            )
         self._envelope.append((far_rms, near_rms))
         if self._count % ENVELOPE_EVERY == 0:
             found = self._estimate_delay()
@@ -178,12 +155,42 @@ class EchoCanceller(ABC):
             far_recent_rms=far_recent,
             near_rms=near_rms,
             out_rms=out_rms,
-            expected_residual_rms=expected,
-            erle_db=erle if measured else None,
+            expected_residual_rms=self._expected_residual(far_recent) if measured else 0.0,
+            erle_db=self._erle() if measured else None,
             measured=measured,
             delay_ms=self._delay_ms,
             latency_ms=self.latency_samples * 1000 / SAMPLE_RATE,
             frames=self._count,
+        )
+
+    def _learn(self, near_rms: float, out_rms: float, far_recent: float) -> None:
+        """Take a frame in which echo may be present into the long-run energies and the recent ratios and levels."""
+        weight = 1.0 if self._tracked == 0 else min(1.0, FRAME_S / ERLE_WINDOW_S)
+        self._near_energy += weight * (near_rms**2 - self._near_energy)
+        self._out_energy += weight * (out_rms**2 - self._out_energy)
+        self._tracked += 1
+        self._ratios.append(out_rms / far_recent)
+        self._levels.append(out_rms)
+
+    def _erle(self) -> float | None:
+        if self._tracked and self._out_energy > 0 and self._near_energy > 0:
+            return 10 * math.log10(max(self._near_energy / self._out_energy, 1e-3))
+        return None
+
+    def _expected_residual(self, far_recent: float) -> float:
+        """The echo that should be left in this frame is the larger of two things, each a high percentile of what was seen
+        lately and not an average, because the residual of a canceller comes in bursts and a bar at the average would be
+        crossed by Glide's own echo: the reference's recent loudness (the room's echo outlasts the sound that made it) times
+        the usual residual-over-reference ratio, which follows the speaker's loudness; and the cleaned level itself, which
+        holds what does not follow it (a residual that hangs on while the reference dips). A path change shows within a few
+        frames, since a handful of large values is all it takes to move a percentile. Statistics are frozen while a voice is
+        being judged, so the voice does not teach them that echo is louder."""
+        if not self._ratios:
+            return 0.0
+        ratios, levels = sorted(self._ratios), sorted(self._levels)
+        return max(
+            far_recent * ratios[-max(1, round(len(ratios) * (1 - RATIO_PERCENTILE)))],
+            levels[min(len(levels) - 1, int(len(levels) * LEVEL_PERCENTILE))],
         )
 
     def _estimate_delay(self) -> float | None:

@@ -11,6 +11,7 @@ piece takes its hardware or model as an argument so tests give it a fake.
 - `echo.py`: echo cancellers behind one small interface (WebRTC AEC3, a numpy filter) and the statistics the barge-in policy reads.
 - `turns.py`: `VoiceLoop`, which turns frames into turns, hands each to `Assistant.handle_audio`, and
   decides barge-in (`BargeInGate`), self-correction and idleness.
+- `approval.py`: with `act`, the spoken-or-keyed yes a voice request needs before it may click and type.
 - `session.py`: builds the real thing from settings.
 
 Speech to text is not here: the assistant asks `config.stt()`, so every transcriber stays swappable.

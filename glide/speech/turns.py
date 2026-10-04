@@ -1,6 +1,6 @@
 """The hands-free loop: frames in, turns out, each turn handed to `Assistant.handle_audio`.
 
-The loop owns exactly three decisions and nothing else (no transcription, no routing, no speech):
+The loop owns exactly four decisions and nothing else (no transcription, no routing, no speech):
 
 1. Where a turn starts and ends: `TurnDetector` on the voice detector's probabilities. One utterance has one
    end, decided by silence (or by `pause()`), never by anything earlier. In particular nothing "commits
@@ -32,8 +32,18 @@ The loop owns exactly three decisions and nothing else (no transcription, no rou
    headset hears no echo, so the voice detector and the minimum duration decide; half-duplex speaker mode
    hears silence while Glide speaks, so nothing qualifies until it has finished.
 
+   A turn that the voice detector starts on its own (nothing of Glide's in the microphone) cuts an answer that is still
+   being routed or written, or whose speech is queued but not yet audible, the same way: the device is silent then, so
+   the gate cannot see it, and the answer would otherwise speak over the person's new request.
+
    The policy keeps counters and thresholds (`VoiceLoop.status()`): ERLE, delay, decisions. They are numbers,
    never audio or words, and are for the person to read, never to be spoken.
+
+4. Whether a voice request may act. Hands-free listening has no wake word and no speaker check, so with `act` a request
+   that becomes a computer task runs as a dry run first, and `TaskApproval` (approval.py) holds the window in which the
+   confirm phrase, or `confirm()`, makes the same request real. The phrase's own turn is never routed as a request. A
+   no (another sentence, a stop, talking over Glide, a pause, the time) is the default, and `confirm_tasks = false` is the
+   explicit way to give it up.
 
 Idle: with `idle_s > 0`, once nothing has happened for that long (no speech, nothing playing, no task, no
 turn in flight) the microphone is switched off and `on_idle` is called. Only `resume()` turns it back on.
@@ -51,14 +61,18 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Protocol
 
 from ..assistant.audio_io import rms
+from .approval import Pending, TaskApproval
 from .audio import DeviceFault
 from .echo import EchoStats
 from .settings import SpeechSettings
 from .vad import FRAME_S, START_PROBABILITY, Probability, TurnDetector, UtteranceTooLong
 
 POLL_S = 0.05
+DRY_RUN_WAIT_S = 120.0  # the longest a previewed task is waited for before it is no longer offered
+PREVIEW_HEARD_S = 10.0  # the longest its description is waited for before the window opens anyway
 
 # Barge-in policy. The three the person can change are `[speech]` keys (their defaults are in `SpeechSettings`); the rest
 # are the shape of the policy.
@@ -186,29 +200,40 @@ class BargeInGate:
     def feed(self, probability: float, level: float, echo: EchoStats | None) -> Verdict:
         self._frame_no += 1
         self.counters["frames"] += 1
-        voiced = probability >= START_PROBABILITY
-        strong = weak = suspect = voiced
-        if voiced and echo is not None:
-            if not echo.measured or (echo.erle_db or 0.0) < self.min_erle_db:
-                strong = weak = suspect = False
-                self.counters["waiting_for_erle"] += 1
-            else:
-                floor = max(echo.expected_residual_rms, MIN_LEVEL_RMS)
-                kept = level >= RETAINED_MIN * echo.near_rms
-                strong = kept and level >= floor * 10 ** (self.margin_db / 20)
-                weak = kept and level >= floor * 10 ** (self.probe_margin_db / 20)
-                suspect = level >= floor * SUSPECT_RATIO
-        if weak:
-            if self._sound_start is None or self._quiet_since >= SOUND_GAP_FRAMES:
-                self._sound_start = self._frame_no
-            self._quiet_since = 0
-        else:
-            self._quiet_since += 1
+        strong, weak, suspect = self._evidence(probability >= START_PROBABILITY, level, echo)
+        self._note_sound(weak)
         self._suspect.feed(self._frame_no, suspect)
         self._strong.feed(self._frame_no, strong)
         self._weak.feed(self._frame_no, weak)
         if self._weak.ended_with:
             self._close_candidate()
+        return self._verdict(weak, strong)
+
+    def _evidence(self, voiced: bool, level: float, echo: EchoStats | None) -> tuple[bool, bool, bool]:
+        """Whether this frame is strong evidence, weak evidence, and a suspect (louder than the echo expected) of a person."""
+        if not voiced or echo is None:
+            return voiced, voiced, voiced  # with no canceller there is nothing to compare with: the voice detector decides
+        if not echo.measured or (echo.erle_db or 0.0) < self.min_erle_db:
+            self.counters["waiting_for_erle"] += 1
+            return False, False, False
+        floor = max(echo.expected_residual_rms, MIN_LEVEL_RMS)
+        kept = level >= RETAINED_MIN * echo.near_rms  # a frame the canceller all but removed was echo it understood
+        return (
+            kept and level >= floor * 10 ** (self.margin_db / 20),
+            kept and level >= floor * 10 ** (self.probe_margin_db / 20),
+            level >= floor * SUSPECT_RATIO,
+        )
+
+    def _note_sound(self, weak: bool) -> None:
+        """Where the sound being judged began: its first weak evidence, and again after a gap too long to be a dip in speech."""
+        if not weak:
+            self._quiet_since += 1
+            return
+        if self._sound_start is None or self._quiet_since >= SOUND_GAP_FRAMES:
+            self._sound_start = self._frame_no
+        self._quiet_since = 0
+
+    def _verdict(self, weak: bool, strong: bool) -> Verdict:
         if self._strong.count >= self.min_voiced_frames:
             self.counters["confirmed"] += 1
             self._candidate = False
@@ -226,9 +251,15 @@ class _Turn:
 
     def __init__(self, *, probe: bool = False) -> None:
         self.audio: queue.Queue = queue.Queue()
+        self.frames = 0  # frames of the utterance so far, merge-window pauses included: the cap is on the whole turn
         self.heard = threading.Event()  # the transcript is final (or there will be none): safe to interrupt again
         self.thread: threading.Thread | None = None
         self.probe = probe  # listens for a stop only: it never makes a request
+        self.confirmed: Pending | None = None  # set when what was heard is the person's yes to a previewed task
+
+    def add(self, frame: bytes) -> None:
+        self.frames += 1
+        self.audio.put(frame)
 
     def chunks(self) -> Iterator[bytes]:
         while True:
@@ -260,11 +291,26 @@ def format_status(status: dict) -> str:
     return " | ".join(parts)
 
 
+class Device(Protocol):
+    """What the loop needs of the microphone and the speaker. `FullDuplexDevice` is one; tests give a fake."""
+
+    playing: bool  # audio is queued or still sounding
+    echo_active: bool  # Glide's voice may be in the microphone (only with an echo canceller)
+    echo: EchoStats | None  # the canceller's latest numbers, or None when there is none
+    echo_name: str | None
+    reference_underruns: int
+
+    def read(self, timeout: float | None = ...) -> bytes | None: ...
+    def pause_input(self) -> None: ...
+    def resume_input(self) -> None: ...
+    def hold_echo_stats(self, hold: bool) -> None: ...
+
+
 class VoiceLoop:
     def __init__(
         self,
         assistant,
-        device,
+        device: Device,
         vad: Probability,
         *,
         silence_ms: int = SpeechSettings.silence_ms,
@@ -277,6 +323,9 @@ class VoiceLoop:
         barge_min_voiced_ms: int = SpeechSettings.barge_min_voiced_ms,
         barge_margin_db: float = SpeechSettings.barge_margin_db,
         barge_min_erle_db: float = SpeechSettings.barge_min_erle_db,
+        confirm_tasks: bool = SpeechSettings.confirm_tasks,
+        confirm_phrase: str = SpeechSettings.confirm_phrase,
+        confirm_timeout_s: float = SpeechSettings.confirm_timeout_s,
     ) -> None:
         self._assistant = assistant
         self._device = device
@@ -306,12 +355,22 @@ class VoiceLoop:
         self._thread: threading.Thread | None = None
         self.failure: str | None = None
         self._io = assistant.io
+        # with `act`, a request to use the machine runs as a dry run until the person says the phrase (approval.py)
+        self._approval = (
+            TaskApproval(confirm_phrase, confirm_timeout_s, clock=clock, show=lambda text: self._io.show(text))
+            if act and confirm_tasks
+            else None
+        )
         self._chained_heard = heard = self._io.heard
 
         def on_heard(text: str) -> None:
             turn = getattr(self._local, "turn", None)
             if turn is not None:
                 turn.heard.set()
+                if self._approval is not None:
+                    turn.confirmed = self._approval.answer(text)
+                    if turn.confirmed is not None:
+                        self._assistant.interrupt_speech()  # this turn is the yes, not a request: nothing is routed or answered
             heard(text)
 
         self._on_heard = self._io.heard = on_heard
@@ -340,6 +399,21 @@ class VoiceLoop:
         self._commands.put("resume")
 
     @property
+    def awaiting_confirmation(self) -> bool:
+        """A previewed task is waiting for the person's yes (the phrase, or `confirm()`)."""
+        return self._approval is not None and self._approval.waiting
+
+    def confirm(self) -> bool:
+        """The keyed yes: run the task that is waiting for one, for real. False when none is, or its time has run out."""
+        pending = self._approval.confirm() if self._approval is not None else None
+        if pending is None:
+            return False
+        turn = _Turn()
+        turn.heard.set()
+        self._start(turn, lambda _turn: self._run_confirmed(pending, standalone=True))
+        return True
+
+    @property
     def ended(self) -> bool:
         """The thread made by `start()` has finished: the loop stopped, or a microphone fault ended it."""
         return self._thread is not None and not self._thread.is_alive()
@@ -357,6 +431,8 @@ class VoiceLoop:
         try:
             while not self._stop.is_set():
                 self._apply_commands()
+                if self._approval is not None:
+                    self._approval.expire()
                 if self._paused:
                     continue
                 try:
@@ -384,6 +460,7 @@ class VoiceLoop:
                 return
             wait = 0.0
             if command == "pause" and not self._paused:
+                self._cancel_confirmation()
                 self._end_turn()
                 self._settle_gate()
                 self._device.pause_input()
@@ -402,32 +479,40 @@ class VoiceLoop:
         self._recent.append(frame)
         if self._turn is None and self._speaking():
             self._gated(frame, probability)
-            return
-        self._settle_gate()
+        else:
+            self._settle_gate()
+            self._detect(frame, probability)
+
+    def _detect(self, frame: bytes, probability: float) -> None:
+        """Glide is not being heard, or a turn is running: the voice detector's probability decides where turns begin and end."""
         try:
             started, data, commit = self._detector.feed(frame, probability)
+            turn = self._turn
+            if turn is None:
+                if started:
+                    self._start_turn(data)
+                return
+            self._extend(turn, frame, started, data, commit)
         except UtteranceTooLong as exc:
             self._abort()
             self._assistant.io.warn(str(exc))
-            return
-        turn = self._turn
-        if turn is None:
-            if started:
-                self._begin(data)
-            return
+
+    def _extend(self, turn: _Turn, frame: bytes, started: bool, data: bytes, commit: bool) -> None:
+        """One more frame for the turn running: it goes on through a merge window, and ends on the silence that closes it."""
         if started:  # speech inside the merge window: the same turn goes on
             self._merging = 0
-            turn.audio.put(frame)
-            return
+            turn.add(frame)
+        elif self._merging:
+            turn.add(frame)
+        elif data:
+            turn.add(data)
+        if turn.frames > self._detector.max_frames:  # the detector only counts one stretch of speech: a turn is every stretch
+            raise self._detector.too_long()
         if self._merging:
-            turn.audio.put(frame)
             self._merging -= 1
             if not self._merging:
                 self._end_turn()
-            return
-        if data:
-            turn.audio.put(data)
-        if commit:
+        elif commit:
             if self._merge_frames:
                 self._merging = self._merge_frames
             else:
@@ -437,11 +522,11 @@ class VoiceLoop:
 
     def _speaking(self) -> bool:
         """Glide's voice is, or may still be, in the microphone."""
-        return bool(getattr(self._device, "echo_active", False)) or self._device.playing
+        return self._device.echo_active or self._device.playing
 
     def _gated(self, frame: bytes, probability: float) -> None:
         """A frame while Glide speaks and no turn is running: nothing starts a turn until the gate says it is the person."""
-        verdict = self._gate.feed(probability, rms(frame), getattr(self._device, "echo", None))
+        verdict = self._gate.feed(probability, rms(frame), self._device.echo)
         self._detector.feed(frame, 0.0)  # keeps the lead-in current for when the speaking ends; never starts a turn here
         self._hold(self._gate.armed)
         if self._probe is not None:
@@ -461,9 +546,7 @@ class VoiceLoop:
     def _hold(self, hold: bool) -> None:
         if hold != self._held:
             self._held = hold
-            freeze = getattr(self._device, "hold_echo_stats", None)
-            if freeze is not None:
-                freeze(hold)
+            self._device.hold_echo_stats(hold)
 
     def _since_onset(self, extra: int = 0) -> bytes:
         """The frames from a lead-in before the sound being judged began up to the current one."""
@@ -475,11 +558,27 @@ class VoiceLoop:
         self._gate.reset()
         self._hold(False)
         self._abandon_probe()
-        # drop pending requests only when no earlier turn of the person's is still waiting for its transcript
-        wanted = all(turn.heard.is_set() for turn in self._turns if not turn.probe)
-        self._assistant.interrupt_speech(drop_pending=wanted)
+        self._interrupt()
         self._detector.feed(self._recent[-1], 1.0)  # the detector now runs the turn: this frame is its first
         self._begin(audio)
+
+    def _interrupt(self) -> None:
+        """Cut the voice and the answer being written. Pending requests are dropped too, unless an earlier turn of the
+        person's is still waiting for its transcript: that one is wanted."""
+        spare = any(not turn.heard.is_set() for turn in self._turns if not turn.probe)
+        self._cancel_confirmation()  # a task waiting for its yes is not confirmed by a person who is now talking over Glide
+        self._assistant.interrupt_speech(drop_pending=not spare)
+
+    def _start_turn(self, first: bytes) -> None:
+        """The voice detector began a turn with nothing of Glide's in the microphone. An answer the person has not heard
+        yet (being routed or written, or its speech queued) must not start speaking over them: cut it first."""
+        if self._answer_in_flight():
+            self._interrupt()
+        self._begin(first)
+
+    def _answer_in_flight(self) -> bool:
+        answering = any(t.heard.is_set() and t.thread is not None and t.thread.is_alive() for t in self._turns if not t.probe)
+        return answering or not self._assistant.wait_idle(0.0)
 
     def _open_probe(self) -> None:
         now = self._clock()
@@ -514,14 +613,14 @@ class VoiceLoop:
     def status(self) -> dict:
         """Counters and thresholds of the barge-in policy and the canceller's numbers: content-free, for a person to read.
         Never audio, never a word of what was said."""
-        echo = getattr(self._device, "echo", None)
+        echo = self._device.echo
         return {
             "barge_in": {**self._gate.counters, "probes": self._probes_opened, "thresholds": self._gate.thresholds},
             "echo": None
             if echo is None
             else {
-                "canceller": getattr(self._device, "echo_name", None),
-                "reference_underruns": getattr(self._device, "reference_underruns", 0),
+                "canceller": self._device.echo_name,
+                "reference_underruns": self._device.reference_underruns,
                 "measured": echo.measured,
                 "erle_db": None if echo.erle_db is None else round(echo.erle_db, 1),
                 "delay_ms": echo.delay_ms,
@@ -537,11 +636,12 @@ class VoiceLoop:
     def _begin(self, first: bytes) -> None:
         self._active_at = self._clock()
         turn = self._turn = _Turn()
+        turn.frames = 1  # the detector counts the frame that began the turn, not the pre-roll or the lead-in
         turn.audio.put(first)
         self._start(turn)
 
-    def _start(self, turn: _Turn) -> None:
-        turn.thread = threading.Thread(target=self._work, args=(turn,), name="glide-voice-turn", daemon=True)
+    def _start(self, turn: _Turn, target: Callable[[_Turn], None] | None = None) -> None:
+        turn.thread = threading.Thread(target=target or self._work, args=(turn,), name="glide-voice-turn", daemon=True)
         self._turns = [t for t in self._turns if t.thread is not None and t.thread.is_alive()] + [turn]
         turn.thread.start()
 
@@ -561,19 +661,52 @@ class VoiceLoop:
         self._gate.reset()
         self._hold(False)
         self._abandon_probe()
+        self._cancel_confirmation()
         if turn is not None:
             turn.audio.put(TurnAborted())
 
     def _work(self, turn: _Turn) -> None:
         self._local.turn = turn
         try:
-            self._assistant.handle_audio(turn.chunks(), act=self._act, wait=False, language=self._language, stop_only=turn.probe)
+            # a request that is wanted for real waits for its yes: until then it is a dry run, which only says its first move
+            reply = self._assistant.handle_audio(
+                turn.chunks(), act=self._act and self._approval is None, wait=False, language=self._language, stop_only=turn.probe
+            )
+            if turn.confirmed is not None:
+                self._run_confirmed(turn.confirmed)
+            elif self._approval is not None and reply.route == "computer":
+                self._offer(reply)
         except TurnAborted:
             pass  # already reported by whoever aborted it
         except Exception as exc:  # one bad turn must not end hands-free listening; the type is all that is said
             self._assistant.io.warn(f"a voice turn failed ({type(exc).__name__})")
         finally:
             turn.heard.set()
+
+    def _offer(self, reply) -> None:
+        """A request began a computer task, as a dry run: once it has ended and its description has been heard, the person
+        may confirm it. A task that was stopped, failed or was not a dry run is not offered."""
+        task = reply.task
+        if task is None or not reply.heard or not task.wait(DRY_RUN_WAIT_S):
+            return
+        result = task.result
+        if result is None or result.stopped or result.outcome != "dry run":
+            return
+        self._assistant.wait_idle(PREVIEW_HEARD_S)
+        self._approval.open(reply.heard, reply.language)
+
+    def _run_confirmed(self, pending: Pending, *, standalone: bool = False) -> None:
+        """The yes was given: the same request again, now for real. It is routed again, and may be answered differently."""
+        try:
+            self._assistant.handle_text(pending.text, act=True, wait=False, hint_language=pending.language)
+        except Exception as exc:
+            if not standalone:
+                raise
+            self._assistant.io.warn(f"a voice turn failed ({type(exc).__name__})")
+
+    def _cancel_confirmation(self) -> None:
+        if self._approval is not None:
+            self._approval.cancel()
 
     # -- idle -----------------------------------------------------------------------------------
 

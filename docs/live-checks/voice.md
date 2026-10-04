@@ -117,6 +117,23 @@ Checks:
       never step counts, effect counts, run folder names or "N remain".
 - [ ] A reply containing markdown, a link or a list is read as plain words.
 
+## 6. Confirming a task (`glide voice --act`)
+
+With `--act` the hands-free loop runs a spoken request that uses the screen as a dry run first (`confirm_tasks` is on
+unless the file says otherwise). Nothing is clicked or typed until the confirm phrase. The prompt is shown on screen,
+not spoken, and the phrase and the seconds are in `[speech]` (`confirm_phrase`, `confirm_timeout_s`).
+
+- [ ] Ask for something on the screen. Glide describes the first move (spoken) and the screen shows what to say and for how
+      long. Nothing on the Mac has moved.
+- [ ] Say exactly the phrase within the time: the same request now runs for real, and the phrase itself is not answered
+      as a request ("I'm not sure what you mean" would be a bug).
+- [ ] Say the phrase with other words around it, or only part of it, or "yes" or "okay": nothing runs, the screen says it
+      was not confirmed, and a second try does not work (one answer per window).
+- [ ] Wait past the time, then say the phrase: nothing runs.
+- [ ] Say "stop", or talk over Glide, or pause the loop while a task waits: it is dropped and the phrase does nothing.
+- [ ] Play speech from another device that contains the phrase in the room while no task waits: nothing happens at all.
+- [ ] With `confirm_tasks = false` a request acts at once. That is the unprotected mode: anything audible can start a task.
+
 ## Not covered even by this list
 
 Noisy rooms, Bluetooth headsets that change sample rate when the microphone opens (the reference is converted from the

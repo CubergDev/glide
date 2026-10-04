@@ -176,6 +176,9 @@ class _Assistant:
     def interrupt_speech(self, *, drop_pending=True):
         self._log.append(("interrupt", drop_pending))
 
+    def wait_idle(self, timeout=None):
+        return True
+
     def handle_audio(self, *a, **k):
         raise AssertionError("turn threads are not run in a trace")
 
@@ -213,6 +216,9 @@ class _Device:
             self.loop._stop.set()
             return None
         return self.schedule[self.index]["frame"]
+
+    echo_name = "fake"
+    reference_underruns = 0
 
     def hold_echo_stats(self, hold):
         self.log.append(("hold", hold))

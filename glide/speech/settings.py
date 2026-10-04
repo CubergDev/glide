@@ -15,23 +15,30 @@ barge_min_voiced_ms = 190  # how long you must speak over Glide before it stops 
 barge_margin_db = 8.0      # how far above the echo still left in the microphone your voice must be (3-30)
 barge_min_erle_db = 6.0    # no interruption by voice until the canceller has removed at least this much echo (0-30)
 stop_phrases = []          # whole-utterance phrases that stop Glide, besides the built-in ones ("stop", "never mind", ...)
+confirm_tasks = true       # with --act: a spoken request first runs as a dry run, and only the confirm phrase makes it real
+confirm_phrase = "confirm and run it"  # the whole utterance that confirms (two words or more, and not a stop phrase)
+confirm_timeout_s = 10.0   # how long after the dry run is described the phrase is accepted (2-60); silence or anything else is a no
 ```
 
 Keys come from this table or from nowhere: there are no defaults for a model location or a checksum, because
-a pinned download that was not configured is not a pinned download.
+a pinned download that was not configured is not a pinned download. `confirm_tasks = false` is the one way to let
+hands-free speech act on this Mac without a per-task yes: any audible speech can then start a task, so it is a choice
+to make on purpose (see approval.py).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 
-from ..assistant.router import normalize
+from ..assistant.router import is_stop, normalize, stop_phrases
 from ..providers.config import ConfigError
 from .echo import ECHO_CHOICES
 from .vad import MAX_SILENCE_MS, MIN_SILENCE_MS
 
 VAD_CHOICES = ("auto", "silero", "energy")
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 OUTPUT_RATES = (16000, 22050, 24000, 44100, 48000)
 
 
@@ -66,6 +73,7 @@ _RANGES = (
     ("barge_min_voiced_ms", 96, 1000, ""),
     ("barge_margin_db", 3, 30, ""),
     ("barge_min_erle_db", 0, 30, ""),
+    ("confirm_timeout_s", 2, 60, " seconds"),
 )
 _CHOICES = (("output_rate", OUTPUT_RATES), ("vad", VAD_CHOICES), ("echo_canceller", ECHO_CHOICES))
 
@@ -93,6 +101,9 @@ class SpeechSettings:
     barge_margin_db: float = 8.0
     barge_min_erle_db: float = 6.0
     stop_phrases: tuple[str, ...] = ()
+    confirm_tasks: bool = True
+    confirm_phrase: str = "confirm and run it"
+    confirm_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
         for name, low, high, unit in _RANGES:
@@ -107,8 +118,12 @@ class SpeechSettings:
             raise ConfigError("[speech] vad = 'silero' needs vad_model_path and vad_model_sha256")
         if not all(isinstance(p, str) and normalize(p) for p in self.stop_phrases):
             raise ConfigError("[speech] stop_phrases must be a list of non-empty phrases")
+        if len(normalize(self.confirm_phrase).split()) < 2 or is_stop(self.confirm_phrase, stop_phrases(self.stop_phrases)):
+            raise ConfigError("[speech] confirm_phrase must be at least two words and not a stop phrase")
         if self.vad_model_url and not self.vad_model_url.startswith("https://"):
-            raise ConfigError("[speech] vad_model_url must be an https:// address")
+            raise ConfigError("[speech] vad_model_url must be an https URL")
+        if self.vad_model_sha256 and not _SHA256.fullmatch(self.vad_model_sha256):
+            raise ConfigError("[speech] vad_model_sha256 must be 64 hexadecimal digits")
 
     @property
     def silero_configured(self) -> bool:
@@ -117,6 +132,8 @@ class SpeechSettings:
     @classmethod
     def from_mapping(cls, table: Mapping | None) -> SpeechSettings:
         """The settings in a `[speech]` table. An unknown key is an error: a misspelt `headset` must not silently mean speakers."""
+        if table is not None and not isinstance(table, Mapping):
+            raise ConfigError("[speech] must be a table")
         table = dict(table or {})
         known = {f.name: f.type for f in fields(cls)}
         unknown = sorted(set(table) - set(known))

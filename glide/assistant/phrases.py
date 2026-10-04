@@ -85,6 +85,16 @@ PHRASES: dict[str, dict[str, str]] = {
         "zh": "抱歉，我没听清。",
     },
     "stopped": {"en": "Stopped.", "yue": "停咗。", "zh": "已停止。"},
+    "confirm_task": {
+        "en": 'To do this for real, say "{phrase}" within {seconds} seconds.',
+        "yue": "要真係做，請喺{seconds}秒內講「{phrase}」。",
+        "zh": "要真正执行，请在{seconds}秒内说“{phrase}”。",
+    },
+    "confirm_lapsed": {
+        "en": "Not confirmed, so nothing was done.",
+        "yue": "未確認，所以冇做任何嘢。",
+        "zh": "没有确认，所以什么都没做。",
+    },
 }
 
 
