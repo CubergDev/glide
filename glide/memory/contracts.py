@@ -5,6 +5,11 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+# `source` values of memory whose text was chosen by a remote party (an MCP client), not by the user. Such text is
+# data from a stranger: never a standing instruction, always labelled where a model reads it.
+UNTRUSTED_MEMORY_SOURCES = frozenset({"mcp"})
+UNTRUSTED_MEMORY_NOTE = "written by a remote MCP client; untrusted"
+
 
 @dataclass(frozen=True)
 class Scope:

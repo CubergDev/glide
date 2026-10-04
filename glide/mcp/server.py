@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from importlib import metadata
@@ -31,6 +32,11 @@ from glide.memory.store import Store
 # Wire revisions this server can speak, newest first. These are protocol facts, not provider configuration.
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 MAX_MESSAGE_BYTES = 1048576
+# What a remote client may write into Glide's memory (see `memory_tools`). Its notes are data, not instructions.
+MCP_MEMORY_MAX_TEXT = 500
+MCP_MEMORY_MAX_COUNT = 50
+MCP_MEMORY_KEY_PREFIX = "mcp:"
+_PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR = -32700, -32600, -32601, -32602, -32603
 _JSON_TYPES = {
@@ -75,7 +81,8 @@ def check_arguments(schema: dict[str, Any], arguments: Any) -> dict[str, Any]:
     for key, value in arguments.items():
         if key not in properties:
             if schema.get("additionalProperties") is False:
-                raise ToolInputError(f"unknown argument {key!r}")
+                # the name is the client's own text: shown back only when it is a plain identifier
+                raise ToolInputError(f"unknown argument {key!r}" if _PLAIN_NAME.match(key) else "unknown argument")
             continue
         wanted = properties[key].get("type")
         expected = _JSON_TYPES.get(wanted) if isinstance(wanted, str) else None
@@ -204,8 +211,27 @@ class GlideMCPServer:
 
 
 def memory_tools(store: Store, scope: Scope, *, write: bool = False) -> list[ServerTool]:
-    """Glide's memory as MCP tools, for a fixed host-chosen scope. Writes only when `write` is True."""
-    levels = ["user", "project", "session"]
+    """Glide's memory as MCP tools, for a fixed host-chosen scope. Writes only when `write` is True.
+
+    A remote client is not the user, so what it writes is kept apart from what the user saved: its notes get the
+    source "mcp" and the kind "note" (never a standing preference), keys under "mcp:" so they cannot replace a
+    memory of the user's, at most MCP_MEMORY_MAX_TEXT characters and MCP_MEMORY_MAX_COUNT notes, and it can forget
+    only its own notes. The user sees and removes them with `glide memory recall` and `glide memory forget`.
+    """
+
+    def remember(arguments: dict) -> dict:
+        text, key = arguments["text"], MCP_MEMORY_KEY_PREFIX + arguments["key"]
+        if len(text) > MCP_MEMORY_MAX_TEXT:
+            raise ValueError(f"a remote note is limited to {MCP_MEMORY_MAX_TEXT} characters")
+        notes = {row["key"] for row in store.memories(scope) if row["source"] == "mcp"}
+        if key not in notes and len(notes) >= MCP_MEMORY_MAX_COUNT:
+            raise ValueError(f"at most {MCP_MEMORY_MAX_COUNT} remote notes may be kept; ask the user to clear some")
+        return {"id": store.remember(scope, key, text, kind="note", source="mcp", level=arguments.get("level", "project"))}
+
+    def forget(arguments: dict) -> dict:
+        own = any(row["id"] == arguments["id"] and row["source"] == "mcp" for row in store.memories(scope))
+        return {"forgotten": own and store.forget(scope, arguments["id"])}
+
     tools = [
         ServerTool(
             "glide.memory.recall",
@@ -219,31 +245,29 @@ def memory_tools(store: Store, scope: Scope, *, write: bool = False) -> list[Ser
         tools += [
             ServerTool(
                 "glide.memory.remember",
-                "Save a keyed memory. Credentials are refused.",
+                f"Save a short keyed note (at most {MCP_MEMORY_MAX_TEXT} characters). It is kept as data from you, never as an instruction to Glide. Credentials are refused.",
                 {
                     "type": "object",
                     "properties": {
                         "key": {"type": "string"},
                         "text": {"type": "string"},
-                        "level": {"type": "string", "enum": levels},
+                        "level": {"type": "string", "enum": ["user", "project", "session"]},
                     },
                     "required": ["key", "text"],
                     "additionalProperties": False,
                 },
-                lambda args: {
-                    "id": store.remember(scope, args["key"], args["text"], source="mcp", level=args.get("level", "project"))
-                },
+                remember,
             ),
             ServerTool(
                 "glide.memory.forget",
-                "Delete one memory by id.",
+                "Delete one of your own notes by id.",
                 {
                     "type": "object",
                     "properties": {"id": {"type": "string"}},
                     "required": ["id"],
                     "additionalProperties": False,
                 },
-                lambda args: {"forgotten": store.forget(scope, args["id"])},
+                forget,
             ),
         ]
     return tools

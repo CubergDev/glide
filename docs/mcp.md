@@ -30,13 +30,18 @@ What is offered is decided by the host, never by the client:
 - By default, **no tools**.
 - `server_memory = "read"` registers `glide.memory.recall`; `"write"` adds `glide.memory.remember` and
   `glide.memory.forget`. The user, project and session are fixed by the host (`--user/--project/--session`); the
-  tool schemas have no scope argument. Remembered text is labelled `source = "mcp"`; credentials are refused.
+  tool schemas have no scope argument. What a remote client writes is data from a stranger, not an instruction (see
+  "Memory written over MCP" in memory.md): it is stored with `source = "mcp"` and `kind = "note"`, under keys
+  prefixed `mcp:` so it cannot replace a memory the user saved, at most 500 characters and 50 notes, and the client
+  can `forget` only its own notes. Credentials are refused. `glide.memory.recall` returns every memory visible in
+  the host's scope, the user's own included: choose `"read"` only for a client you trust with that.
 - A tool that touches this machine (screen, input, apps, files) must be registered with `needs_approval=True`; the
   server then needs an `approve` callback that returns exactly `True` for that call, or it refuses. Glide registers
   no such tool, so the screen-driving loop is never exposed implicitly. Per-run approval for any future one is a
   host decision (D5).
-- Arguments are bounded (1 MiB per message), checked against the tool's schema subset and never echoed in errors. A
-  failing tool reports only its exception type. No call is retried.
+- Arguments are bounded (1 MiB per message), checked against the tool's schema subset and their values never echoed
+  in errors (an unknown argument's name is shown only when it is a plain identifier). A failing tool reports only
+  its exception type. No call is retried.
 
 ## Glide as a client (`glide.mcp.client`)
 

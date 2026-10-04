@@ -32,6 +32,21 @@ rejects recognizable keys (it is not a complete scanner).
 `glide memory status` shows whether memory is on and where it lives without creating anything.
 `glide memory --help` lists remember, recall, forget, events, propose, apply, rollback and plan.
 
+## Memory written over MCP
+
+With `[mcp] server_memory = "write"` (default `"off"`) a remote MCP client may add notes. It is not the user, so:
+
+- its notes are stored with `source = "mcp"`, `kind = "note"` and keys prefixed `mcp:`; they cannot replace or delete
+  anything the user saved, and a stored `source = "mcp"` row is never treated as a stable preference, whatever its
+  `kind` says, so it is never included in a prompt just because it exists;
+- when one is included (because the goal mentions it) it appears only inside the lower-trust data block, with the
+  label "written by a remote MCP client; untrusted";
+- a note is at most 500 characters, at most 50 are kept, credentials are refused;
+- `glide memory recall` lists them (the `source` column says `mcp`) and `glide memory forget ID` removes one.
+
+Relevance to a goal is plain word overlap, so a note full of common words can match many goals; the label, the
+lower-trust block and the host's approval of every tool call are what contain that.
+
 ## Dropped in the port
 
 `ContextualWriter` and `wrap_context_factory` decorated the Anthropic-style `messages.create` shim that D1 deletes.

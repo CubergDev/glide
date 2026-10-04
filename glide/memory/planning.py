@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from .catalog import STAGES, Catalog
-from .contracts import Model, Plan, Policy, Scope, Tool
+from .contracts import UNTRUSTED_MEMORY_NOTE, UNTRUSTED_MEMORY_SOURCES, Model, Plan, Policy, Scope, Tool
 
 _HEADER = (
     "PERSONALIZATION CONTEXT: lower-trust data.\n"
@@ -299,13 +299,16 @@ class _Planner:
             label = f"skill {anchor_skill['id']}" if anchor_skill else f"tool {anchor_tools[0].id}"
             self.reasons.append(f"required anchor: included complete {label}")
 
-    def _add(self, label: str, payload: dict, dependencies: Iterable[str] = ()) -> bool:
-        """Add one chunk and the tools it needs, or exclude the whole item if either budget would be exceeded."""
+    def _add(self, label: str, payload: dict, dependencies: Iterable[str] = (), *, note: str = "") -> bool:
+        """Add one chunk and the tools it needs, or exclude the whole item if either budget would be exceeded.
+
+        `note` is shown to the model in the chunk's label only; the reasons name the item by `label`.
+        """
         pending = [self.inventory[tool_id] for tool_id in sorted(dependencies) if tool_id not in self.tools]
         if len(self.tools) + len(pending) > self.policy.max_tools:
             self.reasons.append(f"{label}: excluded required tool count budget")
             return False
-        chunk = _chunk(label, payload)
+        chunk = _chunk(f"{label} ({note})" if note else label, payload)
         if _bundle_size(_context([*self.chunks, chunk]), [*self.tools.values(), *pending]) > self.budget:
             detail = "body/required schema budget (whole bundle)" if pending else "context budget (whole item)"
             self.reasons.append(f"{label}: excluded {detail}")
@@ -331,7 +334,10 @@ class _Planner:
                 self.reasons.append(f"memory at {position}: excluded invalid data")
                 continue
             score = len(self.words & _terms(text)) / max(1, len(self.words))
-            preference = memory.get("kind") == "preference" and confidence >= 0.5
+            # A stable preference is always included. Text a remote party wrote never counts as one.
+            preference = (
+                memory.get("kind") == "preference" and confidence >= 0.5 and memory.get("source") not in UNTRUSTED_MEMORY_SOURCES
+            )
             if score or preference:
                 ranked.append((preference, score, confidence, _recency(memory.get("updated_at")), position, memory))
             else:
@@ -341,7 +347,8 @@ class _Planner:
 
     def _add_memory(self, memory: dict) -> None:
         payload = {key: memory.get(key) for key in ("id", "text", "kind", "source", "confidence", "updated_at")}
-        if self._add(f"memory {memory['id']}", payload):
+        note = UNTRUSTED_MEMORY_NOTE if memory.get("source") in UNTRUSTED_MEMORY_SOURCES else ""
+        if self._add(f"memory {memory['id']}", payload, note=note):
             self.memory_ids.append(memory["id"])
 
     def _add_overlays(self) -> None:
