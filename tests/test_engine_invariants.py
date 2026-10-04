@@ -290,3 +290,25 @@ def test_each_provider_declares_whether_its_inspection_is_passive():
         True,
         False,
     ]
+
+
+# -- finding 9: no engine has a classifier of its own that skips the provider chains -----------------------------------
+
+
+@pytest.mark.parametrize("engine", ["legacy", "structured"])
+def test_a_run_without_a_classifier_factory_is_refused_before_anything_is_built(monkeypatch, tmp_path, engine):
+    from glide.computer import runner
+
+    monkeypatch.setattr(runner, "_run", lambda *a, **kw: pytest.fail("a run started with no classifier from the chains"))
+    cfg = runner.RunConfig("goal", tmp_path / engine, engine=engine)
+    with pytest.raises(ValueError, match=r"classifier_factory.*glide_config\.classifier"):
+        runner.run(cfg, lambda *a: None)
+    assert not (tmp_path / engine).exists()  # not even a run folder
+
+
+def test_the_runner_builds_no_hosted_classifier():
+    import inspect
+
+    from glide.computer import runner
+
+    assert "TypeSafeClient" not in inspect.getsource(runner).replace("`TypeSafeClient`", "")

@@ -527,7 +527,6 @@ def drive(
     world.install(monkeypatch)
     fake = FakeTypeSafe(policy, noul)
     world.fake = fake
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: fake)
     cfg = RunConfig(goal=goal, out=tmp_path / "run", act=True, steps=steps, delay=0, record_content=record_content)
     if handoffs is not None:
         cfg.handoffs = handoffs
@@ -549,5 +548,6 @@ def drive(
             history=history,
             ask=ask if replies is not None else None,
         ),
+        classifier_factory=lambda: fake,
         **({"control": control} if control is not None else {}),
     )

@@ -30,11 +30,11 @@ def run_with(monkeypatch, tmp_path, policy, control, *, record_content=False, wr
     world = one_page()
     world.install(monkeypatch)
     classifier = FakeTypeSafe(policy)
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: classifier)
     cfg = RunConfig(goal, tmp_path, act=True, delay=0, record_content=record_content)
     state = runner.run(
         cfg,
         lambda client, history: Context(goal, "Google Chrome", None, client, writer or FakeWriter(), history),
+        classifier_factory=lambda: classifier,
         control=control,
     )
     return world, state
@@ -87,10 +87,10 @@ def test_interrupted_dispatch_gets_one_readback_and_is_never_replayed(monkeypatc
 
     monkeypatch.setattr(runner, "perform", interrupted)
     classifier = FakeTypeSafe(scripted(("type_text", None), ("type_text", None)))
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: classifier)
     state = runner.run(
         RunConfig("Find", tmp_path, act=True, delay=0),
         lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
         control=control,
     )
     assert state.uncertain and state.readback == "captured; completion unknown"
@@ -208,11 +208,11 @@ def test_a_dry_run_keeps_its_first_move_in_memory_only(monkeypatch, tmp_path):
     world = World([Page(name="home", items=["Tickets", "Help"], url="https://example.test")])
     world.install(monkeypatch)
     classifier = FakeTypeSafe(scripted(("click_item", "Tickets")))
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: classifier)
     events = []
     state = runner.run(
         RunConfig("Open tickets", tmp_path, act=False, delay=0),
         lambda client, history: Context("Open tickets", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
         control=RunControl("task", events.append),
     )
     assert state.outcome == "dry run" and state.would_do == "click 'Tickets'" and not world.log
@@ -232,7 +232,7 @@ def test_the_default_engine_is_the_legacy_loop_and_an_unknown_engine_is_refused(
     cfg = RunConfig("goal", tmp_path)
     assert cfg.engine == "legacy" and cfg.record_content is False and cfg.readiness_timeout == DEFAULT_READINESS_TIMEOUT
     with pytest.raises(ValueError, match="Unknown execution engine"):
-        runner.run(RunConfig("goal", tmp_path, engine="nope"), lambda *a: None)
+        runner.run(RunConfig("goal", tmp_path, engine="nope"), lambda *a: None, classifier_factory=object)
 
 
 def test_a_replay_runs_the_legacy_loop_even_when_structured_is_asked_for(monkeypatch, tmp_path):
@@ -243,8 +243,8 @@ def test_a_replay_runs_the_legacy_loop_even_when_structured_is_asked_for(monkeyp
         return RunState(outcome="done")
 
     monkeypatch.setattr(runner, "_run", fake_run)
-    runner.run(RunConfig("goal", tmp_path, engine="structured", image=tmp_path / "x.png"), lambda *a: None)
-    runner.run(RunConfig("goal", tmp_path, engine="legacy"), lambda *a: None)
+    runner.run(RunConfig("goal", tmp_path, engine="structured", image=tmp_path / "x.png"), lambda *a: None, object)
+    runner.run(RunConfig("goal", tmp_path, engine="legacy"), lambda *a: None, object)
     assert seen == ["legacy", "legacy"]  # run() never asked for the structured engine on a replay
 
 

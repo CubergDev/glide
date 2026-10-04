@@ -10,8 +10,6 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from typesafe_sdk import TypeSafeClient
-
 from ..providers.errors import AllProvidersFailed, ProviderError
 from . import diagnostics
 from .actions import Context, perform
@@ -134,10 +132,9 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunContro
     hands the run to `execution.engine.run_execution`, with the same classifier, control and recorder.
 
     `classifier_factory()` returns the classifier as a context manager with the `system_one` of
-    `TypeSafeClient`: a `ChainedClassifier`, an `LLMClassifier`, or any stand-in. Left out, the hosted
-    TypeSafe client is used as before by the legacy loop (looked up here, not bound at import, so replacing
-    `runner.TypeSafeClient` still replaces it). The structured engine has no such default: it refuses to start
-    without a factory, so its classifier always comes from the provider chains (D7).
+    `TypeSafeClient`: a `ChainedClassifier`, an `LLMClassifier`, or any stand-in. It is required by both engines: the
+    classifier always comes from the provider chains (`glide_config.classifier`), so a failover is never skipped and
+    every switch is visible (D7). A run with none is refused with a ValueError before anything is made.
 
     `control` is the run's stop gate (see `control.py`). Left out, a private one is made, so a caller that
     never stops the run needs nothing. Its events are delivered to its own `emit`; nothing is printed.
@@ -149,6 +146,8 @@ def run(cfg: RunConfig, ctx_factory, classifier_factory=None, control: RunContro
     `cfg.record_content` is set. Otherwise the run folder holds run.json with counts, timings, the outcome
     and a scrubbed `failure`.
     """
+    if classifier_factory is None:
+        raise ValueError("a run needs classifier_factory: pass the provider chains' classifier (glide_config.classifier)")
     if cfg.replay:
         cfg = replace(cfg, engine="legacy")  # a replay must never inspect or act on the live machine
     control = control or RunControl(str(uuid.uuid4()))
@@ -210,13 +209,9 @@ def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
     if cfg.engine not in ("legacy", "structured"):
         raise ValueError("Unknown execution engine")
     if cfg.engine == "structured":
-        if classifier_factory is None:
-            raise ValueError("the structured engine takes its classifier from the provider chains: pass classifier_factory")
         from .execution.engine import run_execution
 
         return run_execution(cfg, ctx_factory, classifier_factory)
-    # Looked up here, not bound at import, so replacing `runner.TypeSafeClient` still replaces it.
-    classifier_factory = classifier_factory if classifier_factory is not None else TypeSafeClient
     cfg.out.mkdir(parents=True, exist_ok=True)
     log = Log(cfg.out / "run.log" if cfg.record_content else None, enabled=cfg.record_content)
     log(f"run folder: {cfg.out}")
