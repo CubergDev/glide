@@ -293,6 +293,7 @@ class Speaker:
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
         self._lane: _Lane | None = None
+        self._closed = False  # set by `close`: nothing is said after it
         self.first_audio_at: float | None = None  # when the first chunk reached the player since `mark`
 
     def __repr__(self) -> str:
@@ -311,7 +312,7 @@ class Speaker:
         if not has_content(cleaned) or is_internal_status(cleaned):
             return False
         with self._lock:
-            if only_if is not None and not only_if():
+            if self._closed or (only_if is not None and not only_if()):
                 return False
             if self._lane is None:
                 self._lane = lane = _Lane()
@@ -356,6 +357,8 @@ class Speaker:
         return self._player.wait_idle(remaining)
 
     def close(self) -> None:
+        with self._lock:
+            self._closed = True
         self.cancel()
         close = getattr(self._player, "close", None)
         if close is not None:
