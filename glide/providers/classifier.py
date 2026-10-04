@@ -75,7 +75,7 @@ from typesafe_sdk import (
 
 from glide.computer.control import checkpoint
 
-from .base import ChatResult, ProviderSpec, Usage
+from .base import ChatFacade, ChatResult, ProviderSpec, Usage
 from .chain import Chain, ChainPolicy, Slot, SwitchEvent
 from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, redact, snippet, status_error
 
@@ -327,20 +327,6 @@ def _answers(text: str, asks: Sequence[_Ask]) -> dict[str, ChoiceAnswer | NoulAn
 # ---------------------------------------------------------------------------------------------
 # LLMClassifier
 # ---------------------------------------------------------------------------------------------
-
-
-class ChatFacade(Protocol):
-    """What `LLMClassifier` needs of an LLM: the `chat` of base.LLMClient, or a facade over a chain of them."""
-
-    def chat(
-        self,
-        messages: Sequence[dict],
-        *,
-        max_tokens: int = ...,
-        temperature: float = ...,
-        schema: dict | None = ...,
-        timeout: float | None = ...,
-    ) -> ChatResult: ...
 
 
 class LLMClassifier:
@@ -608,7 +594,7 @@ class ChainedClassifier:
     def __init__(self, chain: Chain[ClassifierClient]):
         self.chain = chain
         self.last_slot: str | None = None
-        self._clients = [slot.client for slot in chain._slots]
+        self._clients = chain.clients
 
     @classmethod
     def from_clients(

@@ -13,8 +13,7 @@ by the words it carries, so a reply is used whole or not at all: a connection th
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Protocol
+from collections.abc import Mapping
 
 from glide.computer.control import RunControl, checkpoint, controlled, current_control
 from glide.computer.generation import (
@@ -26,7 +25,7 @@ from glide.computer.generation import (
     image_url,
 )
 
-from .base import ChatResult, Usage
+from .base import ChatFacade, Usage
 from .errors import AllProvidersFailed, ProviderError
 
 # Which LLM facade serves which `GenerationRequest.role`. A role is a job, never a model: the chain decides which
@@ -39,20 +38,6 @@ RESEARCH_PREFIX = "research"
 # A reply that ended for one of these reasons is cut short, not finished. (An ordinary stop, or a provider
 # that names no reason, is finished.)
 CUT_SHORT = frozenset({"length", "content_filter", "error"})
-
-
-class ChatFacade(Protocol):
-    """What `ChainWriter` needs from an LLM facade: its `chat`, which fails over inside itself."""
-
-    def chat(
-        self,
-        messages: Sequence[dict],
-        *,
-        max_tokens: int = 512,
-        temperature: float = 0.0,
-        schema: dict | None = None,
-        timeout: float | None = None,
-    ) -> ChatResult: ...
 
 
 class ChainWriter:

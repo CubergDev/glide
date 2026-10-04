@@ -33,7 +33,7 @@ from typesafe_sdk import Choice
 from glide.computer.config import load_dotenv
 
 from .base import Audio
-from .config import ALL_ROLES, EXTRA_LLM_ROLES, ROLES, ConfigError, GlideConfig, SlotInfo, load_config
+from .config import ALL_ROLES, ConfigError, GlideConfig, SlotInfo, load_config
 from .errors import AllProvidersFailed, ProviderError
 
 PROBE_PROMPT = "Reply with the single word: ok"
@@ -72,7 +72,7 @@ def doctor(
     seconds, and the adapters' own limit applies when it is left out.
     """
     rows: list[Row] = []
-    for role in roles or (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in config.roles)):  # planner, research: only if configured
+    for role in roles or config.active_roles:
         rows.extend(_role_rows(config, role, live, timeout, clock))
     return rows
 
@@ -242,6 +242,32 @@ def failed(rows: Sequence[Row]) -> bool:
     return any(r.status.startswith("failed") or r.status == "error" for r in rows)
 
 
+def report(
+    config: GlideConfig,
+    *,
+    live: bool = False,
+    roles: Sequence[str] | None = None,
+    timeout: float | None = None,
+    scrub: Callable[[str], str] | None = None,
+) -> list[Row]:
+    """Print what `glide doctor` shows (the file, the notices, the table) and return the rows.
+
+    This is the one code path of the command: `main` below and `glide doctor` in glide/cli.py both end here. `scrub`
+    is applied to every notice before it is shown and defaults to the configuration's own (no key is ever printed).
+    """
+    clean = scrub or config.scrub
+    print(f"config: {config.source}")
+    if config.defaulted:
+        print(f"built-in chains in use for: {', '.join(config.defaulted)}")
+    for warning in config.warnings:
+        print(f"warning: {clean(warning)}")
+    if live:
+        print("live: one tiny request to each slot that has a key")
+    rows = doctor(config, live=live, roles=roles, timeout=timeout)
+    print(format_rows(rows))
+    return rows
+
+
 def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None) -> int:
     """The `glide doctor` command: 0 when nothing failed, 1 when something did, 2 when the file cannot be loaded.
 
@@ -264,15 +290,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         print(f"glide doctor: {e}", file=sys.stderr)
         return 2
     try:
-        print(f"config: {config.source}")
-        if config.defaulted:
-            print(f"built-in chains in use for: {', '.join(config.defaulted)}")
-        for warning in config.warnings:
-            print(f"warning: {warning}")
-        if args.live:
-            print("live: one tiny request to each slot that has a key")
-        rows = doctor(config, live=args.live, roles=args.role, timeout=args.timeout)
-        print(format_rows(rows))
+        rows = report(config, live=args.live, roles=args.role, timeout=args.timeout)
         return 1 if failed(rows) else 0
     finally:
         with contextlib.suppress(Exception):

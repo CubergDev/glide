@@ -82,6 +82,21 @@ class LLMClient(Protocol):
         ...
 
 
+class ChatFacade(Protocol):
+    """What a caller of an LLM needs: its `chat`. An `LLMClient`, or the `LLM` facade over a chain of them, which
+    fails over inside itself (the writer and the classifier take either)."""
+
+    def chat(
+        self,
+        messages: Sequence[dict],
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        schema: dict | None = None,
+        timeout: float | None = None,
+    ) -> ChatResult: ...
+
+
 @dataclass(frozen=True)
 class Audio:
     pcm: bytes

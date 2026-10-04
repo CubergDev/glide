@@ -4,7 +4,7 @@ OpenRouter, OpenAI, DeepSeek, Gemini's compatibility endpoint and local servers 
 differ only in what they refuse: a reasoning model wants `max_completion_tokens` and no temperature, one server
 has no `json_schema` mode, another no `reasoning_effort`. So the client asks for the most it can, learns from each
 400 what this endpoint accepts, remembers that for the life of the instance, and asks again. The schema is also
-spelled out in the system prompt (the pattern of `computer/writer.py`, `_structured`) because a server may take
+spelled out in the system prompt because a server may take
 `response_format` and ignore it, and the reply is checked for JSON before it is returned, so a model that talked
 instead of answering fails over (kind "content") rather than reaching the caller.
 
@@ -660,8 +660,7 @@ def _int(value: object) -> int:
 
 
 def _usage(raw: object) -> Usage:
-    """Chat Completions usage with the cached tokens apart: `prompt_tokens` counts them too (as openai_writer._usage
-    does). DeepSeek reports the cached part as `prompt_cache_hit_tokens` instead of in `prompt_tokens_details`."""
+    """Chat Completions usage with the cached tokens apart: `prompt_tokens` counts them too. DeepSeek reports the cached part as `prompt_cache_hit_tokens` instead of in `prompt_tokens_details`."""
     if not isinstance(raw, dict):
         return Usage()
     prompt = _int(raw.get("prompt_tokens", raw.get("input_tokens")))

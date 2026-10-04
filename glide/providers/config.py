@@ -807,8 +807,8 @@ class GlideConfig:
         """The writer's one `generate` call, answered by the LLM chains: by role, fast, smart, planner and research."""
         deadlines = {
             role.split(".")[1]: spec.deadline_s
-            for role in ("llm.fast", "llm.smart", "llm.planner", "llm.research")
-            if (spec := self.roles.get(role)) is not None and spec.deadline_s is not None
+            for role in ALL_ROLES
+            if role.startswith("llm.") and (spec := self.roles.get(role)) is not None and spec.deadline_s is not None
         }
         return ChainWriter(
             self.llm("fast"),
@@ -824,11 +824,16 @@ class GlideConfig:
         return self._facade(role).chain
 
     @property
+    def active_roles(self) -> tuple[str, ...]:
+        """The roles that have a chain: the five every file has, and planner and research only when the file gives them one."""
+        return (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in self.roles))
+
+    @property
     def chains(self) -> dict[str, Chain]:
         """The chains of every role that can be built, keyed llm.fast, llm.smart, stt, tts, classifier, and
         llm.planner and llm.research when the file gives them a chain."""
         out: dict[str, Chain] = {}
-        for role in (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in self.roles)):
+        for role in self.active_roles:
             with contextlib.suppress(NoUsableProvider):  # `chain(role)` raises it, with the reason
                 out[role] = self.chain(role)
         return out

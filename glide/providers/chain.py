@@ -136,6 +136,10 @@ class Chain[T]:
         return [s.name for s in self._slots]
 
     @property
+    def clients(self) -> list[T]:
+        return [s.client for s in self._slots]
+
+    @property
     def pinned(self) -> str | None:
         return self._pinned
 
