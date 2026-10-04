@@ -46,7 +46,60 @@ def grounded_origins(goal, reply, observed, steps, search_url):
     return {_origin(a) for a in addresses if a and safe_url(a)}
 
 
+_URL = r"https?://[^\s;,]+"
+_OPEN = re.compile(rf"^\s*open\s+({_URL})\s*$", re.IGNORECASE)
+_OPEN_CLICK = re.compile(
+    rf"^\s*open\s+({_URL})\s+and\s+click\s+(?:on\s+)?(?:the\s+)?link\s+(.+?)\s*[;,]\s*success\s+means\s+(?:the\s+)?"
+    rf"(?:address|url)\s+is\s+({_URL})\s*$",
+    re.IGNORECASE,
+)
+
+
+def compile_goal(goal):
+    """The plan for a goal that states every address itself, with no model: "open ADDRESS", or "open ADDRESS and click
+    the link TEXT; success means the address is ADDRESS". Anything else is the planner's. The addresses are the user's own
+    words, so the plan is as grounded as they are; the caller still validates it like any other plan."""
+    text = " ".join(goal.split())
+    if match := _OPEN.match(text):
+        return [
+            {
+                "id": "open-page",
+                "goal": "Open the requested page.",
+                "effect": "url",
+                "target": "",
+                "value": match.group(1).rstrip(".!?"),
+                "quantity": 1,
+            }
+        ]
+    if match := _OPEN_CLICK.match(text):
+        opened, label, landing = (g.rstrip(".!?") for g in match.groups())
+        label = label.strip(" \"'\u201c\u201d")
+        return [
+            {
+                "id": "open-page",
+                "goal": "Open the requested page.",
+                "effect": "url",
+                "target": "",
+                "value": opened,
+                "quantity": 1,
+            },
+            {
+                "id": "follow-link",
+                "goal": f"Follow the link {label}.",
+                "effect": "url",
+                "target": f"link {label}",
+                "value": landing,
+                "quantity": 1,
+            },
+        ]
+    return None
+
+
 def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", context=None):
+    if not steps and not context and not reason and (compiled := compile_goal(goal)) is not None:
+        grounded = grounded_origins(goal, reply, observed, steps, browser_settings.current().search_url)
+        diagnostics.event("plan_compiled", step_count=len(compiled))
+        return validate_plan({"question": "", "steps": compiled}, observed, steps, grounded=grounded)
     if writer is None:
         raise InvalidAction("This goal needs planning, but the configured model provider is unavailable")
     packet = {
