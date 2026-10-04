@@ -8,9 +8,9 @@ browser's tabs through a scripted process, send shortcuts, and walk or scroll an
 A test that needs one of these patches it itself, after this fixture has run. Tests that exercise the real
 body keep a reference to it at import (`SCREENSHOT = macos.screenshot`) and patch what it calls.
 
-Not covered here, because the module is not in this tree yet: `glide.computer.execution.dom` binds
-`_get_json` at import (`from ..browser.cdp import _get_json`), so refusing `cdp._get_json` does not reach its
-copy. When that module is ported it is refused below as soon as it can be imported.
+`glide.computer.execution.dom` binds `_get_json` at import (`from ..browser.cdp import _get_json`), so refusing
+`cdp._get_json` alone does not reach its copy: it is refused below by name, and conftest's alias rebinding now
+replaces such copies in every imported module as well.
 """
 
 from __future__ import annotations
@@ -56,7 +56,9 @@ LATER_MODULES = (("glide.computer.execution.dom", ("_get_json",)),)
 
 def _refuse(what: str):
     def call(*args, **kwargs):
-        raise RuntimeError(f"a test reached the real machine through {what}; patch it in the test")
+        from conftest import refusal  # the shared ledger lives in conftest: this file is loaded under two names
+
+        raise refusal(what)
 
     return call
 

@@ -22,6 +22,8 @@ from glide.computer.execution import spawn
 @pytest.fixture(autouse=True)
 def no_real_process_from_execution_backends(monkeypatch):
     def refused(*args, **kwargs):
-        raise RuntimeError("a test reached the real machine through execution.spawn.start; patch the seam in the test")
+        from conftest import refusal
+
+        raise refusal("execution.spawn.start", "patch the seam in the test")
 
     monkeypatch.setattr(spawn, "start", refused)

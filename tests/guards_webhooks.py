@@ -14,7 +14,9 @@ import pytest
 
 def _refuse(what: str):
     def call(*args, **kwargs):
-        raise RuntimeError(f"a test reached the real machine through {what}; use a fake")
+        from conftest import refusal
+
+        raise refusal(what, "use a fake")
 
     return call
 

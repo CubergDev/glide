@@ -22,8 +22,8 @@ def no_real_execution_backend(monkeypatch):
     from glide.computer.execution import providers
 
     def refuse(browser="", *, act=False, on_switch=None):
-        raise RuntimeError(
-            "a test asked for a real browser or desktop backend; give the engine a fake (execution_world.give_backend)"
-        )
+        from conftest import refusal
+
+        raise refusal("the engine's real browser or desktop backend", "give it a fake (execution_world.give_backend)")
 
     monkeypatch.setattr(providers, "make_backend", refuse)

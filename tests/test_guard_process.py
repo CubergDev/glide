@@ -17,6 +17,8 @@ import webbrowser
 import pytest
 from conftest import _PROCESS_CALLS, _Refused
 
+pytestmark = pytest.mark.expect_refusals  # every test here fires the guard on purpose
+
 PRESENT = [name for name in _PROCESS_CALLS if hasattr(os, name)]
 
 
