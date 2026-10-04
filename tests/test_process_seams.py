@@ -107,13 +107,6 @@ ALLOWED: dict[str, Allowed] = {
         "a process: stale, see the report",
         "mcp",
     ),
-    "glide/computer/browser/cdp.py": Allowed(
-        Counter({"subprocess": 1, "Popen": 2}),
-        "TODO(docs/notes/cdp-launcher-removal.patch): `class Chrome` launches a Chrome of its own. Nothing in glide/ calls it "
-        "(test_nothing_in_glide_reaches_the_chrome_launcher); only tests do. The patch deletes it and the guards on it",
-        "platform (cdp.py)",
-        todo="docs/notes/cdp-launcher-removal.patch",
-    ),
 }
 
 
@@ -159,7 +152,7 @@ def test_every_allowed_entry_names_a_real_file_and_says_why():
             assert (ROOT / entry.todo).is_file(), f"{path}: the TODO names {entry.todo}, which does not exist"
 
 
-# ------------------------------------------------------------------ the Chrome launcher in cdp.py
+# ------------------------------------------------------------------ the Chrome launcher is gone
 
 LAUNCHER = {"CHROME_CANDIDATES", "DEFAULT_PROFILE", "find_chrome", "free_port", "Chrome"}
 
@@ -175,58 +168,32 @@ def launcher_references(source: str) -> list[str]:
             found += [a.name for a in node.names if a.name.split(".")[-1] in LAUNCHER]
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in LAUNCHER:
             found.append(node.value)  # an `__all__` entry
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef) and node.name in LAUNCHER:
+            found.append(node.name)
     return found
 
 
 def test_the_scan_sees_a_reference_to_the_launcher():
-    for source in ("from .cdp import Chrome", "x = cdp.find_chrome()", "Chrome()", "__all__ = ['free_port']", "import a.Chrome"):
+    for source in (
+        "from .cdp import Chrome",
+        "x = cdp.find_chrome()",
+        "Chrome()",
+        "__all__ = ['free_port']",
+        "import a.Chrome",
+        "class Chrome: pass",
+        "def find_chrome(): pass",
+    ):
         assert launcher_references(source), source
     assert not launcher_references("x = 'Google Chrome'\nclass Session: pass\nchrome = 1")
 
 
-def test_nothing_in_glide_reaches_the_chrome_launcher():
-    """The one production `Popen` outside the seams is `cdp.Chrome.start`. No module of glide/, so no entry point in
-    pyproject.toml, names Chrome, find_chrome, free_port or the constants beside them. Dynamic access cannot name them
-    either: nothing in glide/ calls `getattr` on the cdp module or imports a module by a computed name from this package
-    (platform_adapter picks macos or windows from two literals)."""
-    users = {
-        path: launcher_references(source)
-        for path, source in sources().items()
-        if path != "glide/computer/browser/cdp.py" and launcher_references(source)
-    }
-    assert not users, f"production code reaches the Chrome launcher in cdp.py: {users}"
-    for path, source in sources().items():
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
-                target = node.args[0] if node.args else None
-                assert not (isinstance(target, ast.Name) and target.id == "cdp"), f"{path}:{node.lineno} reads cdp by name"
-
-
-def test_the_launcher_is_the_only_process_start_in_cdp_py():
-    """So the patch, which deletes exactly `class Chrome` and what only it needs, leaves cdp.py with none."""
-    tree = ast.parse(sources()["glide/computer/browser/cdp.py"])
-    launcher = next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Chrome"), None)
-    if launcher is not None:  # None once the patch has landed
-        tree.body.remove(launcher)
-    rest = ast.unparse(tree)
-    remaining = {k: v for k, v in process_uses(rest).items() if k not in {"subprocess"}}  # the import goes with the class
-    assert remaining == {}, f"cdp.py starts a process outside class Chrome: {remaining}"
-
-
-def test_the_removal_patch_deletes_the_launcher_and_the_guards_on_it():
-    patch = (ROOT / "docs/notes/cdp-launcher-removal.patch").read_text()
-    removed = {line[1:].strip() for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")}
-    for needed in (
-        "class Chrome:",
-        "def find_chrome() -> str:",
-        "def free_port() -> int:",
-        "CHROME_CANDIDATES = (",
-        'DEFAULT_PROFILE = ""',
-    ):
-        assert needed in removed, needed
-    assert 'guard.strict(cdp, "find_chrome", "cdp.find_chrome")' in removed  # tests/conftest.py
-    assert "lambda tmp: cdp.find_chrome()," in removed  # tests/test_no_real_machine.py
-    assert not [line for line in removed if "Popen" in line and "refuse" in line]  # the Popen refusal stays
+def test_no_module_of_glide_launches_a_chrome_of_its_own():
+    """The one production `Popen` outside the seams was `cdp.Chrome.start`, removed because nothing called it. A launcher
+    named again anywhere in glide/ (the browser the engine drives is the person's own, over a port they opened) fails
+    here, and cdp.py has no process start at all: it is not in `ALLOWED`."""
+    users = {path: launcher_references(source) for path, source in sources().items() if launcher_references(source)}
+    assert not users, f"production code names the Chrome launcher: {users}"
+    assert not process_uses(sources()["glide/computer/browser/cdp.py"])
 
 
 # ------------------------------------------------------------------ input goes through dispatch
@@ -406,8 +373,6 @@ CDP_WRITES = ("Input.", "Page.navigate", "Target.createTarget", "Target.activate
 CDP_WRITERS = {
     "glide/computer/execution/dom.py": "DomBackend.execute and what it calls; the engine dispatches it like the native one",
     "glide/computer/execution/playwright_cli.py": "names the methods the bridge may relay (`WRITES`), and relays them for DomBackend",
-    "glide/computer/browser/act.py": "GAP, legacy: the old DOM loop sends input with no dispatch at all. Unreachable from production "
-    "(docs/notes/legacy-browser-loop.md); it goes with that loop",
 }
 
 
@@ -459,7 +424,7 @@ def blank_screen(field: Field | None = None, **changes) -> Screen:
     return Screen(image=Image.new("RGB", (2000, 1200)), scale=2.0, app="Google Chrome", field=field, url=None, **changes)
 
 
-def test_every_action_the_legacy_loop_performs_runs_under_dispatch(machine, monkeypatch):
+def test_every_action_the_native_loop_performs_runs_under_dispatch(machine, monkeypatch):
     ref = object()
     text_field = Field("AXTextField", "Search", "", "", 10, 20, 200, 30, ref=ref)
     plain_field = replace(text_field, ref=None)
@@ -539,47 +504,23 @@ def test_putting_the_work_back_in_front_after_a_question_goes_through_dispatch(m
     assert machine == [("activate", True)]
 
 
-# ------------------------------------------------------------------ the legacy DOM loop is not production
+# ------------------------------------------------------------------ the legacy DOM loop is gone
 
-LEGACY_LOOP = {f"glide.computer.browser.{name}" for name in ("runner", "decide", "perceive", "report", "act")}
-
-
-def imported_modules(source: str, package: str) -> set[str]:
-    """Every glide module `source` imports, at the top or inside a function, and each package above it (importing
-    a.b.c runs a/__init__ and a/b/__init__). `package` is the package the file sits in, for relative imports."""
-    found = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            names = [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            base = package.split(".")[: len(package.split(".")) - (node.level - 1)] if node.level else []
-            full = ".".join([*base, *([node.module] if node.module else [])])
-            names = [full, *(f"{full}.{a.name}" for a in node.names)]
-        else:
-            continue
-        for name in names:
-            parts = name.split(".")
-            found.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
-    return {m for m in found if m.startswith("glide")}
+LEGACY_LOOP = ("runner", "decide", "perceive", "report", "act")
 
 
-def module_name(path: str) -> tuple[str, str]:
-    parts = path.removesuffix(".py").split("/")
-    if parts[-1] == "__init__":
-        return ".".join(parts[:-1]), ".".join(parts[:-1])
-    return ".".join(parts), ".".join(parts[:-1])
-
-
-def test_the_legacy_browser_loop_is_imported_by_nothing_but_itself():
-    """browser/{runner,decide,perceive,report,act}.py are the old DOM loop. No other module of glide/ imports them (the
-    package `__init__` used to, so `from ..browser.cdp import ...` loaded all of it), and no entry point reaches them."""
-    users = {}
-    for path, source in sources().items():
-        name, package = module_name(path)
-        hit = (imported_modules(source, package) & LEGACY_LOOP) - {name}
-        if hit and name not in LEGACY_LOOP:
-            users[name] = sorted(hit)
-    assert not users, f"production code imports the legacy browser loop: {users}"
+def test_the_legacy_browser_loop_stays_deleted():
+    """browser/{runner,decide,perceive,report,act}.py were a second loop over Chrome DevTools that sent input with no
+    `dispatch`. Nothing reached them (docs/notes/legacy-browser-loop.md) and they were removed; the engine's CDP code is
+    `browser/cdp.py` and `execution/dom.py`. A module of that name coming back, or anything importing one, fails here."""
+    browser = GLIDE / "computer" / "browser"
+    assert not [name for name in LEGACY_LOOP if (browser / f"{name}.py").exists()]
+    named = {
+        path
+        for path, source in sources().items()
+        if any(f"browser.{name}" in source or f"browser import {name}" in source for name in LEGACY_LOOP)
+    }
+    assert not named, named
 
 
 def test_nothing_imports_by_a_computed_name_so_the_scan_above_sees_every_import():
@@ -604,7 +545,7 @@ def test_no_entry_point_group_loads_a_module_by_name():
     assert not {"gui-scripts", "entry-points"} & set(project)
     targets = {target.split(":")[0] for target in project["scripts"].values()}
     assert targets and all(name.startswith("glide.") for name in targets), targets
-    assert not targets & LEGACY_LOOP
+    assert not {t for t in targets if t.startswith("glide.computer.browser.") and t.rsplit(".", 1)[-1] in LEGACY_LOOP}
 
 
 # ------------------------------------------------------------------ destinations and credential fields

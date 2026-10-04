@@ -109,3 +109,9 @@ Not affected: `tests/test_browser_providers.py`, `tests/test_snapshot_retry.py`,
   (`cdp.py` mentions "a benchmark run") before deleting.
 - The static scan sees imports spelled in source. It cannot see a module name built from data; the second test pins that
   there is no such import in `glide/`.
+
+## Done
+
+Removed in one commit, with `cdp-launcher-removal.patch` applied by hand (it no longer applied cleanly: `cdp.py` had gained
+an `ipaddress` import) and the patch file deleted. `docs/ARCHITECTURE.md` names the CDP client as the engine's. The
+sections above describe the tree before that commit.

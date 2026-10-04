@@ -821,7 +821,6 @@ def no_real_machine(monkeypatch):
     # The browser backend: no Chrome and no process of any kind, nothing over CDP, and no
     # connection except to a server on this machine that the test started itself.
     guard.strict(subprocess, "Popen", "subprocess.Popen")
-    guard.strict(cdp, "find_chrome", "cdp.find_chrome")
     guard.strict(cdp, "_get_json", "the CDP HTTP endpoint")
     guard.strict(cdp.websocket, "create_connection", "a CDP websocket")
     for name in _PROCESS_CALLS:
