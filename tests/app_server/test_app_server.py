@@ -5,6 +5,7 @@ Every connection is a `socketpair`, so no name is bound. The one test that binds
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import socket
 import threading
@@ -114,8 +115,9 @@ def test_malformed_lines_are_dropped_one_error_each_and_never_echoed():
 def test_too_many_unusable_lines_drop_the_connection():
     server = make_server(limits=Limits(poll_s=0.02, bad_lines=3))
     client, _ = connect(server)
-    for _ in range(6):
-        client.raw(b"nonsense\n")
+    with contextlib.suppress(OSError):  # the core may close the connection before the last line is sent: that is the point
+        for _ in range(6):
+            client.raw(b"nonsense\n")
     assert client.is_closed()
     server.stop()
 
