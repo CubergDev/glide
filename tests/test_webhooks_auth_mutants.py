@@ -31,6 +31,60 @@ def test_the_header_limit_is_8192_characters_inclusive():
         header(Hdrs({"x": "a" * 8193}), "x")
 
 
+def test_a_delivery_identity_is_one_to_200_plain_characters():
+    assert auth.delivery_id("a" * 200) == "a" * 200 and auth.delivery_id("A_b-9") == "A_b-9"
+    for bad in ("", "a" * 201, "has space", "caf\u00e9"):
+        with pytest.raises(AuthError):
+            auth.delivery_id(bad)
+
+
+def test_a_bearer_token_rides_in_a_header_that_may_not_exceed_8192_characters():
+    """The token's own cap is shadowed by the header cap (the scheme word and space come first), so this is the edge."""
+    assert auth.bearer(Hdrs({"authorization": "Bearer " + "t" * 8185})) == "t" * 8185
+    with pytest.raises(AuthError):
+        auth.bearer(Hdrs({"authorization": "Bearer " + "t" * 8186}))
+    for bad in ("Bearer", "Bearer ", "Basic abc", "Bearer a b"):
+        with pytest.raises(AuthError):
+            auth.bearer(Hdrs({"authorization": bad}))
+
+
+def test_a_github_signature_is_exactly_64_hex_digits_and_a_correct_one_is_accepted():
+    secrets = ("fixture-github-secret-" + "b" * 32,)
+    good = "sha256=" + hmac.new(secrets[0].encode(), b"body", hashlib.sha256).hexdigest()
+    verify_github(b"body", good, secrets)
+    for bad in (good[:-1], good + "0"):
+        with pytest.raises(AuthError):
+            verify_github(b"body", bad, secrets)
+
+
+def test_an_ed25519_public_key_is_exactly_32_bytes_and_an_accepted_one_is_used_as_such():
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    raw = (
+        ed25519.Ed25519PrivateKey.generate().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    )
+    ((scheme, key),) = webhook_keys(("whpk_" + base64.b64encode(raw).decode(),))
+    assert scheme == "v1a" and key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw) == raw
+    for length in (31, 33):
+        with pytest.raises(ValueError, match="Invalid Standard Webhooks key"):
+            webhook_keys(("whpk_" + base64.b64encode(b"k" * length).decode(),))
+
+
+def test_a_timestamp_is_at_most_12_digits_even_when_the_tolerance_and_the_signature_would_allow_more():
+    key = b"k" * 32
+
+    def headers(stamp):
+        signed = b"msg." + stamp.encode() + b".x"
+        signature = base64.b64encode(hmac.digest(key, signed, "sha256")).decode()
+        return Hdrs({"webhook-id": "msg", "webhook-timestamp": stamp, "webhook-signature": "v1," + signature})
+
+    with pytest.raises(AuthError, match="Invalid webhook authentication"):
+        verify_standard(b"x", headers("0" * 13), [("v1", key)], tolerance=10**15, now=0)
+    assert verify_standard(b"x", headers("0" * 12), [("v1", key)], tolerance=10**15, now=0) == "msg"
+
+
 def test_a_github_signature_that_is_not_plain_hex_is_an_authentication_failure_not_a_crash():
     """Without the shape check a non-ASCII signature would reach `hmac.compare_digest` and raise TypeError."""
     secrets = ("fixture-github-secret-" + "b" * 32,)

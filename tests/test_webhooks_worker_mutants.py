@@ -17,9 +17,11 @@ import pytest
 from guards_webhooks import no_webhook_machine_reach  # noqa: F401  (autouse: see tests/guards_webhooks.py)
 from webhooks.helpers import make_call
 
+from glide.computer.control import RunControl
 from glide.computer.models import Abort
+from glide.providers.errors import ProviderError
 from glide.webhooks import worker
-from glide.webhooks.worker import Control, LeaseControl
+from glide.webhooks.worker import LeaseControl
 
 WAIT = 3.0
 
@@ -39,10 +41,11 @@ class Executor:
 
 class Approver:
     def __init__(self, answer=True):
-        self.answer, self.calls = answer, 0
+        self.answer, self.calls, self.acts = answer, 0, []
 
-    def approve(self, call):
+    def approve(self, call, *, act):
         self.calls += 1
+        self.acts.append(act)
         return self.answer
 
 
@@ -51,14 +54,14 @@ class Approver:
 
 def test_the_desktop_is_off_unless_the_worker_was_started_for_it_whatever_else_is_configured():
     executor, approver = Executor(), Approver()
-    result = worker.process_call(task(), Control(), executor=executor, approver=approver, act=True)  # allow_desktop omitted
+    result = worker.process_call(task(), RunControl(), executor=executor, approver=approver, act=True)  # allow_desktop omitted
     assert result["outcome"] == "blocked" and "--allow-desktop" in result["note"]
     assert executor.calls == [] and approver.calls == 0
 
 
 def test_without_an_approver_no_run_is_made_and_the_approver_is_never_assumed():
     executor = Executor()
-    result = worker.process_call(task(), Control(), executor=executor, allow_desktop=True)
+    result = worker.process_call(task(), RunControl(), executor=executor, allow_desktop=True)
     assert result["outcome"] == "blocked"
     assert result["note"] == "Desktop run not approved: no approver is configured."
     assert executor.calls == []
@@ -66,16 +69,69 @@ def test_without_an_approver_no_run_is_made_and_the_approver_is_never_assumed():
 
 def test_an_approver_that_fails_is_a_no():
     class Broken:
-        def approve(self, call):
+        def approve(self, call, *, act):
             raise RuntimeError("no terminal")
 
     executor = Executor()
-    result = worker.process_call(task(), Control(), executor=executor, approver=Broken(), allow_desktop=True)
+    result = worker.process_call(task(), RunControl(), executor=executor, approver=Broken(), allow_desktop=True)
     assert result["note"] == "Desktop run not approved." and executor.calls == []
 
 
+@pytest.mark.parametrize("answer", ["yes", 1, None, False])
+def test_only_an_exact_true_from_the_approver_is_a_yes(answer):
+    executor = Executor()
+    result = worker.process_call(task(), RunControl(), executor=executor, approver=Approver(answer), allow_desktop=True, act=True)
+    assert result["note"] == "Desktop run not approved." and executor.calls == []
+
+
+def test_the_approver_and_the_executor_are_told_exactly_whether_input_may_be_sent():
+    for act, allow_actions, expected in [(True, True, True), (True, False, False), (False, True, False)]:
+        executor, approver = Executor(), Approver()
+        call = task(allow_actions=allow_actions)
+        result = worker.process_call(call, RunControl(), executor=executor, approver=approver, allow_desktop=True, act=act)
+        assert result["outcome"] == "completed"
+        assert approver.acts == [expected] and executor.calls == [expected]
+
+
+def test_a_run_that_changes_after_it_was_shown_is_not_run():
+    call, executor = task(), Executor()
+
+    class Changing(Approver):
+        def approve(self, call, *, act):
+            object.__setattr__(call, "goal", "something else entirely")
+            return super().approve(call, act=act)
+
+    result = worker.process_call(call, RunControl(), executor=executor, approver=Changing(), allow_desktop=True, act=True)
+    assert result["outcome"] == "blocked" and "changed after it was shown" in result["note"] and executor.calls == []
+
+
+def test_a_lease_lost_while_waiting_for_the_answer_never_reaches_the_desktop():
+    control, executor = RunControl(), Executor()
+
+    class Slow(Approver):
+        def approve(self, call, *, act):
+            control.cancel()
+            return True
+
+    with pytest.raises(Abort):
+        worker.process_call(task(), control, executor=executor, approver=Slow(), allow_desktop=True, act=True)
+    assert executor.calls == []
+
+
+def test_the_run_is_marked_in_flight_before_the_executor_is_entered():
+    control, seen = RunControl(), []
+
+    class Probe(Executor):
+        def execute(self, call, control, *, act):
+            seen.append(control.in_flight)
+            return super().execute(call, control, act=act)
+
+    worker.process_call(task(), control, executor=Probe(), approver=Approver(), allow_desktop=True)
+    assert seen == [True]
+
+
 def test_a_control_cancelled_before_the_call_runs_nothing_at_all():
-    control = Control()
+    control = RunControl()
     control.cancel()
     calls = []
 
@@ -98,7 +154,7 @@ def test_a_control_cancelled_before_the_call_runs_nothing_at_all():
 
 
 def test_a_report_that_finishes_after_a_cancel_is_not_returned():
-    control = Control()
+    control = RunControl()
 
     def reporter(*_):
         control.cancel()
@@ -109,38 +165,55 @@ def test_a_report_that_finishes_after_a_cancel_is_not_returned():
 
 
 def test_a_long_report_is_cut_to_4096_bytes_in_the_summary():
-    result = worker.process_call(make_call("github.issue.triage"), Control(), reporter=lambda *_: ("a" * 5000, False))
+    result = worker.process_call(make_call("github.issue.triage"), RunControl(), reporter=lambda *_: ("a" * 5000, False))
     assert len(result["summary"]) == 4096 and result["outcome"] == "completed"
 
 
 def test_a_desktop_outcome_is_cut_to_the_sizes_of_the_queue_envelope():
-    result = SimpleNamespace(outcome="o" * 300, achieved=False, failure="f" * 5000, stopped=False, answer="")
+    result = SimpleNamespace(outcome="o" * 300, achieved=False, failure="f" * 5000, stopped=False, uncertain=False, answer="")
     mapped = worker.desktop_outcome(result)
     assert len(mapped["summary"]) == 4096 and mapped["note"] == "Desktop run ended: " + "o" * 100 + "."
-    quiet = SimpleNamespace(outcome="done", achieved=True, failure="", stopped=False, answer="the answer")
+    quiet = SimpleNamespace(outcome="done", achieved=True, failure="", stopped=False, uncertain=False, answer="the answer")
     assert worker.desktop_outcome(quiet)["summary"] == "the answer"
-    nothing = SimpleNamespace(outcome="stalled", achieved=False, failure="", stopped=False, answer="")
+    nothing = SimpleNamespace(outcome="stalled", achieved=False, failure="", stopped=False, uncertain=False, answer="")
     assert worker.desktop_outcome(nothing)["summary"] == "stalled"
 
 
 @pytest.mark.parametrize("length,accepted", [(4096, True), (4097, False)])
 def test_a_model_report_may_be_4096_characters_and_no_more(length, accepted):
-    reply = SimpleNamespace(text='{"answer": "' + "a" * length + '", "uncertain": false}')
-    report = worker.llm_reporter(SimpleNamespace(chat=lambda messages, **kw: reply))
+    reply = SimpleNamespace(text='{"answer": "' + "a" * length + '", "uncertain": false}', completed=True)
+    report = worker.llm_reporter(SimpleNamespace(generate=lambda request: reply))
     if accepted:
         assert report("op", "goal", {})[0] == "a" * length
     else:
-        with pytest.raises(ValueError):
+        with pytest.raises(ProviderError):
             report("op", "goal", {})
 
 
-def test_the_approver_shows_at_most_4096_bytes_of_what_the_sender_wrote():
+def test_the_approver_shows_the_whole_goal_but_only_a_bounded_piece_of_the_sender_context():
+    """The goal is capped at 4096 characters by the contract and shown whole; the quoted context is cut to 300."""
     printed = []
     out = SimpleNamespace(write=printed.append, flush=lambda: None)
-    long_goal = make_call("agent.task.requested", goal="a" + "\u00e9" * 2048, key="long")  # 4097 bytes
-    worker.TerminalApprover(lambda prompt: "n", interactive=True, out=out).approve(long_goal)
+    call = make_call("agent.task.requested", goal="\u00e9" * 4096, context={"k": "\u00fc" * 1000}, key="long")
+    worker.TerminalApprover(lambda prompt: "n", interactive=True, out=out).approve(call)
     text = "".join(printed)
-    assert "\u00e9" * 2047 in text and "\u00e9" * 2048 not in text
+    assert "\u00e9" * 4096 in text
+    shown = text.split("not given to the run: ", 1)[1].split("\n", 1)[0]
+    assert len(shown) == 300 and "\u00fc" * 280 in shown
+
+
+def test_the_terminal_approver_says_yes_only_to_an_explicit_yes():
+    out = SimpleNamespace(write=lambda text: None, flush=lambda: None)
+    call = make_call("agent.task.requested", key="ask")
+
+    def eof(prompt):
+        raise EOFError
+
+    for answer, expected in [("y", True), (" YES ", True), ("", False), ("maybe", False), ("n", False)]:
+        assert worker.TerminalApprover(lambda prompt, a=answer: a, interactive=True, out=out).approve(call) is expected
+    assert worker.TerminalApprover(eof, interactive=True, out=out).approve(call) is False
+    asked = []
+    assert worker.TerminalApprover(asked.append, interactive=False, out=out).approve(call) is False and asked == []
 
 
 # -- what run_one reports after a cancel ----------------------------------------------------------------------------
@@ -200,7 +273,7 @@ def test_a_cancel_after_the_desktop_was_entered_is_reported_uncertain_never_comp
     queue = Queue(make_call("github.issue.triage"))
 
     def handler(call, control):
-        control.desktop_started = True
+        control.in_flight = True
         control.cancel()
         return {"outcome": "completed", "summary": "Looks done", "note": "ok"}
 
@@ -219,6 +292,81 @@ def test_a_handler_that_fails_ends_the_run_and_stops_the_watchers_and_says_nothi
     (result,) = queue.completed()
     assert result["outcome"] == "failed" and "synthetic-secret" not in str(result)
     assert seen[0].cancelled.is_set()
+
+
+def test_an_abort_after_the_desktop_was_entered_is_reported_uncertain_and_before_it_cancelled():
+    for entered, expected in [(True, "uncertain"), (False, "cancelled")]:
+        queue = Queue(make_call("github.issue.triage"))
+
+        def handler(call, control, entered=entered):
+            control.in_flight = entered
+            raise Abort("stopped")
+
+        assert worker.run_one(queue, **handler_for(queue, handler))
+        assert [r["outcome"] for r in queue.completed()] == [expected]
+
+
+def test_a_crash_after_the_desktop_was_entered_is_uncertain_not_failed():
+    queue = Queue(make_call("github.issue.triage"))
+
+    def handler(call, control):
+        control.in_flight = True
+        raise RuntimeError("synthetic-secret-in-error")
+
+    assert worker.run_one(queue, **handler_for(queue, handler))
+    (result,) = queue.completed()
+    assert result["outcome"] == "uncertain" and "synthetic-secret" not in str(result)
+
+
+def test_the_completion_is_retried_on_a_busy_server_but_the_task_never_runs_again():
+    class Busy(Queue):
+        def request(self, method, suffix, data=None):
+            if suffix.endswith("/complete"):
+                self.requests.append(("complete", data))
+                if len(self.completed()) <= 3:
+                    raise httpx.HTTPStatusError("busy", request=None, response=SimpleNamespace(status_code=503))
+                return {"status": "ok"}
+            return super().request(method, suffix, data)
+
+    queue, runs, pauses = Busy(make_call("github.issue.triage")), [], []
+
+    def handler(call, control):
+        runs.append(1)
+        return {"outcome": "completed", "summary": "ok", "note": "ok"}
+
+    assert worker.run_one(queue, pause=pauses.append, **handler_for(queue, handler))
+    assert runs == [1] and len(queue.completed()) == 4 and pauses == list(worker.COMPLETE_BACKOFF)
+
+
+def test_a_completion_the_server_refuses_is_not_retried():
+    class Refusing(Queue):
+        def request(self, method, suffix, data=None):
+            if suffix.endswith("/complete"):
+                self.requests.append(("complete", data))
+                raise httpx.HTTPStatusError("no", request=None, response=SimpleNamespace(status_code=409))
+            return super().request(method, suffix, data)
+
+    queue, pauses = Refusing(make_call("github.issue.triage")), []
+    with pytest.raises(httpx.HTTPStatusError):
+        worker.run_one(
+            queue,
+            pause=pauses.append,
+            **handler_for(queue, lambda call, control: {"outcome": "completed", "summary": "", "note": ""}),
+        )
+    assert len(queue.completed()) == 1 and pauses == []
+
+
+def test_an_interruption_ends_the_run_with_a_best_effort_uncertain_or_cancelled_completion_and_propagates():
+    for entered, expected in [(True, "uncertain"), (False, "cancelled")]:
+        queue = Queue(make_call("github.issue.triage"))
+
+        def handler(call, control, entered=entered):
+            control.in_flight = entered
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            worker.run_one(queue, **handler_for(queue, handler))
+        assert [r["outcome"] for r in queue.completed()] == [expected]
 
 
 def test_the_completion_summary_and_note_are_cut_to_the_envelope():
@@ -348,11 +496,11 @@ def test_the_watchers_have_ended_when_run_one_returns():
 def test_the_report_packet_keeps_non_ascii_text_as_it_is():
     sent = []
 
-    def chat(messages, **kwargs):
-        sent.append(messages[1]["content"])
-        return SimpleNamespace(text='{"answer": "ok", "uncertain": false}')
+    def generate(request):
+        sent.append(request.text)
+        return SimpleNamespace(text='{"answer": "ok", "uncertain": false}', completed=True)
 
-    worker.llm_reporter(SimpleNamespace(chat=chat))("op", "caf\u00e9", {"n": "\u4f60\u597d"})
+    worker.llm_reporter(SimpleNamespace(generate=generate))("op", "caf\u00e9", {"n": "\u4f60\u597d"})
     assert "caf\u00e9" in sent[0] and "\u4f60\u597d" in sent[0] and "\\u00e9" not in sent[0]
 
 
@@ -360,7 +508,7 @@ def test_the_report_packet_keeps_non_ascii_text_as_it_is():
 
 
 def test_resume_lets_a_paused_run_continue():
-    control = Control()
+    control = RunControl()
     control.pause()
     assert not control.ready.is_set()
     control.resume()

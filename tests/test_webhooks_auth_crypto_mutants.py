@@ -32,6 +32,7 @@ def pem(private) -> str:
 
 
 AGENT_KEY = ed25519.Ed25519PrivateKey.generate()
+RSA_2048 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 def verifier(*, kid: str = "key", max_token_seconds: int = 3600) -> AgentVerifier:
@@ -157,11 +158,27 @@ def test_a_key_that_is_not_a_public_key_is_refused_with_the_configured_message()
         AgentVerifier(AgentAuth(issuer="i", audience="a", keys=(bad,)))
 
 
+def test_an_agent_rsa_key_must_be_at_least_2048_bits():
+    def attempt(bits):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=bits)
+        return AgentAuth(issuer="i", audience="a", keys=(VerificationKey(kid="k", algorithm="RS256", public_key=pem(key)),))
+
+    AgentVerifier(attempt(2048))
+    with pytest.raises(ValueError, match="does not match its configured algorithm"):
+        AgentVerifier(attempt(1024))
+
+
+def test_an_agent_key_of_the_wrong_kind_for_its_algorithm_is_refused():
+    with pytest.raises(ValueError, match="does not match its configured algorithm"):
+        AgentVerifier(
+            AgentAuth(issuer="i", audience="a", keys=(VerificationKey(kid="k", algorithm="EdDSA", public_key=pem(RSA_2048)),))
+        )
+
+
 # -- the Google push verifier ----------------------------------------------------------------------------------------
 
 ISSUER = auth.GOOGLE_PUSH_ISSUERS[0]
 SERVICE_ACCOUNT = "push@example.invalid"
-RSA_2048 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 def google_claims(**changes) -> dict:
