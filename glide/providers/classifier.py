@@ -242,7 +242,15 @@ def _prompt(state: Any, asks: Sequence[_Ask]) -> list[dict]:
 
 
 class _Invalid(Exception):
-    """A reply that cannot be used, said in words the model can act on. Never leaves this module."""
+    """A reply that cannot be used, said in words the model can act on. Never leaves this module.
+
+    `str()` goes back to the model, which may be told what it wrote; `safe` is the same without any of it, and is the
+    only form that reaches a ProviderError (no reply text in an error message).
+    """
+
+    def __init__(self, message: str, safe: str | None = None):
+        super().__init__(message)
+        self.safe = safe or message
 
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -291,7 +299,10 @@ def _choice(ask: _Ask, raw: Any) -> ChoiceAnswer:
             raise _Invalid(f"{ask.name}: each entry of `top` must be an object with `option` and `p`")
         key = _option(entry.get("option"), ask.criteria)
         if key is None:
-            raise _Invalid(f"{ask.name}: {repr(entry.get('option'))[:OPTION_ECHO]} is not one of the options")
+            raise _Invalid(
+                f"{ask.name}: {repr(entry.get('option'))[:OPTION_ECHO]} is not one of the options",
+                f"{ask.name}: an option that is not one of the options",
+            )
         p = _number(entry.get("p"))
         if p is None or p < 0 or p > 1:  # not a percentage: 30 would read as 100% once it was scaled
             raise _Invalid(f"{ask.name}: p for {key!r} must be a probability from 0 to 1")
@@ -391,7 +402,7 @@ class LLMClassifier:
         schema, messages = _schema(asked), _prompt(state, asked)
         budget = self._max_tokens or 96 + 80 * sum(a.kind == "choice" for a in asked) + 24 * sum(a.kind == "noul" for a in asked)
         usage = Usage()
-        problem = ""
+        problem = problem_safe = ""
         result: ChatResult | None = None
         for attempt in range(2):
             sent = messages
@@ -409,12 +420,12 @@ class LLMClassifier:
             try:
                 parsed = _answers(result.text, asked)
             except _Invalid as bad:
-                problem = str(bad)
+                problem, problem_safe = str(bad), bad.safe
                 continue
             parsed.update(settled)
             return ClassifierReply({ask.name: parsed[ask.name] for ask in asks}, usage, result.model or self.model)
         who = (result.provider if result is not None else "") or self.name
-        raise ProviderError(f"{who} gave an unusable classifier answer twice: {problem}", kind="content", provider=who)
+        raise ProviderError(f"{who} gave an unusable classifier answer twice: {problem_safe}", kind="content", provider=who)
 
 
 def _add(total: Usage, more: Any) -> None:

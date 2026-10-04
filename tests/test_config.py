@@ -97,7 +97,7 @@ class FakeClient:
         if error is not None:
             raise error
 
-    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, logprobs=False, timeout=None):
+    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, logprobs=False, timeout=None, exact_json=False):
         self._go("chat")
         return ChatResult(
             text=self.owner.text if self.owner.text is not None else reply_for(schema),

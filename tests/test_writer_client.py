@@ -44,9 +44,10 @@ class FakeFacade:
         self.api_key = SECRET  # a facade may well hold a key; nothing of ChainWriter may show it
         self.calls: list[dict] = []
 
-    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, timeout=None):
+    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, timeout=None, exact_json=False):
         self.calls.append(
             {
+                "exact_json": exact_json,
                 "messages": list(messages),
                 "max_tokens": max_tokens,
                 "temperature": temperature,
@@ -91,6 +92,7 @@ def test_text_and_an_image_go_to_the_facade_as_chat_messages_and_the_text_comes_
         "text": "<data>\nwhat is this?\n</data>",
     }  # the data is fenced
     assert (call["max_tokens"], call["schema"], call["temperature"]) == (200, SCHEMA, 0.0)
+    assert call["exact_json"] is True  # a reply is read whole, never picked out of prose
     assert (result.text, result.model, result.completed) == ("hi there", "model-x", True)
 
 

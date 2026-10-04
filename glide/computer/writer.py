@@ -780,45 +780,50 @@ ANSWER_SYSTEM = (
 
 
 FOCUS_MAX_CHARS = 400  # "one short imperative sentence": a longer one is a payload
-_SITE = re.compile(
-    r"(?:https?://(?P<url_host>(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})"  # anything after a scheme is a site
-    r"|(?<![a-z0-9@./-])(?P<bare_host>(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|io|ai|co|dev|app|edu|gov|info|xyz|me|tv|uk|de|fr|ru|cn|jp|in|us|ca|au)))"
-    r"(?![a-z0-9-])",
+_SCHEME_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s'\"<>]+", re.IGNORECASE)
+_OPAQUE_URL = re.compile(r"\b(?:javascript|data|vbscript|file|blob|about):", re.IGNORECASE)
+_BARE_SITE = re.compile(  # a site written without a scheme: a name under a common top-level domain, an address, localhost
+    r"(?<![\w@./:-])(?:localhost|(?:\d{1,3}\.){3}\d{1,3}"
+    r"|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|io|ai|co|dev|app|edu|gov|info|xyz|me|tv|uk|de|fr|ru|cn|jp|in|us|ca|au))"
+    r"(?![\w-])",
     re.IGNORECASE,
 )
-_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "edu", "ac"}
 
 
-def _host_of(match: re.Match) -> str:
-    return (match["url_host"] or match["bare_host"]).lower()
-
-
-def _name_of(host: str) -> str:
-    """The part of a host a person would say: `cnn` for www.cnn.com, `bbc` for news.bbc.co.uk."""
-    labels = host.lower().split(".")
-    return labels[-3] if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL else labels[-2]
+def _sites(text: str) -> list[str] | None:
+    """The hosts `text` names, as written with a scheme or bare; None when one cannot be read as a host at all."""
+    found = []
+    for token in _SCHEME_URL.findall(text):
+        try:
+            host = urlparse(token).hostname
+        except ValueError:
+            return None
+        if not host:
+            return None
+        found.append(host.lower().removeprefix("www."))
+    found += [m.group().lower().removeprefix("www.") for m in _BARE_SITE.finditer(_SCHEME_URL.sub(" ", text))]
+    return found
 
 
 def _focus_is_safe(focus: str, goal: str, screen: Screen, guidance: Guidance | None) -> bool:
     """Whether a focus may go back to the classifier as an instruction.
 
     A focus is written by the model after reading the screen, so it is only as trustworthy as that text. It may not be
-    long, and it may not send the agent to a site nobody asked for: each site it names must be one the user's own words
-    name (the goal, or what they said when asked) or the page that is already open. Anything else drops the focus, and
-    the run ends with the answer instead of following it.
+    long, it may not carry a script or file address, and each site it names (with a scheme or without, a host name or
+    an IP address) must be one the user's own words name (the goal, or what they said when asked) or the page that is
+    already open, or a subdomain of one. Anything else drops the focus, and the run ends with the answer instead of
+    following it: a false alarm costs a stop, a false pass sends the agent where the screen told it to go.
     """
-    if len(focus) > FOCUS_MAX_CHARS:
+    if len(focus) > FOCUS_MAX_CHARS or _OPAQUE_URL.search(focus):
+        return False
+    sites = _sites(focus)
+    if sites is None:
         return False
     said = " ".join([goal, *(e.reply for e in guidance.exchanges)]) if guidance else goal
-    heard = {_host_of(m) for m in _SITE.finditer(said)}
-    words = set(re.findall(r"[a-z0-9]+", said.lower()))
-    here = (urlparse(screen.url).hostname or "").lower() if screen.url else ""
-    for match in _SITE.finditer(focus):
-        host = _host_of(match)
-        named = host in heard or any(host.endswith("." + h) for h in heard) or host == here or _name_of(host) in words
-        if not named:
-            return False
-    return True
+    allowed = set(_sites(said) or [])
+    if screen.url and (here := urlparse(screen.url).hostname):
+        allowed.add(here.lower().removeprefix("www."))
+    return all(host in allowed or any(host.endswith("." + known) for known in allowed) for host in sites)
 
 
 def compose_answer(

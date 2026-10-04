@@ -107,6 +107,7 @@ class ChainWriter:
                     temperature=0.0,
                     schema=request.schema,
                     timeout=self._deadline(request, label),
+                    exact_json=True,  # a reply is read whole: the prompt carries text that someone else may have written
                 )
         except ProviderError as error:
             checkpoint(cancel, wait=False)  # a call a cancel cut short is an `Abort`, not an unavailable writer

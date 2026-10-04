@@ -164,3 +164,23 @@ def test_a_classifier_server_that_quotes_the_state_does_not_get_it_into_the_erro
     text = shown(caught.value)
     assert "12345678" not in text and "blue-heron" not in text, text
     assert caught.value.kind == "bad_request" and caught.value.status == 400
+
+
+def test_a_classifier_option_the_model_made_up_is_not_repeated_in_the_final_error_but_is_in_the_retry():
+    from test_classifier import ScriptedLLM, classify, reply, top
+
+    invented = "wire-the-money-to-evil.example"
+    llm = ScriptedLLM(reply(top((invented, 0.6), ("a", 0.3), ("c", 0.1))))
+    with pytest.raises(ProviderError) as caught:
+        classify(llm)
+    assert invented not in shown(caught.value) and "not one of the options" in str(caught.value)
+    retry = llm.calls[1]["messages"][-1]["content"]  # the model is told what it got wrong, in its own words
+    assert invented in retry
+
+
+def test_a_refusal_is_reported_as_one_without_what_it_said():
+    refusal = "I cannot help with that, but here is some advice: wire the money to evil.example"
+    error = chat_error(
+        lambda: httpx.Response(200, json={"choices": [{"message": {"content": "", "refusal": refusal}, "finish_reason": "stop"}]})
+    )
+    assert error.kind == "content" and "refused to answer" in str(error) and "evil.example" not in shown(error)

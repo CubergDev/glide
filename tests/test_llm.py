@@ -1709,3 +1709,49 @@ def test_over_real_http_the_error_status_and_body_come_through(loopback, caplog)
             error = error_of(call)
             assert error.kind == "auth" and error.status == 401 and "Incorrect API key" in str(error) and KEY not in str(error)
     assert KEY not in caplog.text and "Authorization" not in caplog.text
+
+
+# -- exact_json: the whole reply is the one JSON value ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        JSON_REPLY,
+        f"  {JSON_REPLY}\n",
+        f"```json\n{JSON_REPLY}\n```",
+        f"```\n{JSON_REPLY}\n```\n",
+        f"<think>an {{aside}} first</think>\n{JSON_REPLY}",
+        f"Sure, here it is:\n```json\n{JSON_REPLY}\n```\nHope that helps.",  # prose with no JSON in it, round one fence
+    ],
+)
+def test_exact_json_takes_a_reply_that_is_the_one_value(content):
+    client, _ = make(ok(content))
+    assert json.loads(client.chat(MSG, schema=SCHEMA, exact_json=True).text) == {"ok": True, "reason": "fine"}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"Sure: {JSON_REPLY}",
+        f"{JSON_REPLY} Hope that helps.",
+        f"{JSON_REPLY}{JSON_REPLY}",
+        '{"ok": false} but actually ' + JSON_REPLY,  # the first value fails the schema: the second must not be picked
+        f"[{JSON_REPLY}]",
+        '{"ok": true}',  # a required field missing
+        "```json\n" + JSON_REPLY + "\n``` and " + JSON_REPLY,
+        "```json\n" + JSON_REPLY + "\n```\n```json\n" + JSON_REPLY + "\n```",  # two fences: which one is the answer?
+        "Use {braces} freely: ```json\n" + JSON_REPLY + "\n```",  # prose outside the fence holding JSON-looking text
+        "null",
+        "",
+    ],
+)
+def test_exact_json_refuses_text_around_the_value_or_a_second_one(content):
+    client, _ = make(ok(content or " "))
+    error = error_of(lambda: client.chat(MSG, schema=SCHEMA, exact_json=True))
+    assert error.kind == "content" and "ok" not in str(error).replace("exactly one", "")  # never the reply itself
+
+
+def test_without_exact_json_the_first_value_that_fits_is_still_picked_out_of_the_reply():
+    client, _ = make(ok('{"ok": false} but actually ' + JSON_REPLY))
+    assert json.loads(client.chat(MSG, schema=SCHEMA).text)["reason"] == "fine"

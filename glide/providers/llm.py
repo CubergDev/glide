@@ -63,6 +63,7 @@ OPEN_TAG, CLOSE_TAG = "<think>", "</think>"
 
 _clock = time.monotonic  # a seam for tests
 _EOL = re.compile(r"\r\n|\n|\r")  # the line ends of the SSE spec, and no others
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
 class _Secret:
@@ -205,11 +206,15 @@ class OpenAICompatLLM:
         schema: dict | None = None,
         logprobs: bool = False,
         timeout: float | None = None,
+        exact_json: bool = False,
     ) -> ChatResult:
         """The whole reply as text. `timeout` bounds the wait for the answer, in total, and defaults to 30 s.
 
         With a `schema` the text is the JSON in the reply (a fence or a sentence around it is dropped), and a reply
         with none, or one without the schema's required fields, is a "content" error so another provider is tried.
+        With `exact_json` nothing is dropped: the reply must be that one JSON value, a code fence round it allowed, or
+        it is a "content" error. A caller that puts text from a screen in its prompt asks for that, because the first
+        value that fits is whichever one the injected text got in.
         """
         limit = DEFAULT_TIMEOUT_S if timeout is None else timeout
         started = _clock()
@@ -232,8 +237,8 @@ class OpenAICompatLLM:
             response.close()
         reply = self._completion(raw, want_logprobs=logprobs, echo=echo)
         if not reply.text:
-            raise self._empty(reply.finish_reason, reply.refusal, echo)
-        text = self._json_in(reply.text, schema, reply.finish_reason) if schema is not None else reply.text
+            raise self._empty(reply.finish_reason, reply.refusal)
+        text = self._json_in(reply.text, schema, reply.finish_reason, exact_json) if schema is not None else reply.text
         return ChatResult(
             text=text,
             usage=reply.usage,
@@ -419,7 +424,7 @@ class OpenAICompatLLM:
     def _content_error(self, detail: str) -> ProviderError:
         return ProviderError(f"{self.name} {detail}", kind="content", provider=self.name)
 
-    def _empty(self, finish_reason: str | None, refusal: str | None, echo: Sequence[str]) -> ProviderError:
+    def _empty(self, finish_reason: str | None, refusal: str | None) -> ProviderError:
         """A reply with nothing in it to use."""
         if finish_reason == "length":
             return self._content_error(
@@ -427,7 +432,7 @@ class OpenAICompatLLM:
                 "(raise max_tokens or turn reasoning_effort down)"
             )
         if refusal:
-            return self._content_error(f"refused to answer: {snippet(self._safe(refusal, echo))}")
+            return self._content_error("refused to answer")  # what it said is the model's reply, never part of a message
         return self._content_error(f"answered with no text (finish_reason {finish_reason})")
 
     def _error_text(self, response: httpx.Response, deadline: float) -> str:
@@ -479,10 +484,12 @@ class OpenAICompatLLM:
             refusal=refusal if isinstance(refusal, str) else None,
         )
 
-    def _json_in(self, text: str, schema: dict, finish_reason: str | None) -> str:
+    def _json_in(self, text: str, schema: dict, finish_reason: str | None, exact: bool = False) -> str:
         """The first JSON value in `text` that fits the schema's top level. Models that were asked for JSON usually
         return exactly that; some wrap it in a fence or a sentence. A value that does not fit is skipped whole, so
         an object nested inside it is never mistaken for the answer."""
+        if exact:
+            return self._whole_json(text, schema, finish_reason)
         decoder = json.JSONDecoder()
         position = 0
         while (start := _next_json_start(text, position)) >= 0:
@@ -497,12 +504,30 @@ class OpenAICompatLLM:
         cut = " (the reply was cut off at the token limit)" if finish_reason == "length" else ""
         raise self._content_error(f"answered without JSON that fits the schema{cut}")  # never the reply itself
 
+    def _whole_json(self, text: str, schema: dict, finish_reason: str | None) -> str:
+        """`text` as the one JSON value it must be, or a "content" error. A code fence round it is allowed, with prose
+        outside the fence only if that prose holds no JSON: the fence is what says which value is the answer."""
+        body = text.strip()
+        fences = list(_FENCE.finditer(body))
+        if len(fences) == 1:  # a lead-in such as "Sure:" is allowed round one fence, so long as it holds no JSON of its own
+            outside = body[: fences[0].start()] + body[fences[0].end() :]
+            if "{" not in outside and "[" not in outside:
+                body = fences[0].group(1).strip()
+        try:
+            fits = _fits(json.loads(body), schema)
+        except ValueError:
+            fits = False
+        if not fits:
+            cut = " (the reply was cut off at the token limit)" if finish_reason == "length" else ""
+            raise self._content_error(f"answered with something other than exactly one JSON value that fits the schema{cut}")
+        return body
+
     def _events(self, response: httpx.Response, started: float, deadline: float, echo: Sequence[str]) -> Iterator[str]:
         """The text deltas of a stream, or of a plain JSON reply from a server that ignored `stream`."""
         if "json" in response.headers.get("content-type", "").lower():
             reply = self._completion(self._read(response, deadline=deadline), want_logprobs=False, echo=echo)
             if not reply.text:
-                raise self._empty(reply.finish_reason, reply.refusal, echo)
+                raise self._empty(reply.finish_reason, reply.refusal)
             self.last_usage, self.last_finish_reason = reply.usage, reply.finish_reason
             self.last_ttft_s = _clock() - started
             yield reply.text
@@ -572,7 +597,7 @@ class OpenAICompatLLM:
             raise ProviderError(f"{self.name} ended the stream without finishing it", kind="transport", provider=self.name)
         self.last_finish_reason = finish
         if not emitted:
-            raise self._empty(finish, refusal, echo)
+            raise self._empty(finish, refusal)
 
 
 # -- helpers --------------------------------------------------------------------------------------
