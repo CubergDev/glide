@@ -304,6 +304,40 @@ def test_a_hedged_call_made_after_the_cancel_starts_nothing():
     assert done.wait(WAIT) and box["error"].kind == CANCELLED and (a.calls, b.calls) == (0, 0)
 
 
+def test_a_failed_racer_is_reported_as_switching_to_the_slot_still_running_not_to_one_not_yet_launched():
+    """After the hedge has fired, the slot that carries on is the racer in flight, not the third slot nobody has started."""
+    b = Blocked()
+
+    def a():
+        assert b.connection.opened.wait(WAIT)  # b has been launched by the hedge, c has not
+        raise ProviderError("down", kind="server")
+
+    c = Blocked()
+    chain = chain_of(a, b, c, policy=ChainPolicy(hedge_after_s=0.3))
+    done, box = call_under(RunControl(), chain, hedge=True)
+    assert b.connection.opened.wait(WAIT)
+    deadline = threading.Event()
+    while not [e for e in chain.events if e.kind == "server"] and not deadline.wait(0.01):
+        pass
+    failure = next(e for e in chain.events if e.kind == "server")
+    b.connection.release.set()
+    assert done.wait(WAIT) and box["value"] == "late answer"
+    assert (failure.from_slot, failure.to_slot) == ("a", "b") and c.calls == 0
+
+
+def test_a_hedged_answer_that_is_ready_when_the_cancel_lands_is_dropped_like_an_unhedged_one():
+    parent = RunControl()
+
+    def quick():
+        parent.cancelled.set()  # the cancel has landed, though its callbacks have not run: nothing has queued a wake-up
+        return "an answer the user no longer wants"
+
+    chain = chain_of(Blocked(), quick, policy=ChainPolicy(hedge_after_s=0.01))
+    done, box = call_under(parent, chain, hedge=True)
+    assert done.wait(WAIT)
+    assert "value" not in box and box["error"].kind == CANCELLED
+
+
 # -- the control's own helpers ------------------------------------------------------------------------
 
 
