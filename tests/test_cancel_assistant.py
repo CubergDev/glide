@@ -106,6 +106,7 @@ def test_a_newer_request_cancels_the_one_still_being_routed_and_the_old_one_says
     assert first_done.wait(WAIT), "the older request is still blocked in its provider call"
     assert hold.connection.closed.is_set()  # its connection was closed, not waited out
     assert second.text == "Paris." and first["value"].text == ""
+    assert first["value"].route == "none" and second.route == "answer"  # PR9-4175574734: a superseded request is not an answer
     assert rig.warned == []  # an interruption is not a failure
     rig.assistant.wait_idle(WAIT)
     assert spoken(rig) == ["Paris."] and rig.shown == ["Paris."]  # the late answer to the first was never shown or said
@@ -147,7 +148,7 @@ def test_an_answer_cut_off_mid_stream_stops_being_spoken_and_its_connection_is_c
     assert done.wait(WAIT) and hold.connection.closed.is_set()
     rig.assistant.wait_idle(WAIT)
     assert spoken(rig) == ["First sentence."]  # nothing after the cut
-    assert rig.warned == [] and box["value"].text == "First sentence."
+    assert rig.warned == [] and box["value"].text == "First sentence." and box["value"].route == "none"
     assert list(rig.assistant._history) == []  # an interrupted answer is not remembered
 
 

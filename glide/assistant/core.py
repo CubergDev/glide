@@ -220,7 +220,10 @@ class Assistant:
             if turn is None or not self._begin(turn):  # a stop or a barge-in came for this request after it was made
                 return Reply("none")
             with controlled(turn.control):
-                return self._respond(turn, text, act, wait, hint_language, started)
+                reply = self._respond(turn, text, act, wait, hint_language, started)
+            if turn.cancelled and reply.route == "answer":  # a stop or a newer request took it: not a completed answer
+                reply.route = "none"  # (the text is what was already said before the cut)
+            return reply
         finally:
             if own and turn is not None:
                 self._leave(turn)

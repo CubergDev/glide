@@ -430,7 +430,7 @@ def _record(
 
     def work() -> None:
         reply = assistant.handle_audio(chunks(), act=act, wait=False, language=args.lang)
-        if reply.route == "none" and not reply.error:
+        if reply.route == "none" and not reply.error and not reply.heard:  # something heard and then cut is not silence
             print("(nothing heard)", flush=True)
 
     turn = _spawn(work, config)

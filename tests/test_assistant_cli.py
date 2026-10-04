@@ -29,6 +29,7 @@ from test_assistant_fakes import (
 
 from glide import cli
 from glide.assistant.audio_io import AudioUnavailable, Microphone, chunked
+from glide.assistant.core import Reply
 from glide.computer import runner
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
@@ -557,6 +558,16 @@ def test_nothing_said_is_reported_and_costs_no_model_call(monkeypatch):
     rig.keys.press("q")
     assert finish(rig.thread, rig.result) == 0
     assert "(nothing heard)" in rig.terminal.out.getvalue() and rig.config.fast.chat_calls == []
+
+
+def test_a_request_that_was_heard_and_then_cut_is_not_reported_as_nothing_heard(monkeypatch):
+    # PR9-4175574734: a cancelled request is now Reply("none"), as its docstring says, and was heard all the same
+    monkeypatch.setattr(cli.Assistant, "handle_audio", lambda self, chunks, **kw: Reply("none", heard="what is two and two"))
+    rig = listen_rig(monkeypatch, FakeSTT(final="what is two and two"))
+    talk(rig)
+    rig.keys.press("q")
+    assert finish(rig.thread, rig.result) == 0
+    assert "(nothing heard)" not in rig.terminal.out.getvalue()
 
 
 def test_listen_auto_ends_the_recording_when_the_speaker_goes_quiet(monkeypatch):
