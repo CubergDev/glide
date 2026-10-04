@@ -237,15 +237,14 @@ def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
         diagnostics.exception(error, stage="generation")
         state.outcome = "generation unavailable"
         state.failure = str(error)
+        _write_unobserved(state)
     except (DesktopError, subprocess.CalledProcessError) as error:
         diagnostics.exception(error, stage="desktop_operation")
         state.outcome = "desktop unavailable"
         state.failure = (
             str(error) if isinstance(error, DesktopError) else "A desktop operation failed; completion could not be verified."
         )
-        state.uncertain = bool(current_control() and current_control().in_flight)
-        if state.uncertain:
-            state.readback = "unavailable; completion unknown"
+        _write_unobserved(state)
     except (KeyboardInterrupt, Abort) as e:
         state.uncertain = bool(current_control() and current_control().in_flight)
         if state.uncertain:
@@ -265,6 +264,7 @@ def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
         diagnostics.exception(e, stage="provider")
         state.outcome = "provider failure"
         state.failure = provider_failure(e)
+        _write_unobserved(state)
         log(f"\nprovider failure after {len(state.history)} actions: {state.failure}")
     finally:
         summary = {
@@ -295,6 +295,17 @@ def _run(cfg: RunConfig, ctx_factory, classifier_factory=None) -> RunState:
         log(f"{state.calls.line()}  handoffs {len(state.handoffs)}  questions {len(state.guidance.exchanges)}")
         log(f"run folder: {cfg.out}")
     return state
+
+
+def _write_unobserved(state: RunState) -> None:
+    """A run that ends on a failure right after a write was sent never saw its effect: say so, so it is not retried.
+
+    The model that checks a typed value fails after the keystrokes went out, for one. Only a fresh observation
+    clears `in_flight` (see control.py), so it still being set is the evidence.
+    """
+    state.uncertain = bool(current_control() and current_control().in_flight)
+    if state.uncertain:
+        state.readback = "unavailable; completion unknown"
 
 
 def provider_failure(error: ProviderError) -> str:

@@ -10,6 +10,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from typesafe_sdk import Noul
 from world import FakeTypeSafe, FakeWriter, Page, World, scripted
 
 from glide.assistant.phrases import say
@@ -22,6 +23,7 @@ from glide.computer.generation import GenerationUnavailable
 from glide.computer.models import Abort, BrowserConnectionError, DesktopPermissionError
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunConfig, RunState
+from glide.providers.errors import ProviderError
 
 
 def one_page() -> World:
@@ -64,6 +66,40 @@ def test_a_writer_that_is_unavailable_at_review_time_ends_the_run_as_generation_
     assert state.outcome == "generation unavailable" and state.failure == "account spent"
     result = TaskResult("goal", True, state.outcome, failure=state.failure)
     assert result.spoken() == say("provider")
+
+
+@pytest.mark.parametrize("error", [ProviderError("no reply", kind="timeout", provider="llm"), GenerationUnavailable("account spent")])
+def test_a_model_that_fails_after_a_write_was_sent_leaves_it_uncertain_and_says_so(monkeypatch, tmp_path, error):
+    # PR4-4175632210: verify_typed asks the classifier after the field was filled; the failure used to be spoken as
+    # the plain provider phrase, which invites a retry of a write whose effect was never observed.
+    class Failing(FakeTypeSafe):
+        def system_one(self, state, questions):
+            if any(isinstance(q, Noul) for q in questions.values()):
+                raise error
+            return super().system_one(state, questions)
+
+    world = one_page()
+    world.install(monkeypatch)
+    classifier = Failing(scripted(("type_text", None)))
+    state = runner.run(
+        RunConfig("Find", tmp_path, act=True, delay=0),
+        lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(text="invoice"), history),
+        classifier_factory=lambda: classifier,
+        control=RunControl("task"),
+    )
+    assert world.typed == {"Search": "invoice"}  # the write went out
+    assert state.outcome in ("provider failure", "generation unavailable")
+    assert state.uncertain and state.readback == "unavailable; completion unknown"
+    result = TaskResult("Find", True, state.outcome, failure=state.failure, uncertain=state.uncertain)
+    assert result.spoken() == say("uncertain")
+
+
+def test_a_model_that_fails_before_any_write_is_not_uncertain(monkeypatch, tmp_path):
+    def policy(*args):
+        raise ProviderError("no reply", kind="timeout", provider="llm")
+
+    _, state = run_with(monkeypatch, tmp_path, policy, RunControl("task"))
+    assert state.outcome == "provider failure" and not state.uncertain and state.readback == "not needed"
 
 
 def test_a_stop_during_a_re_decision_after_a_writer_focus_dispatches_nothing_more(monkeypatch, tmp_path):
