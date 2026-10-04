@@ -10,6 +10,8 @@ A language with no entry gets English.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 PHRASES: dict[str, dict[str, str]] = {
     "dry_run": {
         "en": "Dry run, nothing was done. The first move would be: {what}.",
@@ -86,9 +88,15 @@ PHRASES: dict[str, dict[str, str]] = {
 }
 
 
+def for_language(table: Mapping[str, str], language: str | None) -> str | None:
+    """The first non-empty value of `table` (keys in lower case) for a language code, by the whole code and then by the
+    part before the dash: 'zh_HK' looks up 'zh-hk' and then 'zh'. None when neither is there or no language was given."""
+    code = (language or "").lower().replace("_", "-")
+    return (table.get(code) or table.get(code.split("-")[0]) or None) if code else None
+
+
 def say(key: str, language: str | None = None, **fields: str) -> str:
     """The sentence for `key` in `language` ('yue', 'zh-HK', 'zh', ...), English when there is none."""
     table = PHRASES[key]
-    code = (language or "en").lower().replace("_", "-")
-    text = table.get(code) or table.get(code.split("-")[0]) or table["en"]
+    text = for_language(table, language) or table["en"]
     return text.format(**fields) if fields else text

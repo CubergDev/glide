@@ -339,6 +339,11 @@ class VoiceLoop:
     def resume(self) -> None:
         self._commands.put("resume")
 
+    @property
+    def ended(self) -> bool:
+        """The thread made by `start()` has finished: the loop stopped, or a microphone fault ended it."""
+        return self._thread is not None and not self._thread.is_alive()
+
     def join_turns(self, timeout: float = 5.0) -> None:
         """Wait for the worker threads of the turns heard so far."""
         end = time.monotonic() + timeout

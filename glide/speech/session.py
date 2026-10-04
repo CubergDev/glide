@@ -86,8 +86,7 @@ def build_voice(
 
 def watch(loop: VoiceLoop, *, show=print, interval_s: float = 1.0, sleep=time.sleep, running=lambda: True) -> None:
     """Show `format_status(loop.status())` every `interval_s` while the loop runs and `running()` says so. For the live
-    checks in docs/live-checks/voice.md: numbers and thresholds, never what was said. Ends when the loop's thread ends."""
-    thread = getattr(loop, "_thread", None)
-    while running() and (thread is None or thread.is_alive()):
+    checks in docs/live-checks/voice.md: numbers and thresholds, never what was said. Ends when the loop's thread ends (`loop.ended`)."""
+    while running() and not loop.ended:
         show(format_status(loop.status()))
         sleep(interval_s)

@@ -20,11 +20,10 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
-from ..assistant.audio_io import rms
+from ..assistant.audio_io import SAMPLE_BYTES, SAMPLE_RATE, NoiseFloor, rms
 
-SAMPLE_RATE = 16000
 FRAME_SAMPLES = 512
-FRAME_BYTES = FRAME_SAMPLES * 2
+FRAME_BYTES = FRAME_SAMPLES * SAMPLE_BYTES
 FRAME_S = FRAME_SAMPLES / SAMPLE_RATE  # 32 ms
 
 START_PROBABILITY = 0.5  # a frame at least this likely to be speech starts a turn
@@ -45,29 +44,16 @@ class UtteranceTooLong(ValueError):
     """Speech ran on past the limit: the turn is discarded rather than submitted half-heard."""
 
 
-class EnergyProbability:
-    """Speech or not by loudness alone, as 1.0 or 0.0. The floor is a running average of the quiet frames, so a
-    noisy room raises the bar by itself, as `Endpointer` in assistant/audio_io.py does for push-to-talk."""
-
-    def __init__(self, *, threshold: float = 500.0, ratio: float = 3.0, floor_weight: float = 0.1) -> None:
-        self.threshold = threshold
-        self.ratio = ratio
-        self.floor_weight = floor_weight
-        self.floor = 0.0
-        self._measured = False
+class EnergyProbability(NoiseFloor):
+    """Speech or not by loudness alone, as 1.0 or 0.0, against the room's floor (`NoiseFloor`, as `Endpointer` in
+    assistant/audio_io.py uses it for push-to-talk)."""
 
     def __call__(self, pcm: bytes) -> float:
         level = rms(pcm)
-        if level > max(self.threshold, self.floor * self.ratio):
+        if self.is_speech(level):
             return 1.0
-        weight = self.floor_weight if self._measured else 1.0
-        self.floor = (1 - weight) * self.floor + weight * level
-        self._measured = True
+        self.learn(level)
         return 0.0
-
-    def reset(self) -> None:
-        self.floor = 0.0
-        self._measured = False
 
 
 def file_sha256(path: Path) -> str:

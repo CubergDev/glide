@@ -26,6 +26,7 @@ from urllib.parse import urlencode
 
 import websocket
 
+from ..assistant.phrases import for_language
 from ..providers.base import SpeechAudio
 from ..providers.errors import ProviderError, from_status
 
@@ -70,16 +71,14 @@ class RealtimeElevenLabsTTS:
         return ProviderError(f"{self.name} {message}", kind=kind, provider=self.name, status=status)
 
     def _voice_for(self, voice: str | None, language: str | None) -> str:
-        code = (language or "").lower().replace("_", "-")
-        chosen = voice or self._voices.get(code) or self._voices.get(code.split("-")[0]) or self._voice
+        chosen = voice or for_language(self._voices, language) or self._voice
         if not chosen:
             raise self._error("has no voice configured for this language", "unsupported")
         return chosen
 
     def _url(self, language: str | None) -> str:
         params = {"model_id": self.model, "output_format": f"pcm_{self.sample_rate}"}
-        code = (language or "").lower().replace("_", "-")
-        if language and (mapped := self._codes.get(code) or self._codes.get(code.split("-")[0])):
+        if mapped := for_language(self._codes, language):
             params["language_code"] = mapped
         return f"{self._origin}{STREAM_PATH}?{urlencode(params)}"
 
