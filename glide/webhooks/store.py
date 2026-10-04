@@ -34,6 +34,7 @@ MAX_CALL_BYTES = 65536
 MAX_EVENT_BYTES = 8192
 MAX_TASK_EVENTS = 100
 MAX_SUMMARY_BYTES = 4096
+RECEIPT_RETENTION_S = 30 * 86400  # how long a finished delivery's receipt is kept once the receipt table is full
 REDACTED_GOAL = "redacted"
 RESOLVED_NOTE = "Reconciled by an operator."
 
@@ -101,6 +102,7 @@ class QueueStore:
         *,
         clock: Callable[[], float] = time.time,
         record_content: bool = False,
+        receipt_retention_s: float = RECEIPT_RETENTION_S,
     ):
         if not _is_int(max_pending) or max_pending < 1:
             raise ValueError("The pending-message limit must be positive.")
@@ -111,8 +113,10 @@ class QueueStore:
         self.max_events = max_events
         self.clock = clock
         self.record_content = bool(record_content)
+        self.receipt_retention_s = receipt_retention_s
         self._lock = threading.RLock()
         self._closed = False
+        self._wal_owed = False  # a redaction's WAL truncate was blocked by a reader and still has to happen
         self._prepare_path()
         self._db = sqlite3.connect(self.path, timeout=5, isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
@@ -221,14 +225,22 @@ class QueueStore:
             else:
                 self._db.commit()
                 self._protect_files()
+                if self._wal_owed:
+                    self._checkpoint()
 
     def _checkpoint(self) -> None:
-        """Fold the WAL into the database and truncate it, so replaced content does not linger in old frames."""
+        """Fold the WAL into the database and truncate it, so replaced content does not linger in old frames.
+
+        A reader on another connection can make the truncate come back busy (or fail). Then the replaced text is
+        still in the log, so the truncate is owed: it is tried again after every later commit and at close.
+        """
         with self._lock:
             if self._closed:
                 return
-            with contextlib.suppress(sqlite3.Error):  # best effort: a busy reader only delays the truncate
-                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            busy = True
+            with contextlib.suppress(sqlite3.Error):
+                busy = bool(self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0])
+            self._wal_owed = busy
             self._protect_files()
 
     def _redact(self, db: sqlite3.Connection, message_id: str) -> bool:
@@ -243,6 +255,8 @@ class QueueStore:
     def close(self) -> None:
         with self._lock:
             if not self._closed:
+                if self._wal_owed:
+                    self._checkpoint()
                 self._db.close()
                 self._closed = True
 
@@ -300,9 +314,11 @@ class QueueStore:
             # Acknowledge it even at capacity without retaining arbitrary
             # aliases, so a captured valid payload cannot exhaust receipts.
             return {"status": "duplicate", "message_id": body_duplicate["message_id"]}
-        if db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] >= self.max_events:
-            raise QueueFull("The webhook queue capacity has been reached.")
         now = self.clock()
+        if db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] >= self.max_events:
+            self._prune_receipts(db, now)  # a full table of old receipts must not refuse new events forever
+            if db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] >= self.max_events:
+                raise QueueFull("The webhook queue capacity has been reached.")
         if encoded is None:
             message_id = None
             status = "ignored"
@@ -325,6 +341,18 @@ class QueueStore:
             (source, event_id, digest, message_id, now),
         )
         return {"status": status, "message_id": message_id}
+
+    def _prune_receipts(self, db: sqlite3.Connection, now: float) -> None:
+        """Drop receipts older than the retention window, except those of messages still pending, leased or uncertain.
+
+        Only when the table is full, so a quiet queue keeps every receipt. The window is far longer than any
+        provider redelivers or any signature stays valid (see `receipt_retention_days`).
+        """
+        db.execute(
+            "DELETE FROM deliveries WHERE created_at < ? AND (message_id IS NULL OR message_id NOT IN "
+            "(SELECT id FROM messages WHERE status IN ('pending','leased','uncertain')))",
+            (now - self.receipt_retention_s,),
+        )
 
     @staticmethod
     def _expire(db: sqlite3.Connection, agent_id: str, now: float) -> None:

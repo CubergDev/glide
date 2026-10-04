@@ -107,6 +107,8 @@ class ServerSettings(Message):
     requests_per_minute: int = Field(default=1800, ge=1, le=100000)
     max_pending: int = Field(default=1000, ge=1, le=100000)
     max_events: int = Field(default=100000, ge=1, le=1000000)
+    # Once `max_events` receipts exist, receipts of finished work older than this are dropped to make room.
+    receipt_retention_days: int = Field(default=30, ge=1, le=3650)
     lease_seconds: int = Field(default=60, ge=15, le=300)
     allowed_hosts: tuple[str, ...] = Field(default=("localhost", "127.0.0.1"), min_length=1, max_length=64)
 

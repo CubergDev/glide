@@ -15,8 +15,9 @@ import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -187,7 +188,11 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         path = Path(settings.database)
         owned = store is None
         app.state.queue = store or QueueStore(
-            path, settings.max_pending, settings.max_events, record_content=settings.record_content
+            path,
+            settings.max_pending,
+            settings.max_events,
+            record_content=settings.record_content,
+            receipt_retention_s=settings.receipt_retention_days * 86400,
         )
         try:
             yield
@@ -290,8 +295,15 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         return queue(request).claim(agent_id, principal.subject, settings.lease_seconds)
 
     @app.get("/v1/agents/{agent_id}/messages")
-    def messages(request: Request, agent_id: str, principal=READER):
-        return queue(request).messages(agent_id)
+    def messages(
+        request: Request,
+        agent_id: str,
+        status: Literal["pending", "leased", "completed", "blocked", "cancelled", "failed", "uncertain"] | None = None,
+        limit: int = Query(50, ge=1, le=100),
+        principal=READER,
+    ):
+        """Newest first. `status=uncertain` finds the rows that block the agent, however many newer ones are queued."""
+        return queue(request).messages(agent_id, limit=limit, status=status)
 
     @app.get("/v1/agents/{agent_id}/messages/{message_id}")
     def one_message(request: Request, agent_id: str, message_id: str, principal=READER):

@@ -734,3 +734,52 @@ def test_a_resolution_keeps_its_summary_only_under_recording(request, fixture, k
     lease = claim(store)
     store.finish(*args(lease), "uncertain", summary="s", note="n")
     assert store.resolve("laptop", "m1", "failed", summary="Reviewed by the operator.")["summary"] == kept
+
+
+def test_a_full_receipt_table_drops_old_receipts_of_finished_work_instead_of_refusing_forever(tmp_path):
+    """PR7-4175614924: nothing ever deleted receipts, so after max_events every callback got 503."""
+    clock = SimpleNamespace(now=1000.0)
+    store = QueueStore(tmp_path / "q.sqlite", max_events=3, clock=lambda: clock.now, receipt_retention_s=100)
+    try:
+        enqueue(store, "done")
+        store.finish(*args(claim(store)), "completed")
+        enqueue(store, "blocked-on-operator")
+        lease = claim(store)
+        store.finish(*args(lease), "uncertain")  # an operator still has to look at this one
+        store.enqueue("github", "ignored", "digest-ignored", None)  # a receipt with no message at all
+        with pytest.raises(QueueFull):  # table full, nothing old enough yet
+            enqueue(store, "new-1")
+        clock.now += 101
+        assert enqueue(store, "new-1")["status"] == "accepted"
+        assert enqueue(store, "new-2")["status"] == "accepted"  # the ignored receipt went too
+        with pytest.raises(QueueFull):  # the uncertain message's receipt is never dropped to make room
+            enqueue(store, "new-3")
+        assert enqueue(store, "blocked-on-operator")["status"] == "duplicate"
+        with sqlite3.connect(tmp_path / "q.sqlite") as db:
+            kept = {row[0] for row in db.execute("SELECT event_id FROM deliveries")}
+        assert kept == {"blocked-on-operator", "new-1", "new-2"}  # the aged finished and ignored receipts are gone
+    finally:
+        store.close()
+
+
+def test_a_blocked_redaction_checkpoint_is_retried_by_the_next_commit(tmp_path):
+    """PR7-4175264726: a reader can make wal_checkpoint(TRUNCATE) return busy; the old text must still go."""
+    path = tmp_path / "q.sqlite"
+    marker = call()["goal"].encode()
+    store = QueueStore(path)  # records no content: finishing redacts the goal
+    reader = sqlite3.connect(path, isolation_level=None)
+    try:
+        store._db.execute("PRAGMA busy_timeout=0")  # do not wait for the reader
+        enqueue(store)
+        lease = claim(store)
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM messages").fetchall()  # holds a read snapshot of the WAL
+        assert store.finish(*args(lease), "completed") == {"message_id": "m1", "status": "completed"}
+        wal = path.with_name(path.name + "-wal")
+        assert marker in wal.read_bytes()  # the truncate was blocked: the scenario of the finding
+        reader.close()
+        store.messages("laptop")  # any later commit pays the owed truncate
+        assert marker not in (wal.read_bytes() if wal.exists() else b"")
+    finally:
+        reader.close()
+        store.close()
