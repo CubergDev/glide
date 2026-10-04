@@ -26,6 +26,7 @@ from glide.providers.errors import ProviderError
 from glide.speech import turns, vad
 from glide.speech.audio import DeviceFault
 from glide.speech.echo import EchoStats
+from glide.speech.settings import SpeechSettings
 from glide.speech.turns import BargeInGate, _Run, _Turn
 from glide.speech.vad import FRAME_BYTES, FRAME_S
 
@@ -36,7 +37,10 @@ WAIT = 3.0
 
 def test_the_shipped_barge_in_numbers_are_the_documented_ones():
     """A change of any of these retunes a documented, measured policy: change it on purpose, with the sweeps and the docs."""
-    assert (turns.BARGE_MIN_VOICED_MS, turns.BARGE_MARGIN_DB, turns.BARGE_MIN_ERLE_DB) == (190, 8.0, 6.0)
+    shipped = SpeechSettings()  # the three the person can change live in the [speech] table; this is their one home
+    assert (shipped.barge_min_voiced_ms, shipped.barge_margin_db, shipped.barge_min_erle_db) == (190, 8.0, 6.0)
+    gate = BargeInGate()  # and an unconfigured gate takes exactly those
+    assert (gate.min_voiced_frames, gate.margin_db, gate.min_erle_db) == (6, 8.0, 6.0)
     assert (turns.PROBE_FRAMES, turns.PROBE_MARGIN_LESS_DB, turns.PROBE_COOLDOWN_S) == (3, 3.0, 1.0)
     assert (turns.PROBE_QUIET_FRAMES, turns.PROBE_MAX_FRAMES, turns.HOLD_MAX_FRAMES) == (12, 94, 31)
     assert (turns.SUSPECT_RATIO, turns.SOUND_GAP_FRAMES, turns.RUN_GAP_FRAMES) == (1.4, 12, 2)
@@ -280,13 +284,46 @@ def test_speech_that_resumes_inside_the_merge_window_is_not_cut_off_when_the_old
     assert bytes(stt.audio[0]).count(LOUD) == 65
 
 
+def test_a_turn_merged_from_several_stretches_is_capped_as_a_whole_not_per_stretch():
+    # each stretch of speech is under the detector's own cap, but the turn they merge into is not: it is aborted, so a
+    # hands-free loop cannot be kept recording (and later transcribed) without end by speech that keeps resuming
+    stt = ScriptedSTT(["never", "never"])
+    r = rig([*speech(30), *quiet(700), *speech(30), *quiet(700), *quiet(1600)], stt, merge_window_s=1.5)
+    r.loop._detector.max_frames = 60
+    run(r)
+    assert stt.ended == [] and r.heard == [] and any("seconds" in w for w in r.warned)
+
+
+def test_the_merged_turn_cap_is_exact_a_turn_of_exactly_the_cap_stands_and_one_frame_more_does_not():
+    script = [*speech(30), *quiet(700), *speech(30), *quiet(700), *quiet(1600)]  # this script makes a turn of 148 frames
+    ok = ScriptedSTT(["one request"])
+    at = rig(script, ok, merge_window_s=1.5)
+    at.loop._detector.max_frames = 148
+    run(at)
+    assert at.heard == ["one request"] and ok.ended == [0]
+    over = ScriptedSTT(["never"])
+    one_less = rig(script, over, merge_window_s=1.5)
+    one_less.loop._detector.max_frames = 147
+    run(one_less)
+    assert over.ended == [] and one_less.heard == [] and any("seconds" in w for w in one_less.warned)
+
+
 def test_an_utterance_too_long_ends_that_turn_and_what_follows_is_a_new_one_not_its_continuation():
     stt = ScriptedSTT(["never", "the rest"])
     r = rig([*speech(40), *quiet(700)], stt)
-    r.loop._detector.max_frames = 30  # the first 30 frames are a turn; the 31st is one too many; the rest start another
+    r.loop._detector.max_frames = 30  # a turn counts every frame it holds (merged stretches too): the 31st is one too many
     run(r)
-    assert len(stt.streams) == 2 and stt.ended == [1]  # the first was aborted; only the second was ever completed
-    assert r.heard == ["the rest"] and any("seconds" in w for w in r.warned)
+    # the first was aborted (nothing of it submitted); the frames after the cut are skipped until quiet, then no frame
+    # of the old turn may ride into a new one: nothing is completed, and the person is told why
+    assert stt.ended == [] and r.heard == [] and any("seconds" in w for w in r.warned)
+    assert len(stt.streams) == 1
+    # speech after the quiet that follows starts a NEW turn, which is transcribed whole
+    stt2 = ScriptedSTT(["never", "the rest"])
+    r2 = rig([*speech(40), *quiet(700), *speech(5), *quiet(700)], stt2)
+    r2.loop._detector.max_frames = 30
+    run(r2)
+    assert len(stt2.streams) == 2 and stt2.ended == [1] and r2.heard == ["the rest"]
+    assert bytes(stt2.audio[1]).count(LOUD) == 5  # only what was said after the cut, none of the aborted turn
 
 
 def test_no_empty_chunk_is_ever_sent_to_the_transcriber():
@@ -392,10 +429,11 @@ def test_an_idle_loop_pauses_exactly_when_the_configured_time_has_passed():
     now = [129.99]
     r, told = idle_rig(now)
     r.loop._check_idle()
-    assert told == [] and r.loop._commands.empty()
+    assert told == [] and not r.loop._paused and r.device.calls == []
     now[0] = 130.0
     r.loop._check_idle()
-    assert told == [130.0] and r.loop._commands.get_nowait() == "pause"
+    # the microphone is off before anyone is called: a callback that blocks or raises cannot leave it on
+    assert told == [130.0] and r.loop._paused and r.device.calls == ["pause"]
 
 
 def test_anything_in_flight_keeps_the_loop_awake_and_restarts_the_idle_count():
