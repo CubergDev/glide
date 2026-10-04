@@ -31,15 +31,15 @@ def extra_message(command: str, extra: str, lacking: list[str]) -> str:
     return f"{command} needs the {extra} extra (missing: {', '.join(lacking)}): uv sync --extra {extra}"
 
 
-def webhooks_file(environ: Mapping[str, str] | None, toml: Path | None) -> Path:
+def webhooks_file(environ: Mapping[str, str] | None, toml: Path | None, *, foreign: bool = False) -> Path:
     """The webhook service's JSON file: $GLIDE_WEBHOOK_CONFIG, else `config = ...` under [webhooks] in `toml` (the
-    glide.toml in use, or None), else webhooks.json."""
+    glide.toml in use, or None), else webhooks.json. A `foreign` file (a project's own glide.toml) may not name it."""
     from .memory.settings import SettingsError, read_table
 
     env = os.environ if environ is None else environ
     if named := (env.get(WEBHOOKS_ENV) or "").strip():
         return Path(named).expanduser()
-    table = read_table("webhooks", toml)
+    table = read_table("webhooks", toml, foreign=foreign)
     for key in table:
         if key not in _WEBHOOKS_KEYS:
             raise SettingsError(f"[webhooks] has an unknown key {key!r} (known: {', '.join(_WEBHOOKS_KEYS)})")
@@ -50,11 +50,18 @@ def webhooks_file(environ: Mapping[str, str] | None, toml: Path | None) -> Path:
 
 
 def feature_report(glide_config, environ: Mapping[str, str] | None = None) -> list[tuple[str, bool, str]]:
-    """(feature, ok, line) for voice, memory, webhooks and mcp. `ok` is False only for a setting that is wrong; a feature
+    """(feature, ok, line) for voice, memory, webhooks, mcp, browser and research. `ok` is False only for a setting that is wrong; a feature
     that is switched off, or an extra that is not installed, is a state to report, not a failure."""
     env = os.environ if environ is None else environ
     rows = []
-    for name, report in (("voice", _voice), ("memory", _memory), ("webhooks", _webhooks), ("mcp", _mcp)):
+    for name, report in (
+        ("voice", _voice),
+        ("memory", _memory),
+        ("webhooks", _webhooks),
+        ("mcp", _mcp),
+        ("browser", _browser),
+        ("research", _research),
+    ):
         try:
             rows.append((name, True, report(glide_config, env)))
         except ValueError as error:  # SettingsError and ConfigError are both ValueErrors, and name the setting, never a value
@@ -104,11 +111,11 @@ def _memory(glide_config, env) -> str:
     if not settings.enabled:
         return "off (set enabled = true under [memory], or GLIDE_MEMORY=1, to turn it on)"
     capture = "auto_capture on" if settings.auto_capture else "auto_capture off"
-    return f"on, {capture}; database {settings.database_path(env)}"
+    return f"on, {capture}; database {settings.database_path(env)}; read by `glide memory` and `glide mcp serve` only (the assistant does not use it yet)"
 
 
 def _webhooks(glide_config, env) -> str:
-    path = webhooks_file(env, _source(glide_config))
+    path = webhooks_file(env, _source(glide_config), foreign=_foreign(glide_config))
     if not path.is_file():
         return f"off (no {path})"
     try:
@@ -132,6 +139,20 @@ def _mcp(glide_config, env) -> str:
     return f"client servers configured: {names} (none started); server_memory {settings.server_memory}"
 
 
+def _browser(glide_config, env) -> str:
+    from .computer import browser_settings
+
+    settings = browser_settings.resolve(table(glide_config, "browser"), env)  # the check `glide computer` makes at start-up
+    fallback = f", then {', '.join(settings.fallback)}" if settings.fallback else ""
+    return f"provider {settings.provider}{fallback} (from {settings.source})"
+
+
+def _research(glide_config, env) -> str:
+    from .computer import config
+
+    return f"{config.research_budget(table(glide_config, 'research'), env)} model calls per research task"
+
+
 def _source(glide_config) -> Path | None:
     """The glide.toml the configuration was read from, or None when it is the built-in defaults. It is never searched
     for again: the tables are read from the file the providers were."""
@@ -139,8 +160,12 @@ def _source(glide_config) -> Path | None:
     return source if source.is_file() else None
 
 
+def _foreign(glide_config) -> bool:
+    return bool(getattr(glide_config, "foreign", False))
+
+
 def table(glide_config, name: str) -> Mapping[str, Any]:
     """One top-level table of the glide.toml the configuration was read from ({} when there is none, or no such table)."""
     from .memory.settings import read_table
 
-    return read_table(name, _source(glide_config))
+    return read_table(name, _source(glide_config), foreign=_foreign(glide_config))

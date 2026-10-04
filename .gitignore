@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 runs/
+inspections/
 .pytest_cache/
 .ruff_cache/
 config.toml
