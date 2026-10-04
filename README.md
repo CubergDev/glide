@@ -64,10 +64,10 @@ screen, input, microphone or app.
 
 | Command | What it does | Takes control of | Approval |
 |---|---|---|---|
-| `glide ask TEXT [--speak]` | One answer, or one computer task | Answer: nothing (`--speak` plays audio). A computer request is a **dry run that still captures the screen**; with `--act` it clicks and types | yes if it may route to the computer, or with `--act` or `--speak` |
-| `glide chat [--speak] [--act]` | A typed conversation; `/stop /act /pin /unpin /status /help /quit` | As `ask`. `/act` turns real clicking and typing on | yes, as `ask` |
-| `glide listen [--auto] [--text-only] [--act]` | Push-to-talk: Enter starts and stops | The **microphone**, the speaker, and as `ask` for tasks | yes |
-| `glide voice [--act]` | Hands-free: always listening, interruptible (`speech` extra) | The **microphone** and speaker for as long as it runs; with `--act`, the screen, keyboard and mouse | yes, always |
+| `glide ask TEXT [--speak] [--engine E]` | One answer, or one computer task | Answer: nothing (`--speak` plays audio). A computer request is a **dry run that still captures the screen**; with `--act` it clicks and types | yes if it may route to the computer, or with `--act` or `--speak` |
+| `glide chat [--speak] [--act] [--engine E]` | A typed conversation; `/stop /act /pin /unpin /status /help /quit` | As `ask`. `/act` turns real clicking and typing on | yes, as `ask` |
+| `glide listen [--auto] [--text-only] [--act] [--engine E]` | Push-to-talk: Enter starts and stops | The **microphone**, the speaker, and as `ask` for tasks | yes |
+| `glide voice [--act] [--engine E]` | Hands-free: always listening, interruptible (`speech` extra) | The **microphone** and speaker for as long as it runs; with `--act`, the screen, keyboard and mouse | yes, always |
 | `glide computer GOAL [--act] [--engine legacy\|structured] [--record-content]` | Drive the screen toward a goal. `glide-computer` is the same command | Without `--act`: **captures the screen** once and says what it would do. With `--act`: mouse, keyboard, apps. `--engine structured` with a browser provider attaches to the browser you started | yes, always |
 | `glide inspect [GOAL]` | Count down, capture the screen, show what the classifier would be sent. `glide-inspect` is the same | **Captures the screen** and, unless `--no-open`, opens two files | yes, always |
 | `glide doctor [--live]` | What each provider slot can do, and what is switched on | Nothing without `--live`. `--live` sends real requests (spends money) and reaches any local model server you configured | `--live` only |
@@ -76,6 +76,14 @@ screen, input, microphone or app.
 | `glide mcp status`, `glide mcp serve` | Show the MCP settings; serve Glide over stdio | `serve` reads stdin and writes stdout until it closes; it offers no tools unless you set `server_memory`. It starts no other program | no for `status`; ask for `serve` |
 | `glide webhooks serve` | Receive authenticated webhooks and queue agent requests (`webhooks` extra) | **Binds a port** (loopback by default). `--check-config` builds and starts nothing | yes to bind a port |
 | `glide webhooks work [--allow-model] [--allow-desktop [--act]]` | Consume queued requests, one at a time | Calls your server and, with `--allow-model`, your LLM. With `--allow-desktop`, **the screen and apps**, and each run still needs your yes on that terminal. `--act` lets an approved run click and type | yes; and a yes per run |
+
+**Which engine drives a computer task.** `legacy` (the screen loop) is the default everywhere. `structured` (planned effects
+checked after each action, the research route and the `[browser]` providers) is opt-in from every front end: `--engine
+structured` on `ask`, `chat`, `listen`, `voice` and `computer`, `GLIDE_ENGINE`, `[computer] engine` in `glide.toml`, the
+app's `computer.engine` setting, or the toggle in the pet. The flag beats the environment, which beats the file. It stays
+opt-in because the structured engine is not live-qualified, and the audit rated the legacy loop weaker on untrusted screen
+text, so flipping the default is your decision after the live checks in `docs/LIVE_CHECKS.md`. `glide doctor` and the
+`glide computer` header print the engine in force.
 
 Older names still work: `glide-computer`, `glide-inspect`, `glide-webhooks` (`glide webhooks serve`) and
 `glide-webhook-worker` (`glide webhooks work`).

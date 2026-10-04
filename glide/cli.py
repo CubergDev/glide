@@ -54,6 +54,10 @@ FAILED_OUTCOMES = frozenset(  # a task that could not run
     {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
 )
 POLL_S = 0.1  # how often the terminal loop looks up from waiting for a line
+ENGINE_HELP = (
+    "execution engine for computer tasks: legacy (the screen loop) or structured (planned, verified effects). "
+    "Default: $GLIDE_ENGINE, then [computer] engine in glide.toml, then legacy"
+)
 QUIT_WORDS = frozenset({"q", "quit", "exit", "/quit", "/exit"})
 
 
@@ -91,6 +95,13 @@ def _doctor(config, live: bool) -> int:
     from .providers import doctor
 
     print(f"config: {config.source}")
+    try:
+        print(f"engine: {features.engine_for(config)}")
+    except ValueError as exc:
+        print(f"engine: error: {clean(str(exc), config)}")
+        engine_ok = False
+    else:
+        engine_ok = True
     if config.defaulted:
         print(f"built-in chains in use for: {', '.join(config.defaulted)}")
     for warning in config.warnings:
@@ -103,7 +114,7 @@ def _doctor(config, live: bool) -> int:
     report = features.feature_report(config)
     for name, _, line in report:
         print(f"  {name:<9}{clean(line, config)}")
-    return 1 if doctor.failed(rows) or not all(ok for _, ok, _ in report) else 0
+    return 1 if doctor.failed(rows) or not engine_ok or not all(ok for _, ok, _ in report) else 0
 
 
 def _read_line(prompt: str = "") -> str:
@@ -596,6 +607,18 @@ def print_status(config) -> None:
             print(f"  {format_switch(event, config)}")
 
 
+def _choose_engine(config, flag: str | None) -> str | None:
+    """Settle the execution engine for ask, chat, listen and voice before anything starts: a bad value is one line and exit 2.
+    The choice goes on the configuration, where `ComputerTask` reads it through the same resolver as every front end."""
+    try:
+        engine = features.engine_for(config, flag)
+    except ValueError as exc:
+        print(f"glide: {clean(str(exc), config)}", file=sys.stderr)
+        return None
+    config.engine_choice = flag
+    return engine
+
+
 # -- Entry ------------------------------------------------------------------------------------------
 
 
@@ -613,6 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
     work.add_argument(
         "--act", action="store_true", help="really click and type on this Mac (default: a dry run that says what it would do)"
     )
+    work.add_argument("--engine", metavar="ENGINE", help=ENGINE_HELP)
     work.add_argument("--runs", type=Path, default=DEFAULT_RUNS_DIR, help="where a computer task writes its run folder")
     work.add_argument(
         "--timings", action="store_true", help="print how long the route, first word and first audio took, to stderr"
@@ -642,6 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     voice = commands.add_parser("voice", help="hands-free voice loop: always listening, interruptible (speech extra)")
     voice.add_argument("--act", action="store_true", help="really click and type on this Mac (default: tasks are dry runs)")
+    voice.add_argument("--engine", metavar="ENGINE", help=ENGINE_HELP)
     voice.set_defaults(handler=cmd_voice)
 
     # The rest take their own options. Their parsers live in their own modules and are imported only when the command
@@ -710,6 +735,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"glide: {clean(str(exc))}", file=sys.stderr)
         return 2
     try:
+        if hasattr(args, "engine") and not getattr(args, "passthrough", False):
+            engine = _choose_engine(config, args.engine)
+            if engine is None:
+                return 2
         return args.handler(args, config)
     finally:
         with contextlib.suppress(Exception):

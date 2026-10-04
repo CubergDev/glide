@@ -181,3 +181,14 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 
 # [research]
 # calls = 12
+
+# ---------------------------------------------------------------------------------------------------------------
+# Execution engine for computer tasks, from `glide ask`, `chat`, `listen`, `voice`, `computer`, the app and the pet.
+#   engine  "legacy" (the default: the screen loop) or "structured" (planned effects checked after each action,
+#           with the research route and the [browser] providers). The structured engine is not live-qualified yet,
+#           so it stays opt-in until you have run docs/LIVE_CHECKS.md. GLIDE_ENGINE overrides this and --engine
+#           overrides both.
+# ---------------------------------------------------------------------------------------------------------------
+
+# [computer]
+# engine = "legacy"

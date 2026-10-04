@@ -290,9 +290,17 @@ class ComputerTask:
                 failure="this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security",
             )
         try:
+            engine_fields = self._engine_fields()
+        except ValueError as exc:  # a bad [computer], [browser] or [research] setting: nothing was started
+            return TaskResult(self.goal, self.act, "not configured", failure=self._scrub(str(exc)), folder=self.folder)
+        try:
             writer = self._config.writer()
             cfg = runner.RunConfig(
-                goal=self.goal, out=self.folder, act=self.act, record_content=bool(getattr(self._config, "record_content", False))
+                goal=self.goal,
+                out=self.folder,
+                act=self.act,
+                record_content=bool(getattr(self._config, "record_content", False)),
+                **engine_fields,
             )
 
             def ctx_factory(typesafe, history):
@@ -327,6 +335,23 @@ class ComputerTask:
             uncertain=state.uncertain,
             readback=state.readback,
         )
+
+    def _engine_fields(self) -> dict:
+        """The engine in force (`features.engine_for`: the one resolver every front end shares) and, for the structured one, its
+        browser and research settings from glide.toml. A bad setting raises ValueError, which `_execute` reports as not configured."""
+        from .. import features
+        from ..computer import browser_settings
+        from ..computer import config as computer_config
+
+        engine = features.engine_for(self._config)
+        if engine != "structured":
+            return {}
+        browser_settings.use(features.table(self._config, "browser"))
+        return {
+            "engine": engine,
+            "execution_browser": computer_config.browser(),
+            "research_calls": computer_config.research_budget(features.table(self._config, "research")),
+        }
 
     def _scrub(self, text: str) -> str:
         scrub = getattr(self._config, "scrub", None)
