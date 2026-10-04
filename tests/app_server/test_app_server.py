@@ -463,3 +463,18 @@ def test_a_disconnect_settles_the_request_as_disconnected_not_as_waiting_out_its
     thread.join(WAIT)
     assert pending.outcome == "disconnected"
     server.stop()
+
+
+def test_an_approve_that_loses_to_a_cancel_is_reported_to_the_app_as_cancelled():
+    """audit2 finding 5: Approve and Stop in the same tick. The task is refused, so the app must not be told 'approved'."""
+    server = make_server()
+    client, _ = connect(server)
+    control = RunControl()
+    result, thread = ask_in_thread(server, "input", "Control this Mac to: open Notes", control=control)
+    ident = client.read_type("approval_request")["data"]["approval_id"]
+    control.cancelled.set()  # the cancel is already in effect, but has not woken the waiter yet
+    client.send({"v": 1, "type": "approval_response", "data": {"approval_id": ident, "decision": "approve"}})
+    thread.join(WAIT)
+    assert result == [False]
+    assert client.read_type("approval_closed")["data"]["outcome"] == "cancelled"
+    server.stop()

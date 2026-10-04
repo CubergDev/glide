@@ -370,7 +370,7 @@ class Approvals:
             except Abort:
                 pass  # the request was stopped before or while it waited
             cancelled = control is not None and control.cancelled.is_set()
-            self._settle(pending, "cancelled" if cancelled else "expired")  # only if nothing has settled it
+            self._settle(pending, "cancelled" if cancelled else "expired", override_approved=cancelled)
             return pending.outcome == "approved" and not cancelled and not session.closed
         finally:
             with self._lock:
@@ -398,9 +398,10 @@ class Approvals:
             self._settle(pending, "disconnected")
             pending.wake.set()
 
-    def _settle(self, pending: _Pending, outcome: str) -> None:
+    def _settle(self, pending: _Pending, outcome: str, *, override_approved: bool = False) -> None:
+        """Set the outcome if nothing has. `override_approved`: a cancel that beat the waiter to the answer wins over 'approved'."""
         with self._lock:
-            if pending.outcome is None:
+            if pending.outcome is None or (override_approved and pending.outcome == "approved"):
                 pending.outcome = outcome
 
 
