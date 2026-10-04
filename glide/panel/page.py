@@ -182,7 +182,7 @@ function drawFeatures(){const root=clear($("features"));
     if(type==="bool"){inp=el("input",null,{type:"checkbox"});inp.checked=v===true;inp.onchange=()=>{D.features[n]=inp.checked;updPending()}}
     else if(type==="engine"){inp=el("select");for(const e of S.engines)inp.append(el("option",e,{value:e}));inp.value=v;inp.onchange=()=>{D.features[n]=inp.value;updPending();drawFeatures()}}
     else{inp=el("input",null,{type:"text",size:5,value:String(v)});inp.oninput=()=>{const x=Number(inp.value);if(Number.isInteger(x))D.features[n]=x;updPending()}}
-    row.append(el("label",label+" ",null,inp),n in D.features?el("span","changed",{class:"warn"}):null);root.append(row,el("div",note,{class:"mut"}))}
+    row.append(el("label",label+" ",null,inp));if(n in D.features)row.append(el("span","changed",{class:"warn"}));root.append(row,el("div",note,{class:"mut"}))}
   if(featVal("engine")==="structured")root.append(el("div","The structured engine is selected. It has not passed live checks: legacy stays the default until it has.",{class:"note"}));
   root.append(el("div",null,{class:"row"},el("button","Check this page",{onclick:()=>check($("featerr"))})),el("div",null,{id:"featerr"}));updPending()}
 
