@@ -371,9 +371,14 @@ class TaskRunner:
         return self.current is not None and self.current.running
 
     def _fresh_folder(self) -> Path:
+        """A run folder no other run has, made here: another Glide process may start in the same second, and `mkdir`
+        is the one step that tells two of them apart."""
         base = self._runs_dir / time.strftime("%Y%m%d-%H%M%S")
         folder, n = base, 1
-        while folder.exists():
-            n += 1
-            folder = base.with_name(f"{base.name}-{n}")
-        return folder
+        while True:
+            try:
+                folder.mkdir(parents=True)
+                return folder
+            except FileExistsError:
+                n += 1
+                folder = base.with_name(f"{base.name}-{n}")
