@@ -145,3 +145,19 @@ def test_the_doctor_checks_the_browser_and_research_tables_glide_computer_checks
     rows = {name: (ok, line) for name, ok, line in feature_report(config, {"HOME": str(tmp_path)})}
     assert rows["browser"] == (True, "provider native (from glide.toml)")
     assert rows["research"] == (True, "5 model calls per research task")
+
+
+def test_the_doctor_says_memory_is_not_read_by_the_assistant_while_that_is_true(tmp_path):
+    # finding 14: "on, auto_capture on" implied chat was capturing; nothing in the assistant imports memory
+    from pathlib import Path
+
+    import glide.assistant as assistant_package
+
+    for path in Path(assistant_package.__file__).parent.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert "glide.memory" not in text and "from ..memory" not in text, f"{path.name} reads memory: update the doctor line"
+    config = load_config(None, {"HOME": str(tmp_path)}, cwd=tmp_path, home=tmp_path)
+    line = dict((n, line) for n, _, line in feature_report(config, {"GLIDE_MEMORY": "1", "GLIDE_DATA_DIR": str(tmp_path)}))[
+        "memory"
+    ]
+    assert line.startswith("on,") and "the assistant does not use it yet" in line

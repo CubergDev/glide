@@ -111,7 +111,7 @@ def _memory(glide_config, env) -> str:
     if not settings.enabled:
         return "off (set enabled = true under [memory], or GLIDE_MEMORY=1, to turn it on)"
     capture = "auto_capture on" if settings.auto_capture else "auto_capture off"
-    return f"on, {capture}; database {settings.database_path(env)}"
+    return f"on, {capture}; database {settings.database_path(env)}; read by `glide memory` and `glide mcp serve` only (the assistant does not use it yet)"
 
 
 def _webhooks(glide_config, env) -> str:
