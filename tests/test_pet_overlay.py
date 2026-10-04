@@ -47,6 +47,7 @@ def test_offscreen_qt_never_requests_a_native_window_handle(monkeypatch):
     CONFIGURE_OVERLAY(widget)
 
 
+@pytest.mark.expect_refusals
 def test_new_native_panel_entrypoints_are_guarded():
     with pytest.raises(RuntimeError, match="real machine"):
         pet_overlay.configure_overlay(object())

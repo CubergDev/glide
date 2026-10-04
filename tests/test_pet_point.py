@@ -222,6 +222,7 @@ def test_the_pin_converts_coordinates_without_touching_the_pointer(qt_app, monke
     assert SHOW_MARKER([float("nan"), 0]) is None
 
 
+@pytest.mark.expect_refusals
 def test_the_real_pin_and_its_removal_are_refused_in_tests():
     for call, args in (
         (pet.show_point_marker, ([1, 2],)),

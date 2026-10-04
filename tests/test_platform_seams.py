@@ -427,7 +427,7 @@ OBSERVATION = {
     "check_abort", "abort_hint", "sleep_watching", "accessibility_trusted", "screen_capture_trusted",
     "request_permissions", "frontmost_app_and_pid", "browser_url", "open_path", "frontmost_window_bounds",
     "screenshot", "display_scale", "recognize_text", "focused_field", "actionable_elements", "ax_value",
-    "execution_tabs", "execution_scrolls", "execution_labels",
+    "execution_tabs", "execution_scrolls", "execution_labels", "mouse_location", "point_target", "point_region",
 }  # fmt: skip
 SURFACE = {name for name, value in vars(Desktop).items() if callable(value) and not name.startswith("_")}
 GATED = sorted(SURFACE - OBSERVATION)

@@ -17,6 +17,7 @@ from test_cancel_assistant import Model, llm_of
 from glide.assistant.phrases import PHRASES, say
 from glide.assistant.tasks import TaskResult
 from glide.computer import runner
+from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
 
 HONEST = "I stopped, and the last action may or may not have happened: check the screen."
@@ -25,6 +26,7 @@ ROUTE = route_json("computer", reply="On it.", goal="Send the invoice")
 
 def rig_for(tmp_path, monkeypatch, fake_run):
     monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(desktop, "accessibility_trusted", lambda: True)  # an acting task asks for the permission first
     return build(tmp_path, llm=llm_of(Model(chats=[ROUTE])), writer=object(), classifier=FakeClassifier(None))
 
 

@@ -80,8 +80,8 @@ ALLOWED: dict[str, Allowed] = {
         "execution",
     ),
     "glide/computer/macos.py": Allowed(
-        Counter({"subprocess": 1, "subprocess.run": 4}),
-        "the macOS adapter: osascript, `open` and `screencapture`; every call sits behind `osascript()` or a Desktop primitive",
+        Counter({"subprocess": 1, "Popen": 1, "subprocess.run": 3}),
+        "the macOS adapter: osascript (a Popen the run control can terminate, with a deadline), `open` and `screencapture`; every call sits behind `osascript()` or a Desktop primitive",
         "platform",
     ),
     "glide/computer/windows.py": Allowed(
@@ -268,6 +268,9 @@ READS = {
     "execution_tabs",
     "execution_scrolls",
     "execution_labels",
+    "mouse_location",
+    "point_target",
+    "point_region",
 }
 RECEIVERS = {"desktop", "host", "adapter", "macos", "windows"}
 ADAPTERS = {"glide/computer/macos.py", "glide/computer/windows.py", "glide/computer/platform_adapter.py"}  # they implement it

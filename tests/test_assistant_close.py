@@ -15,6 +15,7 @@ from test_cancel_assistant import Model, in_thread, llm_of
 
 from glide.assistant.core import Assistant
 from glide.computer import runner
+from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
 
 ROUTE = route_json("computer", reply="On it.", goal="Send the invoice")
@@ -40,6 +41,7 @@ def late_unwinding(monkeypatch):
         return RunState(outcome="aborted (stopped by the user)", uncertain=True, readback="captured; completion unknown")
 
     monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(desktop, "accessibility_trusted", lambda: True)  # an acting task asks for the permission first
     return run
 
 
@@ -95,6 +97,7 @@ def test_close_with_no_task_neither_waits_nor_warns(tmp_path):
 
 def test_close_with_a_finished_task_neither_waits_nor_warns(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run", lambda *a, **k: RunState(outcome="done"))
+    monkeypatch.setattr(desktop, "accessibility_trusted", lambda: True)
     rig = build(tmp_path, llm=llm_of(Model(chats=[ROUTE])), writer=object(), classifier=FakeClassifier(None))
     rig.assistant.handle_text("send the invoice", act=True)
     assert rig.assistant.close() is True and rig.warned == []

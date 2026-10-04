@@ -164,6 +164,7 @@ def test_the_pet_leaves_no_file_behind(pet_window, tmp_path, monkeypatch):
 # -- the entry point, and the refusals that keep tests off the real machine ----------------------------
 
 
+@pytest.mark.expect_refusals
 def test_the_real_window_and_event_loop_are_refused_in_tests():
     from glide.ui import pet_ui
 
