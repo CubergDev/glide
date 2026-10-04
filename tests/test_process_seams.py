@@ -527,3 +527,75 @@ def test_putting_the_work_back_in_front_after_a_question_goes_through_dispatch(m
     cfg = runner.RunConfig(goal="goal", out=tmp_path, act=True)
     runner.hand_off(cfg, ctx, state, 1, lambda *a, **k: None)
     assert machine == [("activate", True)]
+
+
+# ------------------------------------------------------------------ the legacy DOM loop is not production
+
+LEGACY_LOOP = {f"glide.computer.browser.{name}" for name in ("runner", "decide", "perceive", "report", "act")}
+
+
+def imported_modules(source: str, package: str) -> set[str]:
+    """Every glide module `source` imports, at the top or inside a function, and each package above it (importing
+    a.b.c runs a/__init__ and a/b/__init__). `package` is the package the file sits in, for relative imports."""
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = package.split(".")[: len(package.split(".")) - (node.level - 1)] if node.level else []
+            full = ".".join([*base, *([node.module] if node.module else [])])
+            names = [full, *(f"{full}.{a.name}" for a in node.names)]
+        else:
+            continue
+        for name in names:
+            parts = name.split(".")
+            found.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+    return {m for m in found if m.startswith("glide")}
+
+
+def module_name(path: str) -> tuple[str, str]:
+    parts = path.removesuffix(".py").split("/")
+    if parts[-1] == "__init__":
+        return ".".join(parts[:-1]), ".".join(parts[:-1])
+    return ".".join(parts), ".".join(parts[:-1])
+
+
+def test_the_legacy_browser_loop_is_imported_by_nothing_but_itself():
+    """browser/{runner,decide,perceive,report,act}.py are the old DOM loop. No other module of glide/ imports them (the
+    package `__init__` used to, so `from ..browser.cdp import ...` loaded all of it), and no entry point reaches them."""
+    users = {}
+    for path, source in sources().items():
+        name, package = module_name(path)
+        hit = (imported_modules(source, package) & LEGACY_LOOP) - {name}
+        if hit and name not in LEGACY_LOOP:
+            users[name] = sorted(hit)
+    assert not users, f"production code imports the legacy browser loop: {users}"
+
+
+def test_nothing_imports_by_a_computed_name_so_the_scan_above_sees_every_import():
+    dynamic = {
+        path
+        for path, source in sources().items()
+        if any(
+            (isinstance(n, ast.Name) and n.id in {"__import__", "import_module"})
+            or (isinstance(n, ast.Attribute) and n.attr in {"import_module", "__import__", "spec_from_file_location"})
+            for n in ast.walk(ast.parse(source))
+        )
+    }
+    assert dynamic == {"glide/computer/platform_adapter.py"}, dynamic
+    adapter = sources()["glide/computer/platform_adapter.py"]
+    assert adapter.count("import_module(") == 2 and 'f"{__package__}.windows"' in adapter and 'f"{__package__}.macos"' in adapter
+
+
+def test_no_entry_point_group_loads_a_module_by_name():
+    import tomllib
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert set(project["scripts"].values()) == {
+        "glide.cli:main",
+        "glide.cli:computer_main",
+        "glide.cli:inspect_main",
+        "glide.webhooks.cli:main",
+        "glide.webhooks.worker:main",
+    }
+    assert not {"gui-scripts", "entry-points"} & set(project)
