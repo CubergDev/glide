@@ -20,17 +20,17 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
-from ..assistant.audio_io import rms
+from ..assistant.audio_io import SAMPLE_BYTES, SAMPLE_RATE, NoiseFloor, rms
 
-SAMPLE_RATE = 16000
 FRAME_SAMPLES = 512
-FRAME_BYTES = FRAME_SAMPLES * 2
+FRAME_BYTES = FRAME_SAMPLES * SAMPLE_BYTES
 FRAME_S = FRAME_SAMPLES / SAMPLE_RATE  # 32 ms
 
 START_PROBABILITY = 0.5  # a frame at least this likely to be speech starts a turn
 STOP_PROBABILITY = 0.35  # a frame below this counts as silence; between the two it neither starts nor ends anything
 PRE_ROLL_FRAMES = 8  # what was heard just before a turn started is kept, so the first syllable is not clipped
 MAX_UTTERANCE_S = 60.0
+MIN_SILENCE_MS, MAX_SILENCE_MS = 200, 2000  # how long a pause may be asked to end a turn
 
 Probability = Callable[[bytes], float]
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -44,29 +44,16 @@ class UtteranceTooLong(ValueError):
     """Speech ran on past the limit: the turn is discarded rather than submitted half-heard."""
 
 
-class EnergyProbability:
-    """Speech or not by loudness alone, as 1.0 or 0.0. The floor is a running average of the quiet frames, so a
-    noisy room raises the bar by itself, as `Endpointer` in assistant/audio_io.py does for push-to-talk."""
-
-    def __init__(self, *, threshold: float = 500.0, ratio: float = 3.0, floor_weight: float = 0.1) -> None:
-        self.threshold = threshold
-        self.ratio = ratio
-        self.floor_weight = floor_weight
-        self.floor = 0.0
-        self._measured = False
+class EnergyProbability(NoiseFloor):
+    """Speech or not by loudness alone, as 1.0 or 0.0, against the room's floor (`NoiseFloor`, as `Endpointer` in
+    assistant/audio_io.py uses it for push-to-talk)."""
 
     def __call__(self, pcm: bytes) -> float:
         level = rms(pcm)
-        if level > max(self.threshold, self.floor * self.ratio):
+        if self.is_speech(level):
             return 1.0
-        weight = self.floor_weight if self._measured else 1.0
-        self.floor = (1 - weight) * self.floor + weight * level
-        self._measured = True
+        self.learn(level)
         return 0.0
-
-    def reset(self) -> None:
-        self.floor = 0.0
-        self._measured = False
 
 
 def file_sha256(path: Path) -> str:
@@ -163,8 +150,8 @@ class TurnDetector:
     """
 
     def __init__(self, silence_ms: int = 600, *, max_utterance_s: float = MAX_UTTERANCE_S) -> None:
-        if not 200 <= silence_ms <= 2000:
-            raise ValueError("Silence threshold must be 200-2000 ms.")
+        if not MIN_SILENCE_MS <= silence_ms <= MAX_SILENCE_MS:
+            raise ValueError(f"Silence threshold must be {MIN_SILENCE_MS}-{MAX_SILENCE_MS} ms.")
         self.silence_frames = math.ceil(silence_ms * SAMPLE_RATE / 1000 / FRAME_SAMPLES)
         self.max_frames = int(max_utterance_s * SAMPLE_RATE / FRAME_SAMPLES)
         self.pre_roll: deque[bytes] = deque(maxlen=PRE_ROLL_FRAMES)
@@ -186,11 +173,14 @@ class TurnDetector:
         self.silent = self.silent + 1 if probability < STOP_PROBABILITY else 0
         if self.frames > self.max_frames:
             self.active = False
-            raise UtteranceTooLong(f"Utterance exceeded {self.max_frames * FRAME_S:.0f} seconds; it was not submitted.")
+            raise self.too_long()
         commit = self.silent >= self.silence_frames
         if commit:
             self.active = False
         return started, pcm, commit
+
+    def too_long(self) -> UtteranceTooLong:
+        return UtteranceTooLong(f"Utterance exceeded {self.max_frames * FRAME_S:.0f} seconds; it was not submitted.")
 
     def finish(self) -> bool:
         """End the turn now, as a silence would. True only if a turn was running, so a second call (or a call

@@ -2,8 +2,8 @@
 
 Nothing below can be proven offline. The test suite uses fake devices, fake transcribers and a fake clock; it
 shows the logic is right, not that a microphone, a speaker or a vendor behaves. Do these once on the Mac you
-will use, with the extras installed (`speech`: sounddevice, numpy, onnxruntime, and websockets only if you wire
-a websockets-based adapter; `aec`: livekit, for WebRTC echo cancellation). Tick each box or write down what you saw.
+will use, with the extras installed (`speech`: sounddevice, numpy, onnxruntime; `aec`: livekit, for WebRTC echo
+cancellation). Tick each box or write down what you saw.
 A failed box is a bug to report, not something to tune around.
 
 Setup once: `[speech]` table and providers in `glide.toml` (see `glide/speech/settings.py` for every key), the
@@ -117,17 +117,22 @@ Checks:
       never step counts, effect counts, run folder names or "N remain".
 - [ ] A reply containing markdown, a link or a list is read as plain words.
 
-## 6. Realtime text-to-speech adapter (optional)
+## 6. Confirming a task (`glide voice --act`)
 
-Only if you register the `RealtimeElevenLabsTTS` adapter (see the report's shared edits). Its socket protocol
-was ported from a snapshot and **not** checked against the vendor's documentation.
+With `--act` the hands-free loop runs a spoken request that uses the screen as a dry run first (`confirm_tasks` is on
+unless the file says otherwise). Nothing is clicked or typed until the confirm phrase. The prompt is shown on screen,
+not spoken, and the phrase and the seconds are in `[speech]` (`confirm_phrase`, `confirm_timeout_s`).
 
-- [ ] A sentence is spoken, in the voice and language you configured, with audio starting before the
-      sentence is fully generated.
-- [ ] A wrong key gives an `auth` failure on screen that does not print the key, and the chain falls over
-      to the next TTS provider visibly (a switch is shown, never silent).
-- [ ] If the vendor rejects the connection (a changed path or message shape), report the status shown; the
-      path is the constant `STREAM_PATH` in `glide/speech/elevenlabs.py`.
+- [ ] Ask for something on the screen. Glide describes the first move (spoken) and the screen shows what to say and for how
+      long. Nothing on the Mac has moved.
+- [ ] Say exactly the phrase within the time: the same request now runs for real, and the phrase itself is not answered
+      as a request ("I'm not sure what you mean" would be a bug).
+- [ ] Say the phrase with other words around it, or only part of it, or "yes" or "okay": nothing runs, the screen says it
+      was not confirmed, and a second try does not work (one answer per window).
+- [ ] Wait past the time, then say the phrase: nothing runs.
+- [ ] Say "stop", or talk over Glide, or pause the loop while a task waits: it is dropped and the phrase does nothing.
+- [ ] Play speech from another device that contains the phrase in the room while no task waits: nothing happens at all.
+- [ ] With `confirm_tasks = false` a request acts at once. That is the unprotected mode: anything audible can start a task.
 
 ## Not covered even by this list
 

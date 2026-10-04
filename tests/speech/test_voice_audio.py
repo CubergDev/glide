@@ -186,3 +186,30 @@ def test_close_is_idempotent_and_drops_queued_audio():
     assert rig.device._queued == 0
     rig.device.play(b"\x05\x00" * 100, RATE)
     assert rig.device._queued == 0
+
+
+def test_a_close_that_lands_while_the_microphone_is_being_resumed_leaves_no_open_stream():
+    """resume_input builds and starts the stream outside the lock; a close() in that gap used to leak the new stream."""
+    import threading
+
+    rig = Rig()
+    rig.device.pause_input()
+    entered, release = threading.Event(), threading.Event()
+
+    class SlowStream(FakeStream):
+        def start(self):
+            entered.set()
+            assert release.wait(5)
+            super().start()
+
+    rig.device._input_factory = lambda callback: SlowStream(rig.log, "late")
+    resumer = threading.Thread(target=rig.device.resume_input)
+    resumer.start()
+    assert entered.wait(5)
+    rig.device.close()  # lands after the stream began to start and before resume stored it
+    release.set()
+    resumer.join(5)
+    assert not resumer.is_alive()
+    assert ("late", "start") in rig.log
+    assert ("late", "stop") in rig.log and ("late", "close") in rig.log  # nothing is left open
+    assert rig.device.input_paused and rig.device._input is None

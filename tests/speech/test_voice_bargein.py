@@ -496,3 +496,12 @@ def test_watch_shows_the_status_while_the_loop_runs_and_stops_with_it():
     ticks = iter([True, True, False])
     watch(r.loop, show=shown.append, interval_s=0.5, sleep=naps.append, running=lambda: next(ticks))
     assert len(shown) == 2 and naps == [0.5, 0.5] and all(line.startswith("echo:") for line in shown)
+
+
+def test_a_loop_that_was_never_started_has_not_ended_and_one_whose_thread_finished_has():
+    r = rig([], StopSTT([]), stats=stats())
+    assert not r.loop.ended
+    r.loop.start()
+    r.loop.join_turns(WAIT)
+    r.loop._thread.join(WAIT)
+    assert r.loop.ended

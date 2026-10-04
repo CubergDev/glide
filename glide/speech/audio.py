@@ -54,11 +54,11 @@ from collections import deque
 from collections.abc import Callable
 from typing import Protocol
 
-from ..assistant.audio_io import AudioUnavailable, _sounddevice
+from ..assistant.audio_io import SAMPLE_BYTES, AudioUnavailable, load_sounddevice
 from .echo import FAR_ACTIVE_RMS, EchoCanceller, EchoError, EchoStats
+from .settings import SpeechSettings
 from .vad import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE
 
-SAMPLE_BYTES = 2
 MAX_QUEUED_FRAMES = 100  # about 3 s of unread microphone audio: more than that means the loop has stopped reading
 READ_POLL_S = 0.05
 REF_MAX_FRAMES = MAX_QUEUED_FRAMES + 8  # reference kept as long as a frame can wait in the queue: none is paired with zeros
@@ -135,7 +135,7 @@ class _ToSixteenKilohertz:
 
 def sounddevice_factories(input_device=None, output_device=None) -> tuple[InputFactory, OutputFactory]:
     """Stream factories over `sounddevice`. Raises `AudioUnavailable` when it or PortAudio is missing."""
-    sd = _sounddevice()
+    sd = load_sounddevice()
 
     def make_input(on_input: Callable[[bytes, bool], None]) -> Stream:
         def callback(indata, frames, timing, status) -> None:
@@ -160,9 +160,9 @@ class FullDuplexDevice:
     def __init__(
         self,
         *,
-        output_rate: int = 24000,
-        headset: bool = False,
-        echo_tail_s: float = 0.3,
+        output_rate: int = SpeechSettings.output_rate,
+        headset: bool = SpeechSettings.headset,
+        echo_tail_s: float = SpeechSettings.echo_tail_s,
         clock: Callable[[], float] = time.monotonic,
         input_factory: InputFactory | None = None,
         output_factory: OutputFactory | None = None,
@@ -407,8 +407,10 @@ class FullDuplexDevice:
             _shut(stream)
             raise
         with self._cond:
-            self._input = stream
-            self._paused = False
+            if not self._closed:
+                self._input, self._paused = stream, False
+                return
+        _shut(stream)  # close() ran while the stream was starting: nothing may be left open
 
     # -- speaker (the shape `Speaker` expects of a player) --------------------------------------
 

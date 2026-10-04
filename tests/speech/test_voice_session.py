@@ -183,3 +183,21 @@ def test_a_named_canceller_that_cannot_be_built_is_an_error_not_a_quiet_half_dup
     )
     assert len(warned) == 1 and "half duplex" in warned[0]
     loop.assistant.close()
+
+
+def test_build_voice_asks_for_a_yes_per_task_when_acting_unless_the_settings_say_otherwise():
+    config = FakeConfig(llm=FakeLLM(), tts=FakeTTS())
+    on = build_voice(
+        config,
+        SpeechSettings(confirm_phrase="go ahead glide", confirm_timeout_s=5),
+        act=True,
+        device=fake_device(),
+        vad=lambda f: 0.0,
+    )
+    assert on._approval is not None and on._approval.phrase == "go ahead glide" and on._approval.timeout_s == 5
+    off = build_voice(config, SpeechSettings(confirm_tasks=False), act=True, device=fake_device(), vad=lambda f: 0.0)
+    assert off._approval is None
+    dry = build_voice(config, SpeechSettings(), act=False, device=fake_device(), vad=lambda f: 0.0)
+    assert dry._approval is None  # nothing acts, so there is nothing to confirm
+    for loop in (on, off, dry):
+        loop.assistant.close()
