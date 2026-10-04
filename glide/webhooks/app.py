@@ -14,18 +14,16 @@ import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import Field, ValidationError
+from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from .auth import AgentVerifier, GoogleVerifier, bearer, delivery_id, header, verify_github, verify_standard, webhook_keys
-from .contracts import AgentEvent, AuthError, Completion, LeaseMessage, Message, TranslationError, strict_json
+from .contracts import AgentEvent, AuthError, Completion, LeaseMessage, ResolveMessage, TranslationError, strict_json
 from .mail import translate_gmail, translate_outlook, validate_outlook_token
 from .settings import ServerSettings, Source
 from .store import DeliveryConflict, LeaseConflict, QueueFull, QueueStore
@@ -33,11 +31,6 @@ from .translation import translate_github, translate_standard
 
 JSON_TYPES = {"application/json", "application/cloudevents+json"}
 WORKER_SCOPES = {"claim": "agent:claim", "heartbeat": "agent:report", "complete": "agent:report", "events": "agent:report"}
-
-
-class ResolveMessage(Message):
-    outcome: Literal["completed", "failed", "cancelled"]
-    summary: str = Field(default="", max_length=4096)
 
 
 class Limiter:
@@ -54,10 +47,6 @@ class Limiter:
             if len(self.recent) >= self.limit:
                 raise HTTPException(429, "Request rate exceeded.", headers={"Retry-After": "60"})
             self.recent.append(now)
-
-
-def _expired(source: Source) -> bool:
-    return datetime.now(UTC) >= datetime.fromisoformat(source.subscription_expires_at.replace("Z", "+00:00"))
 
 
 async def read_body(request: Request, limit: int) -> bytes:
@@ -163,7 +152,7 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             tokens = request.query_params.getlist("validationToken")
             if len(tokens) != 1:
                 raise TranslationError("Invalid validation token.")
-            if _expired(source):
+            if source.expired():
                 raise AuthError("Subscription expired.")
             return PlainTextResponse(validate_outlook_token(tokens[0]))
         if source.provider == "gmail":
@@ -223,7 +212,7 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             )
             dedupe = False
         else:  # outlook
-            if _expired(source):
+            if source.expired():
                 raise AuthError("Subscription expired.")
             calls = translate_outlook(
                 strict_json(raw),

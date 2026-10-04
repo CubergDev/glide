@@ -14,13 +14,23 @@ import hmac
 import re
 import time
 from dataclasses import dataclass
+from types import ModuleType
+from typing import NamedTuple
 
 from .contracts import AuthError
 from .trust_anchors import GOOGLE_PUSH_ISSUERS, GOOGLE_PUSH_JWKS_URL
 
 
-def _crypto():
-    """`jwt`, `serialization`, `ed25519`, `rsa`, `InvalidSignature`, or a clear error if the extra is missing."""
+class _Crypto(NamedTuple):
+    jwt: ModuleType
+    serialization: ModuleType
+    ed25519: ModuleType
+    rsa: ModuleType
+    InvalidSignature: type[Exception]
+
+
+def _crypto() -> _Crypto:
+    """PyJWT and `cryptography`, or a clear error if the webhooks extra is missing."""
     try:
         import jwt
         from cryptography.exceptions import InvalidSignature
@@ -28,7 +38,7 @@ def _crypto():
         from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
     except ImportError:
         raise ImportError("Install the webhooks extra (PyJWT with cryptography) to verify these signatures.") from None
-    return jwt, serialization, ed25519, rsa, InvalidSignature
+    return _Crypto(jwt, serialization, ed25519, rsa, InvalidSignature)
 
 
 def header(headers, name: str) -> str:
@@ -74,14 +84,28 @@ def webhook_keys(secrets: tuple[str, ...]):
         if prefix == "whsec" and 24 <= len(decoded) <= 64:
             keys.append(("v1", decoded))
         elif prefix == "whpk" and len(decoded) == 32:
-            _, _, ed25519, _, _ = _crypto()
-            keys.append(("v1a", ed25519.Ed25519PublicKey.from_public_bytes(decoded)))
+            keys.append(("v1a", _crypto().ed25519.Ed25519PublicKey.from_public_bytes(decoded)))
         else:
             raise ValueError("Invalid Standard Webhooks key.")
     return keys
 
 
+def _signature_matches(scheme: str, key, signed: bytes, candidate: bytes) -> bool:
+    if scheme == "v1":
+        return hmac.compare_digest(hmac.digest(key, signed, "sha256"), candidate)
+    try:
+        key.verify(candidate, signed)
+    except _crypto().InvalidSignature:
+        return False
+    return True
+
+
 def verify_standard(body: bytes, headers, keys, tolerance=300, *, now=None) -> str:
+    """Check a Standard Webhooks delivery against every configured key; returns its (signed) identity.
+
+    The identity and attempt time are signed along with the exact body. Entries that are malformed or use another
+    scheme are skipped, never trusted; every key and entry is tried so that timing does not say which one matched.
+    """
     identity = delivery_id(header(headers, "webhook-id"))
     timestamp = header(headers, "webhook-timestamp")
     if not re.fullmatch(r"[0-9]{1,12}", timestamp):
@@ -100,25 +124,15 @@ def verify_standard(body: bytes, headers, keys, tolerance=300, *, now=None) -> s
         except (ValueError, binascii.Error):
             continue
         for scheme, key in keys:
-            if version != scheme:
-                continue
-            if scheme == "v1":
-                matched |= hmac.compare_digest(hmac.digest(key, signed, "sha256"), candidate)
-            else:
-                invalid = _crypto()[4]
-                try:
-                    key.verify(candidate, signed)
-                    matched = True
-                except invalid:
-                    pass
+            if version == scheme:
+                matched |= _signature_matches(scheme, key, signed, candidate)
     if not matched:
         raise AuthError("Invalid webhook authentication.")
     return identity
 
 
 def _claims(token, key, algorithm, issuer, audience, max_seconds):
-    jwt = _crypto()[0]
-    claims = jwt.decode(
+    claims = _crypto().jwt.decode(
         token,
         key,
         algorithms=[algorithm],
@@ -137,8 +151,7 @@ def _claims(token, key, algorithm, issuer, audience, max_seconds):
 
 
 def _token_header(token):
-    jwt = _crypto()[0]
-    parsed = jwt.get_unverified_header(token)
+    parsed = _crypto().jwt.get_unverified_header(token)
     if not isinstance(parsed.get("kid"), str) or len(parsed["kid"]) > 100:
         raise AuthError("Invalid signing key.")
     if any(name in parsed for name in ("jku", "x5u", "jwk", "crit")):
@@ -156,23 +169,25 @@ class Principal:
 
 
 class AgentVerifier:
+    """Verifies worker bearer tokens against the pinned public keys of an `AgentAuth` (never keys a token names)."""
+
     def __init__(self, settings):
-        _, serialization, ed25519, rsa, _ = _crypto()
+        crypto = _crypto()
         self.settings, self.keys = settings, {}
         for configured in settings.keys:
             try:
-                key = serialization.load_pem_public_key(configured.public_key.encode())
+                key = crypto.serialization.load_pem_public_key(configured.public_key.encode())
             except ValueError:
                 raise ValueError("Invalid agent verification key.") from None
-            valid = (configured.algorithm == "RS256" and isinstance(key, rsa.RSAPublicKey) and key.key_size >= 2048) or (
-                configured.algorithm == "EdDSA" and isinstance(key, ed25519.Ed25519PublicKey)
+            valid = (configured.algorithm == "RS256" and isinstance(key, crypto.rsa.RSAPublicKey) and key.key_size >= 2048) or (
+                configured.algorithm == "EdDSA" and isinstance(key, crypto.ed25519.Ed25519PublicKey)
             )
             if not valid:
                 raise ValueError("Agent key does not match its configured algorithm.")
             self.keys[configured.kid] = (configured.algorithm, key)
 
     def verify(self, token, agent_id, scope) -> Principal:
-        jwt = _crypto()[0]
+        jwt = _crypto().jwt
         try:
             parsed = _token_header(token)
             algorithm, key = self.keys[parsed["kid"]]
@@ -194,21 +209,22 @@ class GoogleVerifier:
     def __init__(self):
         # The URL is a fixed trust anchor (trust_anchors.py), never supplied by a callback, a JWT header or the
         # configuration. PyJWT caches the key set, refreshes on a new kid and bounds unknown-key refresh.
-        jwt = _crypto()[0]
-        self.keys = jwt.PyJWKClient(GOOGLE_PUSH_JWKS_URL, cache_jwk_set=True, lifespan=300, timeout=3, cooldown_duration=30)
+        self.keys = _crypto().jwt.PyJWKClient(
+            GOOGLE_PUSH_JWKS_URL, cache_jwk_set=True, lifespan=300, timeout=3, cooldown_duration=30
+        )
 
     def verify(self, token, *, audience, service_account):
-        jwt, _, _, rsa, _ = _crypto()
+        crypto = _crypto()
         try:
             parsed = _token_header(token)
             if parsed.get("alg") != "RS256":
                 raise AuthError("Invalid push token algorithm.")
             key = self.keys.get_signing_key_from_jwt(token).key
-            if not isinstance(key, rsa.RSAPublicKey) or key.key_size < 2048:
+            if not isinstance(key, crypto.rsa.RSAPublicKey) or key.key_size < 2048:
                 raise AuthError("Invalid push signing key.")
             claims = _claims(token, key, "RS256", GOOGLE_PUSH_ISSUERS, audience, 3600)
             if claims.get("email") != service_account or claims.get("email_verified") is not True:
                 raise AuthError("Invalid push service account.")
             return claims
-        except (AuthError, jwt.PyJWTError, ValueError, TypeError, KeyError, OSError):
+        except (AuthError, crypto.jwt.PyJWTError, ValueError, TypeError, KeyError, OSError):
             raise AuthError("Invalid push authentication.") from None
