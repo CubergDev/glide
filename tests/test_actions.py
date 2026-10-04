@@ -1,4 +1,5 @@
 import json
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -357,6 +358,7 @@ def test_refused_restore_has_no_keyboard_fallback(monkeypatch):
 
 
 # Audit 2 finding 0: a press the app has started but not answered must not be followed by a pixel click.
+@pytest.mark.skipif(sys.platform != "darwin", reason="patches the macOS accessibility framework")
 def test_a_press_that_timed_out_is_unknown_and_never_followed_by_a_click(screen, calls, monkeypatch):
     from glide.computer import macos
     from glide.computer.models import DesktopError
@@ -379,6 +381,7 @@ def test_a_press_that_timed_out_is_unknown_and_never_followed_by_a_click(screen,
     assert calls == []
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="patches the macOS accessibility framework")
 def test_a_definite_refusal_still_reads_as_false(monkeypatch):
     from glide.computer import macos
     from glide.computer.platform_adapter import dispatching
