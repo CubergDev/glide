@@ -413,9 +413,12 @@ def ax_press(ref) -> bool:
     """Send AXPress to an element."""
     check_abort()
     try:
-        return AS.AXUIElementPerformAction(ref, AX_PRESS) == 0
-    except Exception:
-        return False
+        code = AS.AXUIElementPerformAction(ref, AX_PRESS)
+    except Exception as error:
+        raise DesktopError(PRESS_UNKNOWN) from error
+    if code == AX_ERROR_CANNOT_COMPLETE:
+        raise DesktopError(PRESS_UNKNOWN)  # the app may be mid-press: a second click would repeat it
+    return code == 0
 
 
 @dispatched
@@ -447,6 +450,8 @@ def ax_value(ref) -> str | None:
 # ------------------------------------------------------------------ actionable elements
 
 AX_MESSAGE_TIMEOUT = 0.2
+AX_ERROR_CANNOT_COMPLETE = -25204  # kAXErrorCannotComplete: also what a message timeout returns
+PRESS_UNKNOWN = "The press was sent but the app did not answer; whether it took is unknown, so it was not repeated"
 AX_VALUE_CHARS = 120
 
 

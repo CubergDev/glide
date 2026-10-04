@@ -70,7 +70,12 @@ def build_voice(
         canceller=None if settings.headset else make_canceller(settings.echo_canceller, io.warn),
     )
     io.player = device
-    assistant = assistant_factory(config, io=io, extra_stop_phrases=settings.stop_phrases)
+    try:
+        assistant = assistant_factory(config, io=io, extra_stop_phrases=settings.stop_phrases)
+    except BaseException:
+        if owned:
+            device.close()  # no assistant yet to close it: this also closes the echo canceller
+        raise
     try:
         loop = VoiceLoop(
             assistant,

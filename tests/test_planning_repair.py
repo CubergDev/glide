@@ -175,3 +175,14 @@ def test_correction_cannot_drop_previously_registered_requirements():
         planning.plan(writer, named("Create three tabs", writer), Computer().inspect(), steps=[original])
     assert len(writer.requests) == 2
     assert json.loads(writer.requests[-1].text)["original_milestones"][0]["quantity"] == 3
+
+
+def test_a_url_query_step_is_grounded_like_a_url_step():
+    """policy.candidates navigates to a url_query step's target, so it may not lead to an ungrounded origin."""
+    observed = Observation("browser", "selected-session", capabilities={"inspect", "navigate"})
+    fresh = Milestone("a", "open it", "url_query", target="https://evil.example/c?q=SECRET", value="SECRET")
+    with pytest.raises(planning.InvalidAction):
+        planning.validate_plan(response(fresh), observed, grounded={"good.example"})
+    kept = Milestone("a", "open it", "url_query", target="https://good.example/c?q=SECRET", value="SECRET")
+    planned, _ = planning.validate_plan(response(kept), observed, (kept,), grounded={"good.example"})
+    assert planned == [kept]

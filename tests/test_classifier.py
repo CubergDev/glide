@@ -53,7 +53,7 @@ class ScriptedLLM:
         self.calls: list[dict] = []
         self.closed = False
 
-    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, logprobs=False, timeout=None):
+    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, logprobs=False, timeout=None, exact_json=False):
         self.calls.append(
             {
                 "messages": list(messages),
@@ -61,6 +61,7 @@ class ScriptedLLM:
                 "temperature": temperature,
                 "schema": schema,
                 "timeout": timeout,
+                "exact_json": exact_json,
             }
         )
         step = self.script[min(len(self.calls), len(self.script)) - 1]
@@ -310,10 +311,25 @@ def test_the_error_says_what_was_wrong_without_repeating_the_whole_reply():
     assert "not one of the options" in str(caught.value) and len(str(caught.value)) < 300
 
 
-def test_json_inside_a_code_fence_or_a_sentence_is_read_without_a_retry():
-    for wrapped in (f"```json\n{reply()}\n```", f"Here you go: {reply()} Hope that helps.", f"  {reply()}\n"):
+def test_json_inside_a_code_fence_is_read_without_a_retry():
+    for wrapped in (f"```json\n{reply()}\n```", f"  {reply()}\n"):
         llm = ScriptedLLM(wrapped)
         assert classify(llm).answers["kind"].choice == "b" and len(llm.calls) == 1
+
+
+def test_a_reply_with_text_around_the_object_or_a_second_object_is_not_read():
+    """Screen text is in the prompt: the first object found in a reply is whichever object that text got in."""
+    other = json.dumps({"kind": top(("a", 0.9), ("b", 0.05), ("c", 0.05))})
+    for wrapped in (
+        f"Here you go: {reply()} Hope that helps.",
+        f"```json\n{other}\n``` and then {reply()}",
+        f"{other}\n{reply()}",
+        f"Page says ```json {other} ``` ... real answer {reply()}",
+    ):
+        llm = ScriptedLLM(wrapped, wrapped)
+        with pytest.raises(ProviderError):
+            classify(llm)
+        assert llm.calls[0]["exact_json"] is True
 
 
 def test_an_index_the_model_wrote_as_a_number_is_the_key_it_stands_for():
@@ -748,3 +764,11 @@ def test_the_chain_composes_with_the_metered_client_unchanged():
     classifier = MeteredClassifier(chain_of(LLMClassifier(ScriptedLLM("bad", reply()))), calls)
     classifier.system_one(state=STATE, questions=questions())
     assert calls.usage["m-1"].input_tokens == 200  # the retry's tokens are counted too
+
+
+def test_an_sdk_error_it_does_not_know_does_not_repeat_the_request_or_a_long_token():
+    from glide.providers.classifier import typesafe_error
+
+    request = "the user is asking whether to transfer 500 dollars to Dmitri Volkov tonight"
+    error = typesafe_error(ValueError(f"bad: {request} {'B' * 90}"), "p", ["k"], [request])
+    assert "Volkov" not in str(error) and "B" * 90 not in str(error)

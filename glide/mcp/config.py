@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from glide.memory.settings import SettingsError, find_config, read_table
+from glide.memory.settings import SettingsError, locate_config, read_table
 
 _NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
@@ -97,4 +97,5 @@ class McpSettings:
         home: Path | None = None,
     ) -> McpSettings:
         env = os.environ if environ is None else environ
-        return cls.from_mapping(read_table("mcp", find_config(env, path=config, cwd=cwd, home=home)))
+        found, foreign = locate_config(env, path=config, cwd=cwd, home=home)
+        return cls.from_mapping(read_table("mcp", found, foreign=foreign))

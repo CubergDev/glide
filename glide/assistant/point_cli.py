@@ -193,7 +193,7 @@ def _ask(args, config, writer, selection, voice_factory) -> int:
 def _voice(args, config, writer, selection, voice_factory, emit, finished, outcome) -> int:
     if voice_factory is None:
         from ..speech.session import build_voice as voice_factory
-    settings = config.speech
+    settings = config.voice
     settings = replace(settings, headset=args.headset or settings.headset)
     if args.silence_ms is not None:
         settings = replace(settings, silence_ms=args.silence_ms)

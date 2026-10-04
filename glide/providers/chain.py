@@ -73,6 +73,7 @@ class ChainPolicy:
     fail_threshold: int = 2  # consecutive failures before a slot rests
     cooldown_s: float = 30.0  # how long a failing slot rests
     auth_cooldown_s: float = 900.0  # a refused key will not fix itself soon
+    max_rest_s: float = 900.0  # the longest a provider's own retry-after (untrusted) may bench a slot
     hedge_after_s: float | None = None  # race the next slot when the first has not answered by then
     failover_kinds: frozenset[str] = FAILOVER_KINDS
     latency_alpha: float = 0.3  # weight of the newest sample in the average
@@ -411,7 +412,7 @@ class Chain[T]:
             if error.kind == "auth":
                 h.rest_until = now + self.policy.auth_cooldown_s
             elif error.kind == "rate_limit":
-                h.rest_until = now + (error.retry_after or self.policy.cooldown_s)
+                h.rest_until = now + min(error.retry_after or self.policy.cooldown_s, self.policy.max_rest_s)
             elif h.failures >= self.policy.fail_threshold:
                 # The count is kept, so the first call after the rest is a probe: one more failure
                 # and the slot rests again, one success and it is healthy.

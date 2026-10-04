@@ -109,6 +109,7 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 
 # Personalization and memory (`glide memory`). Off unless you turn it on, and it saves what you typed or said, so
 # it stays on this machine, in files only you can read. GLIDE_MEMORY=1 or 0 in the environment overrides `enabled`.
+# Today only `glide memory` and `glide mcp serve` read it: chat, ask and voice do not save or use memory yet.
 #
 # [memory]
 # enabled = true

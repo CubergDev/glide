@@ -24,11 +24,11 @@ one is reported with the command to install it.
 | Extra | Installs | Used by |
 |---|---|---|
 | `speech` | numpy, onnxruntime, sounddevice, websockets | `glide voice` (microphone, speaker, Silero voice-activity model you supply) |
-| `aec` | an echo canceller | **not in this tree yet**: arrives with the `consolidation/barge-in` branch (talking over Glide through speakers) |
-| `ui` | PySide6 and Cocoa bindings | the pet window. Declared, but `glide/ui` is **not in this tree yet** (branch `consolidation/pet-point`) |
-| `webhooks` | fastapi, uvicorn, pydantic, pyjwt | `glide webhooks serve` |
+| `aec` | an echo canceller (WebRTC AEC3 through livekit) | `[speech] echo_canceller = "webrtc"`: talking over Glide through speakers. Without it `auto` falls back to a numpy filter from `speech` |
+| `ui` | PySide6 and Cocoa bindings | the pet window and point-to-ask (`python -m glide.ui`, `python -m glide.assistant.point_cli`) |
+| `webhooks` | fastapi, uvicorn, pydantic, pyjwt | `glide app-server [--socket PATH]` | Serve the SwiftUI app over a local Unix socket (never a network port) | **Binds a socket**; once the app approves it, it can run computer tasks and use the microphone | yes to bind; the app asks per task |
+| `glide webhooks serve` |
 | `mcp` | the MCP Python SDK | real MCP transports (`glide mcp serve` itself needs no SDK) |
-| `ocr` | RapidOCR on onnxruntime | declared for machines without macOS Vision; nothing in this tree imports it yet |
 | `keyring` | keyring | an optional OS-keychain secret source for webhooks. The core never reads keys from it |
 | `memory` | nothing (standard library only) | `glide memory`; names the feature. MCP-facing parts also need `mcp` |
 | `all` | all of the above | |
@@ -112,9 +112,10 @@ Limits, which are real:
 - **Cancelling is not undoing.** An action that was already sent stays done. If a stop lands while an action is in flight,
   Glide reads the screen once, reports "completion unknown" and stops. It never repeats a write whose outcome it cannot
   confirm; you reconcile it.
-- **Speakers are half duplex in this tree.** While Glide speaks, and for a short tail after, the microphone hears
-  silence, so you cannot interrupt by voice through speakers; use a headset, or say "stop" once it has finished. (Echo
-  cancellation for speakers is on the `consolidation/barge-in` branch and is not merged.)
+- **Talking over Glide through speakers depends on echo cancellation.** `[speech] echo_canceller` picks one (`auto` takes
+  the first that loads and says which; `none` is half duplex: the microphone hears silence while Glide speaks and for a
+  short tail after). How well it works on real speakers has not been measured: see
+  [docs/LIVE_CHECKS.md](docs/LIVE_CHECKS.md). A headset avoids the question.
 - A model request still waiting for its first byte cannot be closed from outside; its answer is thrown away and its thread
   ends on the request's own deadline.
 - None of this has been shown against a real provider, microphone or screen yet: see [docs/LIVE_CHECKS.md](docs/LIVE_CHECKS.md).

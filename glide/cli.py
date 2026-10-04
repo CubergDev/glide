@@ -429,7 +429,9 @@ def _record(
             recorded.set()
 
     def work() -> None:
-        reply = assistant.handle_audio(chunks(), act=act, wait=False, language=args.lang)
+        reply = assistant.handle_audio(
+            chunks(), act=act, wait=False, language=args.lang or getattr(getattr(config, "voice", None), "language", None)
+        )
         if reply.route == "none" and not reply.error and not reply.heard:  # something heard and then cut is not silence
             print("(nothing heard)", flush=True)
 
@@ -521,7 +523,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 
 def cmd_webhooks_serve(args: argparse.Namespace) -> int:
     """`glide webhooks serve`: its `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
-    from .memory.settings import SettingsError, find_config
+    from .memory.settings import SettingsError, locate_config
 
     words = list(args.rest)
     if not _help_asked(words):
@@ -531,7 +533,8 @@ def cmd_webhooks_serve(args: argparse.Namespace) -> int:
             return 2
         if not any(word == "--config" or word.startswith("--config=") for word in words):
             try:
-                words = ["--config", str(features.webhooks_file(os.environ, find_config(os.environ, path=args.config))), *words]
+                found, foreign = locate_config(os.environ, path=args.config)
+                words = ["--config", str(features.webhooks_file(os.environ, found, foreign=foreign)), *words]
             except SettingsError as exc:
                 print(f"glide webhooks: {exc}", file=sys.stderr)
                 return 2
@@ -578,7 +581,7 @@ def print_status(config) -> None:
     from .providers.config import ROLES, ConfigError
 
     print(f"config: {config.source}")
-    for role in ROLES:
+    for role in getattr(config, "active_roles", ROLES):  # as `glide doctor` does: llm.planner and llm.research too
         print(role)
         try:
             chain = config.chain(role)
