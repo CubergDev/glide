@@ -31,7 +31,7 @@ import winocr
 from PIL import Image, ImageGrab
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
-from .models import AxNode, Field, Missed
+from .models import AxNode, DesktopError, Field, Missed
 from .platform_adapter import abort_hint, abort_if_stopped, sleep_watching  # noqa: F401  (the shared escape hatch)
 
 with suppress(AttributeError, OSError):  # pre-8.1 Windows without shcore, or awareness set by the host process
@@ -384,6 +384,10 @@ def activate(app: str, timeout: float = 3.0) -> bool:
 
 
 def open_url(browser: str, url: str) -> bool:
+    from .execution.contracts import safe_url
+
+    if not safe_url(url):  # also keeps a leading dash from reaching the browser as one of its options
+        raise DesktopError("Invalid URL")
     check_abort()
     exe = next((exe for name, exe in BROWSER_EXES.items() if name.lower() == browser.strip().lower()), None)
     if exe and shutil.which(exe):
@@ -616,14 +620,11 @@ def execution_tabs(browser: str) -> dict:
 
 
 def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
-    from .models import DesktopError
-
     raise DesktopError("Stable browser tab operations on Windows require an explicitly configured CDP connection")
 
 
 def execution_shortcut(key: str, modifiers: tuple[str, ...]) -> None:
     from .execution.contracts import MODIFIERS
-    from .models import DesktopError
 
     codes = {
         **VK,
@@ -693,8 +694,6 @@ def execution_labels(pid: int) -> list[dict]:
 
 
 def execution_scroll(ref, direction: str) -> None:
-    from .models import DesktopError
-
     check_abort()
     if direction not in {"up", "down"}:
         raise DesktopError("Invalid scroll direction")

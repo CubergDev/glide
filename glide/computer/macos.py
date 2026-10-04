@@ -8,10 +8,12 @@ walk itself lives in ax_walk.py, shared by both.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
@@ -140,8 +142,71 @@ def scroll(lines: int) -> None:
 # ------------------------------------------------------------------ apps and windows
 
 
-def osascript(script: str) -> str:
-    return subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=True).stdout.strip()
+OSASCRIPT_TIMEOUT_S = 10.0  # one AppleScript call; a call that outlives it has an unknown outcome
+JXA_TIMEOUT_S = 5.0  # a tab observation or operation
+OSASCRIPT_POLL_S = 0.05  # how often a running call looks for a stop
+
+# Fixed programs. Whatever came from outside (an app name, a URL) is an argv item of `on run argv`, so it
+# reaches AppleScript as data and never as source.
+ACTIVATE_SCRIPT = "on run argv\ntell application (item 1 of argv) to activate\nend run"
+FRONTMOST_SCRIPT = 'on run argv\ntell application "System Events" to set frontmost of process (item 1 of argv) to true\nend run'
+OPEN_LOCATION_SCRIPT = "on run argv\ntell application (item 1 of argv) to open location (item 2 of argv)\nend run"
+
+# What an application name may look like, so it can be an argument or sit inside a quoted AppleScript literal
+# (browser_url, whose script needs the app's own vocabulary at compile time) without any way to leave it.
+APP_NAME = re.compile(r"\w[\w .+&()-]{0,63}")
+
+
+def app_name(value: str) -> str:
+    if not APP_NAME.fullmatch(value):
+        raise DesktopError("Invalid application name")
+    return value
+
+
+def browser_address(url: str) -> str:
+    from .execution.contracts import safe_url
+
+    if not safe_url(url):
+        raise DesktopError("Invalid URL")
+    return url
+
+
+def osascript(script: str, *args: str, timeout: float = OSASCRIPT_TIMEOUT_S) -> str:
+    """Run one AppleScript program, `script` lines as `-e` options and `args` as its `argv`.
+
+    The call is bounded by `timeout` and watches for a stop while it runs: a cancelled `RunControl`, a stop
+    event or the abort corner kills the child and raises `Abort`; a deadline kills it and raises `DesktopError`
+    (the outcome is unknown, so the caller must not replay it). A failing script raises `CalledProcessError`.
+    """
+    if any(arg.startswith("-") or "\0" in arg for arg in args):  # osascript would read it as an option
+        raise DesktopError("Invalid AppleScript argument")
+    return _run_osascript(["osascript", *(part for line in script.splitlines() for part in ("-e", line)), *args], timeout)
+
+
+def _run_osascript(argv: list[str], timeout: float) -> str:
+    from .control import checkpoint
+
+    checkpoint()
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                out, _ = proc.communicate(timeout=OSASCRIPT_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                check_abort()
+                if time.monotonic() >= deadline:
+                    raise DesktopError("An AppleScript call did not finish in time; its outcome is unknown") from None
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        with suppress(Exception):
+            proc.communicate()  # reap it
+        raise
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, ["osascript"])  # the script is not part of the error
+    return out.strip()
 
 
 def frontmost_app() -> str:
@@ -164,8 +229,9 @@ def frontmost_pid() -> int:
 
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
+    app_name(app)
     check_abort()
-    osascript(f'tell application "{app}" to activate')
+    osascript(ACTIVATE_SCRIPT, app)  # an unknown outcome raises: the retry below is not for a call that may have run
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         check_abort()
@@ -173,21 +239,24 @@ def activate(app: str, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.1)
     check_abort()
-    osascript(f'tell application "System Events" to set frontmost of process "{app}" to true')
+    osascript(FRONTMOST_SCRIPT, app)
     time.sleep(0.3)
     return frontmost_app() == app
 
 
 def open_url(browser: str, url: str) -> bool:
+    app_name(browser)
+    browser_address(url)
     check_abort()
-    osascript(f'tell application "{browser}" to open location "{url}"')
+    osascript(OPEN_LOCATION_SCRIPT, browser, url)
     return activate(browser)
 
 
 def browser_url(browser: str) -> str | None:
+    """The active tab's address, or None when the browser has none to give (or took too long)."""
     try:
-        return osascript(f'tell application "{browser}" to get URL of active tab of front window') or None
-    except subprocess.CalledProcessError:
+        return osascript(f'tell application "{app_name(browser)}" to get URL of active tab of front window') or None
+    except (subprocess.CalledProcessError, DesktopError):
         return None
 
 
@@ -412,10 +481,7 @@ def _browser_jxa(browser, body):
         raise DesktopError("Stable tab identities are unavailable for this browser; configure an approved CDP connection")
     script = f"const app=Application({json.dumps(browser)}); " + body
     try:
-        result = subprocess.run(
-            ["osascript", "-l", "JavaScript", "-e", script], capture_output=True, text=True, check=True, timeout=5
-        )
-        return json.loads(result.stdout)
+        return json.loads(_run_osascript(["osascript", "-l", "JavaScript", "-e", script], JXA_TIMEOUT_S))
     except (subprocess.SubprocessError, ValueError) as error:
         raise DesktopError("Browser tab observation or operation failed") from error
 
