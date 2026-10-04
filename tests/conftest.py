@@ -203,8 +203,14 @@ class RefusalLedger:
         )
 
     def pytest_sessionfinish(self, session, exitstatus) -> None:
-        if _OUTSIDE_A_TEST and not exitstatus:
-            print(f"\nrefusals fired outside any test (collection, session fixtures or exit): {'; '.join(_OUTSIDE_A_TEST)}")
+        """Say so when a refusal fired outside any test (collection, session fixtures), and fail a run that was green."""
+        if not _OUTSIDE_A_TEST:
+            return
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        line = f"refusals fired outside any test (collection or session fixtures): {'; '.join(_OUTSIDE_A_TEST)}"
+        if reporter is not None:
+            reporter.write_line(line, red=True)
+        if not exitstatus:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 

@@ -1,9 +1,8 @@
 """Guards for the voice stack: no test opens a sound device or a websocket.
 
-`no_real_audio` is an autouse fixture. Each module under `tests/speech/` imports it (a second
-`conftest.py` there would shadow the root one: tests do `from conftest import busy_page`), and the root
-`tests/conftest.py` must import it too (`from guards_voice import no_real_audio  # noqa: F401`) so
-that every test in the suite is covered, not only the ones under `tests/speech/`.
+`no_real_audio` is an autouse fixture. `tests/conftest.py` registers this file as a plugin (every `guards_*.py`
+is), so every test in the suite is covered; the modules under `tests/speech/` also import it (a second
+`conftest.py` there would shadow the root one: tests do `from conftest import busy_page`).
 
 What it refuses, when the module is installed:
 

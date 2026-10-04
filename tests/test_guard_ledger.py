@@ -153,3 +153,23 @@ def test_a_test_that_expects_the_refusal_and_a_quiet_test_are_not_failed(pyteste
     output = result.stdout.str()
     assert "ERROR at teardown of test_a_guard_test_expects_it" not in output
     assert "ERROR at teardown of test_quiet" not in output
+
+
+def test_a_refusal_outside_every_test_is_reported_and_fails_a_green_run(monkeypatch):
+    lines: list[str] = []
+    reporter = SimpleNamespace(write_line=lambda line, **kwargs: lines.append(line))
+    plugins = SimpleNamespace(get_plugin=lambda name: reporter)
+    session = SimpleNamespace(config=SimpleNamespace(pluginmanager=plugins), exitstatus=0)
+    monkeypatch.setattr(conftest, "_OUTSIDE_A_TEST", ["os.fork"])
+    RefusalLedger().pytest_sessionfinish(session, 0)
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    assert "os.fork" in lines[0]
+    lines.clear()
+    session.exitstatus = 1  # a red run stays red, and the line is still written
+    RefusalLedger().pytest_sessionfinish(session, 1)
+    assert session.exitstatus == 1
+    assert "os.fork" in lines[0]
+    monkeypatch.setattr(conftest, "_OUTSIDE_A_TEST", [])
+    lines.clear()
+    RefusalLedger().pytest_sessionfinish(session, 0)
+    assert lines == []
