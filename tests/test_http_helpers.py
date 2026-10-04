@@ -346,3 +346,34 @@ def test_a_response_that_arrives_after_the_cancel_is_closed_on_arrival_and_the_c
     thread.join(3)
     assert outcome["error"].kind == CANCELLED and "response" not in outcome
     assert body.closed.is_set()
+
+
+def test_abort_response_shuts_the_socket_down_before_it_closes_the_response():
+    """Closing a socket that another thread is blocked reading does not wake that thread on every platform; shutting it
+    down does. Real sockets cannot show the difference everywhere, so this holds the order with a fake."""
+    from glide.providers import interrupt
+
+    order = []
+
+    class Socket:
+        def shutdown(self, how):
+            order.append(("shutdown", how))
+
+    class Stream:
+        def get_extra_info(self, name):
+            return Socket() if name == "socket" else None
+
+    class Body(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"x"
+
+        def close(self):
+            order.append("closed")
+
+    import socket
+
+    interrupt.abort_response(httpx.Response(200, stream=Body(), extensions={"network_stream": Stream()}))
+    assert order == [("shutdown", socket.SHUT_RDWR), "closed"]
+    order.clear()
+    interrupt.abort_response(httpx.Response(200, stream=Body()))  # no network stream (a mock transport): just closed
+    assert order == ["closed"]

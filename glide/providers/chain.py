@@ -89,7 +89,7 @@ class SwitchEvent:
     role: str
     from_slot: str
     to_slot: str | None
-    kind: str  # the error kind, or "slow" for a hedge
+    kind: str  # the error kind, "slow" for a hedge, or "resting" for a slot passed over while it rests
     reason: str
 
 

@@ -304,24 +304,34 @@ def test_a_hedged_call_made_after_the_cancel_starts_nothing():
     assert done.wait(WAIT) and box["error"].kind == CANCELLED and (a.calls, b.calls) == (0, 0)
 
 
+class Announced(list):
+    """A list of switch events that says when one of a given kind has arrived, so a test waits for it instead of polling."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
+        self.arrived = threading.Event()
+
+    def append(self, event) -> None:
+        super().append(event)
+        if event.kind == self.kind:
+            self.arrived.set()
+
+
 def test_a_failed_racer_is_reported_as_switching_to_the_slot_still_running_not_to_one_not_yet_launched():
     """After the hedge has fired, the slot that carries on is the racer in flight, not the third slot nobody has started."""
-    b = Blocked()
+    b, c, events = Blocked(), Blocked(), Announced("server")
 
     def a():
         assert b.connection.opened.wait(WAIT)  # b has been launched by the hedge, c has not
         raise ProviderError("down", kind="server")
 
-    c = Blocked()
-    chain = chain_of(a, b, c, policy=ChainPolicy(hedge_after_s=0.3))
+    chain = chain_of(a, b, c, policy=ChainPolicy(hedge_after_s=0.3), events=events)
     done, box = call_under(RunControl(), chain, hedge=True)
-    assert b.connection.opened.wait(WAIT)
-    deadline = threading.Event()
-    while not [e for e in chain.events if e.kind == "server"] and not deadline.wait(0.01):
-        pass
-    failure = next(e for e in chain.events if e.kind == "server")
+    assert events.arrived.wait(WAIT), "the failed racer was never reported"
     b.connection.release.set()
     assert done.wait(WAIT) and box["value"] == "late answer"
+    failure = next(e for e in events if e.kind == "server")
     assert (failure.from_slot, failure.to_slot) == ("a", "b") and c.calls == 0
 
 
