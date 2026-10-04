@@ -74,6 +74,11 @@ class Allowed:
 
 
 ALLOWED: dict[str, Allowed] = {
+    "glide/panel/cli.py": Allowed(
+        Counter({"webbrowser": 1}),
+        "the control panel opens its own loopback page in the browser unless --no-open; tests refuse it",
+        "panel",
+    ),
     "glide/setup/cli.py": Allowed(
         Counter({"webbrowser": 1}),
         "the first-run wizard opens its own loopback page in the browser, only when the person did not pass --no-open; tests refuse it",

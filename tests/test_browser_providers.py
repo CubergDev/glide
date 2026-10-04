@@ -532,7 +532,7 @@ def test_obscura_omits_browser_origin_without_changing_loopback_validation(monke
     ObscuraBackend("http://127.0.0.1:9417").connect()
     assert seen[0]["suppress_origin"]
     dom.BrowserBackend("http://127.0.0.1:9417").connect()
-    assert not seen[1]["suppress_origin"]
+    assert seen[1]["suppress_origin"]  # Chrome refuses any Origin its launch flags did not allow, so none is sent
 
 
 @pytest.mark.parametrize("backend_type", [dom.BrowserBackend, ObscuraBackend])
