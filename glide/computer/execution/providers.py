@@ -4,13 +4,14 @@
 A provider that is not installed, not enabled or not reachable fails with a message that says what to do, before any
 action. There is no automatic fallback, with one explicit exception: a `[browser] fallback` list in glide.toml. Then,
 and only before anything has been done, an unavailable provider is replaced by the next one on the list, and the
-switch is a `SwitchEvent` (and a recorded event), never silent. Once a backend is returned it is never swapped for
+switch is a `SwitchEvent`, a recorded event and, under a run's control, a line on its channel, never silent. Once a backend is returned it is never swapped for
 another mid-run, so an action whose outcome is unknown cannot be replayed on a different provider. The native desktop
 is never a fallback: it takes over the machine, so it has to be selected as the provider.
 """
 
 from ...providers.chain import SwitchEvent
 from .. import browser_settings
+from ..control import current_control
 from ..diagnostics import event
 from ..models import DesktopError
 
@@ -59,6 +60,8 @@ def make_backend(browser="", *, act=False, on_switch=None):
                 raise
             switch = SwitchEvent("browser", provider, chain[position + 1], type(error).__name__, str(error))
             event("browser_provider_switched", provider=provider, to=switch.to_slot, kind=switch.kind)
+            if control := current_control():  # said on the run's own channel, so it is never only in memory
+                control.event("switch", f"fallback: browser {switch.from_slot} -> {switch.to_slot} ({switch.kind})")
             if on_switch:
                 on_switch(switch)
             continue
@@ -92,7 +95,7 @@ def prepare_voice(act, *, cancelled=lambda: False):
     """
     if cancelled():
         raise KeyboardInterrupt
-    provider = browser_settings.connection().provider
+    provider = browser_settings.current().provider
     if provider == "native":
         prepare(act, cancelled=cancelled)
     else:

@@ -8,7 +8,7 @@ async page => {
   const release = request.method==='Input.dispatchKeyEvent' && request.params.type==='keyUp'
     || request.method==='Input.dispatchMouseEvent' && request.params.type==='mouseReleased';
   if(state.pending) {
-    // A timed-out client cannot permit a new task to overlap an unresolved write.
+    // A timed-out client cannot let a new task overlap an unresolved write.
     if(!release)throw Error('An earlier browser operation is unresolved; no automatic replay');
     await state.pending;
   }

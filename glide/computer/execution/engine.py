@@ -12,9 +12,10 @@
 4. Report: run.json (counts, timings, the outcome; goal, plan and history only when content recording is on, D3).
 
 Nothing here talks to a vendor. The classifier is the one the caller's `classifier_factory` returns (a provider
-chain, D7), model calls go through `writer.generate` (D1), and every input action passes `RunControl` (D2). Browser
-and desktop adapters arrive through `make_backend`, and the research supervisor through `make_supervisor`; tests
-replace those two names.
+chain, D7), model calls go through `writer.generate` (D1), and every input action passes `RunControl` (D2). The
+browser or desktop adapter comes from `providers.make_backend`, which picks it from the `[browser]` settings, and the
+research supervisor is `research.Supervisor`, given the budget and search address of the settings; tests replace those
+two names.
 """
 
 from __future__ import annotations
@@ -26,14 +27,16 @@ import time
 import uuid
 from dataclasses import asdict, replace
 
+from ...providers.chain import SwitchEvent
 from ...providers.config import ConfigError
 from ...providers.errors import AllProvidersFailed, ProviderError
-from .. import config, diagnostics
+from .. import browser_settings, diagnostics
+from ..config import MAX_RESEARCH_CALLS
 from ..control import CANCELLED, checkpoint, controlled, current_control, dispatch
 from ..models import Abort, BrowserConnectionError, DesktopError
 from ..runner import FAILURE_CHARS, MAX_QUESTIONS, WOULD_DO_CHARS, RunState, metered
 from ..writer import Answer
-from . import planning, policy, query, routing
+from . import grounding, planning, policy, providers, query, research, routing
 from .contracts import InvalidAction, Observation, UnsupportedCapability, effect, primitive_effect, rebind, validate
 from .progress import Ledger, observe, wait_effect, wait_ready
 
@@ -64,20 +67,21 @@ PROVIDER_SENTENCES = {
 }
 GENERIC_PROVIDER_SENTENCE = "A model provider failed."
 NO_REPLAY = "No action was repeated."
+# What run.json says in place of an error's own words unless content is recorded (D3): the message of an InvalidAction
+# can be a model's reason or question, a page's title or a clarification, and a desktop or browser message can name a
+# window or an address. The words go to the person who ran the task and to the recorded diagnostics, never to run.json.
+FIXED_FAILURES = {
+    "invalid_action": "A step could not be carried out safely, so the task stopped. Its detail is kept only with content recording.",
+    "invalid_query_contract": "The search could not be verified, so the task stopped. Its detail is kept only with content recording.",
+    "desktop_error": "The desktop could not carry out a step, so the task stopped. Its detail is kept only with content recording.",
+}
+UNVERIFIED_WRITE = (
+    "An earlier identical action was not seen to do what was asked, so it was not repeated. It may or may not have "
+    "happened: review the page before a fresh task."
+)
 
-
-def make_backend(browser: str):
-    """The browser or desktop adapter for this run (contracts.Backend); `native.make_backend` picks the provider."""
-    from . import native
-
-    return native.make_backend(browser)
-
-
-def make_supervisor(goal: str, route: str):
-    """The research supervisor for the `research` and `reason` routes (research.Supervisor)."""
-    from . import research
-
-    return research.Supervisor(goal, route, config.research_calls())
+# What the research supervisor borrows from the executor, so that it imports none of the engine's modules.
+RESEARCH_TOOLS = research.Tools(planning.plan, wait_ready, lambda text: grounding.extract(text).urls, query.is_search_action)
 
 
 def provider_error(error: BaseException) -> ProviderError | None:
@@ -105,6 +109,10 @@ def provider_sentence(error: ProviderError) -> str:
 def no_browser() -> Observation:
     """What the engine sees when there is no browser: nothing, and nothing it may do."""
     return Observation("", "", capabilities=set(), browser_front=False)
+
+
+class UnverifiedWrite(InvalidAction):
+    """The engine was about to send again an action that an earlier fresh observation did not show to have worked."""
 
 
 class Phases:
@@ -174,6 +182,7 @@ class Execution:
         self.phases = Phases()
         self.started = time.perf_counter()
         self.ledger = self.backend = self.supervisor = None
+        self.switches: list[SwitchEvent] = []  # browser providers replaced before the first action, in order
         # The plan and what has been used of the budgets.
         self.steps, self.revision, self.recoveries, self.questions = [], 0, 0, 0
         self.clarifications, self.routes, self.bindings = [], [], {}
@@ -185,10 +194,13 @@ class Execution:
         self.action_source = self.cached = None
         self.failures = self.stale = 0
         self.transitions: set = set()
+        self.unverified: set = set()  # (step id, action identity) of writes whose milestone effect was not observed
         self.selection_error = ""
         # How the run failed, for the report.
         self.failure_stage = self.error_type = self.failure_code = ""
         self.connection_error = None
+        self.browser_hint = ""
+        self.error_text = ""  # the words of the error that ended the run, to be replaced in run.json by FIXED_FAILURES
 
     # -- entry ------------------------------------------------------------------------------------------------
 
@@ -200,6 +212,8 @@ class Execution:
             or type(cfg.steps) is not int
             or not 1 <= cfg.steps <= MAX_STEPS
             or cfg.handoffs < 0
+            or type(cfg.research_calls) is not int
+            or not 1 <= cfg.research_calls <= MAX_RESEARCH_CALLS
             or not 0 <= cfg.min_confidence <= 1
         ):
             return self._blocked_early("Invalid execution budget or readiness deadline; no action was issued.")
@@ -214,6 +228,8 @@ class Execution:
             self._stopped(error)
         except UnsupportedCapability as error:
             self._unsupported(error)
+        except UnverifiedWrite as error:
+            self._unverified(error)
         except ConfigError:
             raise  # the caller words a missing configuration, the same as for the legacy loop
         except Exception as error:
@@ -239,14 +255,18 @@ class Execution:
             # Analysis and authoring need no browser, CDP or desktop capture.
             observed = no_browser()
             if scope.workflow != "reason":
-                self.backend = make_backend(cfg.execution_browser or ctx.browser)
-                if hasattr(self.backend, "configure_permissions"):  # optional: a session that asks before it writes
-                    self.backend.configure_permissions(cfg.act)
+                self.backend = providers.make_backend(cfg.execution_browser or ctx.browser, act=cfg.act, on_switch=self._switched)
                 observed = phases("initial_observation", self.backend.inspect)
             self.action_source = observed
             checkpoint()
             self._plan(ctx, scope, goal, observed)
             self._loop(ctx, goal)
+
+    def _switched(self, switch: SwitchEvent):
+        """A browser provider was unavailable and the next one on the `[browser] fallback` list took its place. The
+        provider door has already said so on the run's channel; this keeps it for the report, with its reason only when
+        content is recorded."""
+        self.switches.append(switch)
 
     def _ask(self, ctx, question) -> str:
         """Put one question to the user and keep the exchange. A reply that arrives after a stop is dropped, unrecorded."""
@@ -296,9 +316,13 @@ class Execution:
         if route == "query":
             if "query_form" not in observed.capabilities:
                 raise UnsupportedCapability(["query_form (connect the approved browser in pet settings)"], observed.capabilities)
-            quick, question = phases("query_extraction", query.intent, ctx.writer, goal, observed, config.search_url())
+            quick, question = phases(
+                "query_extraction", query.intent, ctx.writer, goal, observed, browser_settings.current().search_url
+            )
         if route in {"research", "reason"}:
-            self.supervisor = make_supervisor(cfg.goal, route)
+            self.supervisor = research.Supervisor(
+                cfg.goal, route, cfg.research_calls, tools=RESEARCH_TOOLS, search_url=browser_settings.current().search_url
+            )
             self.supervisor.replies = list(self.clarifications)
             self.supervisor.questions = self.questions
         elif quick and not question:
@@ -420,6 +444,10 @@ class Execution:
             return False
         self.stale = 0
         action = self.action
+        if (step.id, action.identity) in self.unverified:
+            # Generic evidence (a focus, a redrawn control) says that something changed, never that this write did what it
+            # was for. Sending it again could do it twice, so the run stops here and says that the outcome is unknown.
+            raise UnverifiedWrite(UNVERIFIED_WRITE)
         if self.supervisor:
             self.supervisor.validate_action(action, before)
         diagnostics.event("action_selected", stage="preflight", step_id=step.id, kind=action.kind, action_params=asdict(action))
@@ -579,6 +607,8 @@ class Execution:
             raise InvalidAction("Search submission was not verified; review the result before retrying")
         if not verified and not intermediate and action.kind in {"click", "type", "key", "tab_create", "tab_close"}:
             raise InvalidAction("Write outcome was not verified; review the effect before retrying")
+        if not verified and action.kind in {"click", "key"}:
+            self.unverified.add((step.id, action.identity))
         previous = ledger.count(step.id)
         ledger.finish(self.operation, step, verified, elapsed, intermediate)
         self.operation = None
@@ -622,6 +652,10 @@ class Execution:
         state.uncertain = control.in_flight
         if not (self.operation and self.backend and self.step and self.action and self.before):
             return
+        if not getattr(self.backend, "passive_inspection", False):
+            # Reading back through a provider that may open or recreate a tab to inspect could itself be a write.
+            state.readback = "not observed: this provider cannot inspect passively; completion unknown"
+            return
         try:
             with controlled(None):  # cancellation is off for this one observation only
                 after = self.phases("reconciliation", observe, self.backend, self.step, self.action)
@@ -647,24 +681,35 @@ class Execution:
         self.state.failure = UNSUPPORTED_SEARCH if error.missing == (query.FORM_CAPABILITY,) else str(error)
         self.state.unsupported_capabilities = list(error.missing)
 
+    def _unverified(self, error):
+        """Stopped before a repeat. The last write was followed by a fresh observation that did not show its effect, so
+        what that observation was is the read-back: nothing more is read."""
+        state = self.state
+        diagnostics.exception(error, stage=self.phases.stage)
+        self.failure_stage, self.error_type, self.failure_code = self.phases.stage, type(error).__name__, "unverified_write"
+        state.outcome, state.failure = "blocked", UNVERIFIED_WRITE
+        state.uncertain, state.readback = True, "the last observation did not show the effect; completion unknown"
+
     def _failed(self, error):
         state = self.state
         diagnostics.exception(error, stage=self.phases.stage)
         self.failure_stage, self.error_type = self.phases.stage, type(error).__name__
         provider = provider_error(error)
         if isinstance(error, BrowserConnectionError):
-            self.failure_code, self.connection_error = "browser_unavailable", error.details
+            self.failure_code, self.connection_error, self.browser_hint = "browser_unavailable", error.details, error.hint
         elif provider:
             self.failure_code = "model_unavailable"
         elif isinstance(error, InvalidAction):
             self.failure_code = "invalid_query_contract" if "Query verification" in str(error) else "invalid_action"
+        elif isinstance(error, DesktopError):
+            self.failure_code = "desktop_error"
         else:
             self.failure_code = "execution_error"
         state.outcome = "provider failure" if provider else "blocked"
         if provider:
             state.failure = f"{provider_sentence(provider)} {NO_REPLAY}"
         elif isinstance(error, InvalidAction | DesktopError):
-            state.failure = str(error)
+            state.failure = self.error_text = str(error)
         else:
             state.failure = f"Execution stopped ({type(error).__name__}); no automatic replay."
         state.uncertain = self.control.in_flight
@@ -708,9 +753,17 @@ class Execution:
             # An address, and a capability the planner named (it can echo the request), are content (D3).
             connection = {k: v for k, v in connection.items() if k != "endpoint"} if connection else connection
             failure = UNSUPPORTED_RECORDED if self.failure_code == "unsupported_capability" else failure
+            if self.failure_code == "browser_unavailable":  # the message names the address that `connection_error` drops
+                failure = f"Cannot connect to {self.connection_error['provider']}. {self.browser_hint}"
+            elif self.failure_code in FIXED_FAILURES and self.error_text:
+                failure = failure.replace(self.error_text, FIXED_FAILURES[self.failure_code], 1)
         summary = {
             "engine": "structured",
             "transport": getattr(self.backend, "transport", "scripted") if self.backend is not None else "none",
+            "browser_switches": [
+                {"from": s.from_slot, "to": s.to_slot, "kind": s.kind, **({"reason": s.reason} if cfg.record_content else {})}
+                for s in self.switches
+            ],
             "routing": self.routes,
             "task_id": self.control.task_id,
             "outcome": state.outcome,

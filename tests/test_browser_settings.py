@@ -14,6 +14,7 @@ ENV_NAMES = (
     "GLIDE_BROWSER_TARGET",
     "GLIDE_PLAYWRIGHT_SESSION",
     "GLIDE_PLAYWRIGHT_CLI",
+    "GLIDE_SEARCH_URL",
 )
 
 
@@ -28,7 +29,7 @@ def clean_settings(monkeypatch):
 def test_nothing_configured_means_the_native_desktop():
     settings = bs.resolve({}, {})
     assert settings.provider == "native" and settings.source == "default" and settings.fallback == ()
-    assert bs.connection() == ("native", "", "", bs.DEFAULT_SESSION)
+    assert settings.connection() == bs.Connection("native", "", "", bs.DEFAULT_SESSION) and settings.search_url == ""
 
 
 @pytest.mark.parametrize("provider", ["native", "cdp", "obscura", "playwright", "playwright-cli"])
@@ -120,28 +121,28 @@ def test_fallback_is_opt_in_ordered_and_never_the_native_desktop():
 
 def test_use_installs_the_table_for_the_process_and_rejects_a_bad_one_without_installing_it():
     bs.use({"provider": "cdp", "cdp": {"endpoint": "http://127.0.0.1:9415"}})
-    assert bs.connection().provider == "cdp" and bs.connection().endpoint == "http://127.0.0.1:9415"
+    assert bs.current().provider == "cdp" and bs.current().connection().endpoint == "http://127.0.0.1:9415"
     with pytest.raises(ValueError):
         bs.use({"provider": "nope"})
-    assert bs.connection().provider == "cdp"
+    assert bs.current().provider == "cdp"
     bs.use(None)
-    assert bs.connection().provider == "native"
+    assert bs.current().provider == "native"
 
 
-def test_load_table_reads_only_the_browser_table_of_a_file(tmp_path):
-    path = tmp_path / "glide.toml"
-    path.write_text('[llm.fast]\nchain = ["a:b"]\n[browser]\nprovider = "playwright"\n[browser.playwright]\nsession = "s1"\n')
-    assert bs.load_table(str(path)) == {"provider": "playwright", "playwright": {"session": "s1"}}
-    assert bs.load_table("built-in defaults") == {}
-    path.write_text('[llm.fast]\nchain = ["a:b"]\n')
-    assert bs.load_table(str(path)) == {}
-    path.write_text("browser = 3\n")
-    with pytest.raises(ValueError, match="must be a table"):
-        bs.load_table(str(path))
-    path.write_text("[browser\nsecret-text-here")
-    with pytest.raises(ValueError) as caught:
-        bs.load_table(str(path))
-    assert "secret-text-here" not in str(caught.value)
+def test_the_search_address_comes_from_the_environment_or_the_file_and_there_is_no_built_in_one():
+    assert bs.resolve({}, {}).search_url == ""
+    table = {"search_url": "https://search.example.test/"}
+    assert bs.resolve(table, {}).search_url == "https://search.example.test/"
+    assert bs.resolve(table, {"GLIDE_SEARCH_URL": " https://other.example.test "}).search_url == "https://other.example.test"
+    assert bs.resolve({}, {"GLIDE_SEARCH_URL": "https://only.example.test"}).search_url == "https://only.example.test"
+
+
+@pytest.mark.parametrize("value", ["ftp://search.example.test", "search.example.test", "https://user:pw@search.example.test", 7])
+def test_a_search_address_that_is_not_a_plain_web_address_is_an_error_that_does_not_quote_it(value):
+    for table, env in (({"search_url": value}, {}), ({}, {"GLIDE_SEARCH_URL": str(value)})):
+        with pytest.raises(ValueError) as caught:
+            bs.resolve(table, env)
+        assert "search" in str(caught.value) and "pw@" not in str(caught.value) and "search.example" not in str(caught.value)
 
 
 def test_description_names_the_provider_and_how_to_reach_it():
@@ -155,6 +156,6 @@ def test_command_line_choices_become_the_environment_and_are_checked(monkeypatch
     parser = argparse.ArgumentParser()
     bs.add_arguments(parser)
     bs.apply_arguments(parser.parse_args(["--browser-provider", "playwright-cli", "--playwright-session", "fixture"]))
-    assert bs.connection() == ("playwright", "", "", "fixture")
+    assert bs.current().connection() == bs.Connection("playwright", "", "", "fixture")
     with pytest.raises(ValueError):
         bs.apply_arguments(parser.parse_args(["--browser-provider", "cdp", "--browser-endpoint", "https://remote.test"]))

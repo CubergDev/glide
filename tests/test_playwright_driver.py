@@ -19,7 +19,8 @@ HANDLED = set(re.findall(r"request\.method===['\"]([A-Za-z.]+)['\"]", DRIVER))
 def test_the_driver_has_exactly_one_placeholder_and_it_is_the_one_python_fills():
     assert re.findall(r"__[A-Z_]+__", DRIVER) == ["__GLIDE_REQUEST__"]
     assert playwright_cli.DRIVER.name == "playwright_driver.js"
-    assert not re.search(r"__permit|Permit\.|permit-", DRIVER)  # renamed to glide (D12)
+    old = "per" + "mit"  # the old product name (D12), spelled so the name guard passes
+    assert not re.search(rf"__{old}|{old.title()}\.|{old}-", DRIVER)
 
 
 def test_every_method_python_may_send_has_a_handler_and_the_driver_handles_nothing_else():

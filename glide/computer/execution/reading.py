@@ -5,6 +5,8 @@ page says is ever interpreted: `page_record` treats even the adapter's output as
 stamps it with a host-generated observation time.
 """
 
+import re
+import unicodedata
 from datetime import UTC, datetime
 
 from .contracts import InvalidAction, safe_url
@@ -58,11 +60,28 @@ PAGE_SCRIPT = (
 )
 
 
+_OSC = re.compile(r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?")  # operating-system commands: titles, links
+_CSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")  # cursor movement, erasing, colours
+_ESCAPE = re.compile(r"\x1b[@-_]")  # the two-character escapes
+_BIDI = dict.fromkeys([*range(0x202A, 0x202F), *range(0x2066, 0x206A)])  # overrides that reorder what a terminal shows
+
+
+def clean(text, *, lines=False):
+    """`text` with every terminal escape sequence and control character removed: a page is data, and what it sends may
+    never move a cursor, erase the screen, retitle a window or reorder what the person reads. With `lines` the
+    newlines and tabs of a body of text stay; otherwise the result is one line."""
+    text = _ESCAPE.sub("", _CSI.sub("", _OSC.sub("", text))).translate(_BIDI)
+    kept = "".join(c for c in text if c in "\n\t" or unicodedata.category(c) != "Cc")
+    return kept if lines else " ".join(kept.split())
+
+
 def page_record(data):
     """One page as evidence: bounded, validated, deduplicated and stamped with the host's own clock.
 
     Anything the browser returned that does not fit the contract is an error, never silently repaired. A link that
-    is merely unusable (unsafe scheme, credentials, too long) is dropped, not trusted.
+    is merely unusable (unsafe scheme, credentials, too long) is dropped, not trusted. Every string a page chose
+    (title, text, link titles) is cleaned of control characters and escape sequences here, once, so that nothing
+    later (the model's packet, a citation line, the terminal) can carry one.
     """
     if not isinstance(data, dict):
         raise InvalidAction("The browser did not return readable page data")
@@ -83,11 +102,11 @@ def page_record(data):
             raise InvalidAction("The page reader returned an invalid link")
         if url not in seen and len(url) <= MAX_URL and len(title) <= MAX_LINK_TITLE and safe_url(url):
             seen.add(url)
-            links.append({"url": url, "title": title})
+            links.append({"url": url, "title": clean(title)})
     return {
         "url": data["url"],
-        "title": data["title"],
-        "text": data["text"],
+        "title": clean(data["title"]),
+        "text": clean(data["text"], lines=True),
         "links": links,
         "truncated": data["truncated"],
         "observed_at": datetime.now(UTC).isoformat(),

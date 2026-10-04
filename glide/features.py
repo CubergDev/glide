@@ -12,6 +12,7 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 # The import names the webhooks extra provides (pyproject.toml's `webhooks` list); the voice stack's are named where used.
 WEBHOOKS_MODULES = ("fastapi", "uvicorn", "pydantic", "jwt", "cryptography")
@@ -97,9 +98,9 @@ def _vad_model(settings) -> str:
 
 
 def _memory(glide_config, env) -> str:
-    from .memory.settings import MemorySettings, read_table
+    from .memory.settings import MemorySettings
 
-    settings = MemorySettings.from_mapping(read_table("memory", _source(glide_config)), env)
+    settings = MemorySettings.from_mapping(table(glide_config, "memory"), env)
     if not settings.enabled:
         return "off (set enabled = true under [memory], or GLIDE_MEMORY=1, to turn it on)"
     capture = "auto_capture on" if settings.auto_capture else "auto_capture off"
@@ -121,9 +122,8 @@ def _webhooks(glide_config, env) -> str:
 
 def _mcp(glide_config, env) -> str:
     from .mcp.config import McpSettings
-    from .memory.settings import read_table
 
-    settings = McpSettings.from_mapping(read_table("mcp", _source(glide_config)))
+    settings = McpSettings.from_mapping(table(glide_config, "mcp"))
     names = ", ".join(spec.name for spec in settings.servers) or "none"
     return f"client servers configured: {names} (none started); server_memory {settings.server_memory}"
 
@@ -133,3 +133,10 @@ def _source(glide_config) -> Path | None:
     for again: the tables are read from the file the providers were."""
     source = Path(getattr(glide_config, "source", "") or ".")
     return source if source.is_file() else None
+
+
+def table(glide_config, name: str) -> Mapping[str, Any]:
+    """One top-level table of the glide.toml the configuration was read from ({} when there is none, or no such table)."""
+    from .memory.settings import read_table
+
+    return read_table(name, _source(glide_config))

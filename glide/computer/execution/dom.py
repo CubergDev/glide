@@ -211,6 +211,7 @@ def on_element(target: str, body: str) -> str:
 
 class BrowserBackend:
     transport = "cdp"
+    passive_inspection = True
     suppress_origin = False
 
     def __init__(self, endpoint, target=""):

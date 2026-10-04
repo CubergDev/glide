@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from glide.computer.actions import Context
 from glide.computer.control import RunControl
-from glide.computer.execution import engine
+from glide.computer.execution import providers, research
 from glide.computer.execution.contracts import EFFECTS, Container, Element, Milestone, Observation, validate
 from glide.computer.generation import GenerationResult
 from glide.computer.runner import RunConfig, run
 
 
 class Computer:
+    passive_inspection = True
+
     def __init__(self):
         self.state = Observation(
             "Editor",
@@ -183,23 +186,26 @@ class Reasoner:
 
 
 class FakeSupervisor:
-    """A scripted stand-in for `research.Supervisor`, behind `engine.make_supervisor`.
+    """A scripted stand-in for `research.Supervisor`, which `drive(..., supervisor=...)` puts in its place.
 
-    It has what the engine relies on from the real one and nothing else (research.py is another port): `advance`
-    returns the next browser batch (or sets `answer`), and the attributes the recovery path reads. `script` is a
-    list of `("browse", [Milestone, ...])`, `("answer", Answer)` or `("raise", exception)`.
+    It has what the engine relies on from the real one and nothing else: `advance` returns the next browser batch (or
+    sets `answer`), and the attributes the recovery path reads. `script` is a list of `("browse", [Milestone, ...])`,
+    `("answer", Answer)` or `("raise", exception)`. Calling it is the engine constructing the supervisor; the
+    arguments it was given are kept in `built`.
     """
 
     def __init__(self, script=()):
         self.script = list(script)
         self.goal = self.route = None
+        self.built = {}
         self.replies, self.questions, self.sources = [], 0, []
         self.batch, self.batch_ids, self.browser_goal = 0, set(), ""
         self.answer = None
         self.advances = []
 
-    def __call__(self, goal, route):
+    def __call__(self, goal, route, budget, *, tools, search_url=""):
         self.goal, self.route = goal, route
+        self.built = {"budget": budget, "tools": tools, "search_url": search_url}
         return self
 
     def advance(self, ctx, backend, observed, steps, ledger, measured, readiness_timeout):
@@ -252,19 +258,45 @@ def response(*steps, question="", unsupported=()):
     return {"question": question, "steps": [asdict(s) for s in steps], "unsupported": list(unsupported)}
 
 
+def named(goal, reasoner):
+    """`goal`, and every address the scripted plans open, as a request that names them would. A plan with no
+    supervisor may only open an address its goal, the page or the settings offer, and most tests care about the
+    plan's other properties, not about where it goes."""
+    addresses = dict.fromkeys(re.findall(r"https?://[^\s\"\\]+", json.dumps(getattr(reasoner, "replies", []), default=str)))
+    return " ".join([goal, *addresses])
+
+
+def default_goal(reasoner):
+    return named("Task", reasoner)
+
+
+def give_backend(monkeypatch, computer, calls=None):
+    """The engine's one way to a backend is `providers.make_backend`: hand it `computer`. The calls it gets are
+    appended to `calls` (a new list when none is given), which is returned."""
+    calls = [] if calls is None else calls
+
+    def make_backend(browser="", *, act=False, on_switch=None):
+        calls.append({"browser": browser, "act": act, "on_switch": on_switch})
+        return computer
+
+    monkeypatch.setattr(providers, "make_backend", make_backend)
+    return calls
+
+
 def drive(monkeypatch, tmp_path, computer, reasoner, jev=None, control=None, supervisor=None, **kwargs):
     """Run the structured engine on the fake computer, with Jev as the run's classifier (D7: `classifier_factory`)
-    and the scripted reasoner as the writer. Only the backend factory is replaced; the supervisor is the caller's."""
+    and the scripted reasoner as the writer. Only the backend door is replaced; the supervisor is the caller's, or
+    the real one."""
     jev = jev or Jev()
-    monkeypatch.setattr(engine, "make_backend", lambda _: computer)
+    give_backend(monkeypatch, computer, kwargs.pop("calls", None))
     if supervisor is not None:
-        monkeypatch.setattr(engine, "make_supervisor", supervisor)
+        monkeypatch.setattr(research, "Supervisor", supervisor)
     ask = kwargs.pop("ask", None)
     readiness = kwargs.pop("readiness_timeout", 0)  # "default" leaves it to RunConfig's own default
     cfg = RunConfig(
-        kwargs.pop("goal", "Task"),
+        kwargs.pop("goal", None) or default_goal(reasoner),
         tmp_path,
-        act=True,
+        act=kwargs.pop("act", True),
         engine="structured",
         execution_browser="Brave Browser",
         **({} if readiness == "default" else {"readiness_timeout": readiness}),

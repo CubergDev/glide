@@ -11,6 +11,7 @@ TAB_CAPABILITIES = {"tab_create", "tab_switch", "tab_close"}
 
 class NativeBackend:
     transport = "native"
+    passive_inspection = True
 
     def __init__(self, browser):
         self.browser = browser

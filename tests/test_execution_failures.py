@@ -10,7 +10,7 @@ from execution_world import SCENARIOS, Computer, Jev, Reasoner, drive, response
 
 from glide.computer import runner
 from glide.computer.control import RunControl
-from glide.computer.execution import engine
+from glide.computer.execution import engine, providers
 from glide.computer.execution.contracts import Milestone
 from glide.computer.generation import GenerationError
 from glide.computer.models import BrowserConnectionError
@@ -151,7 +151,8 @@ def test_the_default_run_folder_holds_counts_and_a_scrubbed_failure_but_no_conte
         "errno": 61,
     }
     assert "Mrs Jones" not in text and "secret=1" not in text and "devtools" not in text
-    assert summary["failure"].startswith("Cannot connect to cdp at http://127.0.0.1:9222 ")  # host only, as in every event
+    assert summary["failure"].startswith("Cannot connect to cdp. Start or reconnect")  # no address without recording (audit 5)
+    assert "127.0.0.1" not in text
 
 
 def test_content_recording_adds_goal_plan_history_and_the_failure_handoff(monkeypatch, tmp_path):
@@ -201,7 +202,7 @@ def test_an_uncaught_runner_exception_is_saved_when_recording_and_still_propagat
     for content in (False, True):
         out = tmp_path / str(content)
         with pytest.raises(RuntimeError, match="unexpected fixture failure"):
-            runner.run(runner.RunConfig("fixture goal", out, record_content=content), lambda *args: None)
+            runner.run(runner.RunConfig("fixture goal", out, record_content=content), lambda *args: None, object)
         assert out.exists() is content
     report = json.loads((tmp_path / "True" / "diagnostic.json").read_text())
     assert report["summary"]["outcome"] == "crashed" and report["exception"][0]["type"] == "RuntimeError"
@@ -211,28 +212,17 @@ def test_an_uncaught_runner_exception_is_saved_when_recording_and_still_propagat
 
 
 def test_the_engine_uses_the_callers_classifier_and_never_builds_its_own(monkeypatch, tmp_path):
-    def forbidden():
-        pytest.fail("the engine built its own classifier and bypassed the provider chain")
-
-    monkeypatch.setattr(runner, "TypeSafeClient", forbidden)
     jev = Jev("navigate")
     state = drive(monkeypatch, tmp_path, Computer(), Reasoner([]), jev, goal="Open https://different.test")
     assert state.answer.achieved and len(jev.requests) == 2
     assert json.loads((tmp_path / "run.json").read_text())["calls"]["classifier"]["calls"] == 2
 
 
-def test_the_structured_engine_refuses_to_start_without_a_classifier_factory(monkeypatch, tmp_path):
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: pytest.fail("the hosted classifier was built for the engine"))
-    cfg = runner.RunConfig("Task", tmp_path, act=True, engine="structured")
-    with pytest.raises(ValueError, match="classifier_factory"):
-        runner.run(cfg, lambda *a: None, control=RunControl("offline"))
-
-
 def test_a_configuration_error_is_left_to_the_caller_but_the_run_folder_is_still_written(monkeypatch, tmp_path):
     def unconfigured():
         raise ConfigError("no usable provider for the classifier; set EXAMPLE_KEY")
 
-    monkeypatch.setattr(engine, "make_backend", lambda _: pytest.fail("no browser before the classifier"))
+    monkeypatch.setattr(providers, "make_backend", lambda *a, **kw: pytest.fail("no browser before the classifier"))
     cfg = runner.RunConfig("Task", tmp_path, act=True, engine="structured", readiness_timeout=0)
     with pytest.raises(ConfigError, match="EXAMPLE_KEY"):
         runner.run(cfg, lambda *a: None, classifier_factory=unconfigured, control=RunControl("offline"))

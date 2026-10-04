@@ -61,12 +61,12 @@ class BrowserConnectionError(DesktopError):
             "cause_type": type(reason).__name__,
             "errno": getattr(reason, "errno", None),
         }
-        hint = (
+        self.hint = (
             "Open the selected Playwright CLI session and try again."
             if provider == "playwright-cli"
             else "Start or reconnect the selected debugging browser/server, or choose another provider."
         )
-        super().__init__(f"Cannot connect to {provider} at {endpoint}. {hint}")
+        super().__init__(f"Cannot connect to {provider} at {endpoint}. {self.hint}")
 
 
 @dataclass(frozen=True)

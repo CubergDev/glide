@@ -28,6 +28,7 @@ ENV_NAMES = (
     "GLIDE_PLAYWRIGHT_SESSION",
     "GLIDE_PLAYWRIGHT_CLI",
 )
+REAL_MAKE_BACKEND = providers.make_backend  # taken at import, before the autouse guard replaces it
 CDP = "http://127.0.0.1:9415"
 OBSCURA = "http://127.0.0.1:9742"
 
@@ -38,6 +39,7 @@ def clean_settings(monkeypatch):
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
     monkeypatch.setattr(browser_settings, "_table", {})
+    monkeypatch.setattr(providers, "make_backend", REAL_MAKE_BACKEND)  # this file tests the door the guard shuts
 
 
 def configure(**table):
@@ -231,6 +233,18 @@ def test_unavailable_provider_is_replaced_by_the_next_one_and_the_switch_is_visi
     assert "browser_provider_switched" in kinds and kinds.index("browser_provider_selected") < kinds.index(
         "browser_provider_switched"
     )
+
+
+def test_a_fallback_is_always_said_on_the_runs_channel_whether_or_not_the_caller_listens(monkeypatch, sessions):
+    """Audit finding 2: with no `on_switch` the switch used to reach only the in-memory recorder."""
+    configure(provider="cdp", fallback=["obscura"])
+    monkeypatch.setattr(dom, "_get_json", Reachable(OBSCURA))
+    heard = []
+    with diagnostics.Diagnostics().activate() as recorder, controlled(RunControl("t", heard.append)):
+        assert providers.make_backend().transport == "obscura"
+    (said,) = [e for e in heard if e.kind == "switch"]
+    assert said.text == "fallback: browser cdp -> obscura (BrowserConnectionError)"
+    assert "127.0.0.1" not in said.text and "browser_provider_switched" in [e["event"] for e in recorder.events]
 
 
 def test_the_first_available_provider_is_used_without_a_switch(monkeypatch, sessions):

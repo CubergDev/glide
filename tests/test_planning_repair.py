@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 
 import pytest
-from execution_world import Computer, Jev, Reasoner, drive, response
+from execution_world import Computer, Jev, Reasoner, drive, named, response
 
 from glide.computer.control import RunControl
 from glide.computer.execution import planning
@@ -96,7 +96,9 @@ def test_empty_target_can_plan_supported_playback_after_navigation():
     search = Milestone("search", "Find the requested recording", "query_submitted", target="search", value="a recording")
     playback = Milestone("play", "Play the first result", "media_playing")
     writer = Reasoner([response(opening, search, playback)])
-    plan, question = planning.plan(writer, "Open the media site, search a recording, and play the first result", observed)
+    plan, question = planning.plan(
+        writer, named("Open the media site, search a recording, and play the first result", writer), observed
+    )
     assert plan == [opening, search, playback] and not question
     packet = json.loads(writer.requests[0].text)
     assert packet["observation"]["capabilities"] == ["inspect", "navigate", "tab_create"]
@@ -157,7 +159,7 @@ def test_unobserved_future_disclosure_needs_observation_before_planning_expansio
     expand = Milestone("expand", "Reveal its future section", "disclosure_expanded", target="Unobserved section")
     writer = Reasoner([response(opening, expand)])
     with pytest.raises(ValueError, match="observed controller"):
-        planning.plan(writer, "Open the page and expand its section", observed)
+        planning.plan(writer, named("Open the page and expand its section", writer), observed)
     assert len(writer.requests) == 2
     for request in writer.requests:
         assert all(
@@ -170,6 +172,6 @@ def test_correction_cannot_drop_previously_registered_requirements():
     original = Milestone("tabs", "Create three tabs", "tab_created", value="https://example.net", quantity=3)
     writer = Reasoner([RECORDED_PLAN, response(Milestone("other", "Go elsewhere", "url", value="https://other.test"))])
     with pytest.raises(ValueError, match="changed an original requirement"):
-        planning.plan(writer, "Create three tabs", Computer().inspect(), steps=[original])
+        planning.plan(writer, named("Create three tabs", writer), Computer().inspect(), steps=[original])
     assert len(writer.requests) == 2
     assert json.loads(writer.requests[-1].text)["original_milestones"][0]["quantity"] == 3

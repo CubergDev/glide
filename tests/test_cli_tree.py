@@ -20,7 +20,9 @@ from test_assistant_fakes import FakeConfig, FakePlayer
 
 from glide import cli, features
 from glide.assistant.audio_io import AudioUnavailable
+from glide.computer import browser_settings
 from glide.computer import cli as computer_cli
+from glide.computer import config as computer_config
 from glide.computer.control import RunControl
 from glide.mcp.config import McpSettings
 from glide.memory.settings import MemorySettings, SettingsError
@@ -535,6 +537,19 @@ def test_the_commented_webhooks_example_is_valid_for_the_webhooks_table(isolated
     with pytest.raises(SettingsError, match="must be a path"):
         path.write_text('[webhooks]\nconfig = ""\n')
         features.webhooks_file({}, path)
+
+
+def test_the_commented_browser_and_research_examples_are_valid_for_their_readers():
+    text = (
+        example_block("browser")
+        .replace("<address of the page a search starts from>", "https://search.example.test/")
+        .replace("<loopback address and port of the browser's debugging port>", "http://127.0.0.1:9")
+        .replace("<loopback address and port of Obscura>", "http://127.0.0.1:10")
+    )
+    settings = browser_settings.resolve(tomllib.loads(text)["browser"], {})
+    assert settings.chain == ("cdp", "obscura") and settings.target == "new" and settings.search_url
+    assert settings.session == "glide"
+    assert computer_config.research_budget(tomllib.loads(example_block("research"))["research"], {}) == 12
 
 
 def test_the_example_file_has_no_url_but_the_placeholder_and_no_real_server():
