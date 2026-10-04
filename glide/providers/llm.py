@@ -807,8 +807,9 @@ class LLM:
     """The LLM as the rest of Glide sees it: a chain of clients behind the same two methods, so no caller knows
     which vendor answered. A failure moves on to the next client and is recorded on `chain.events`.
 
-    `deadline_s` (from `[llm.<role>] deadline_s`) is the longest one request through this facade may take: a call that
-    names no `timeout` gets it, and one that names a longer `timeout` is cut down to it.
+    `deadline_s` (from `[llm.<role>] deadline_s`) is the longest one request through this facade may take. It only ever
+    shortens: a call that names no `timeout` gets the smaller of it and the adapter's default, and one that names a
+    longer `timeout` is cut down to it.
     """
 
     def __init__(self, chain: Chain[LLMClient], deadline_s: float | None = None):
@@ -818,8 +819,8 @@ class LLM:
     def _capped(self, kw: dict) -> dict:
         if self.deadline_s is None:
             return kw
-        asked = kw.get("timeout")
-        return {**kw, "timeout": self.deadline_s if asked is None else min(asked, self.deadline_s)}
+        asked = DEFAULT_TIMEOUT_S if kw.get("timeout") is None else kw["timeout"]
+        return {**kw, "timeout": min(asked, self.deadline_s)}
 
     def chat(self, messages: Sequence[dict], *, hedge: bool | None = None, **kw) -> ChatResult:
         """`kw` are those of `LLMClient.chat`. `ChatResult.provider` is the name of the slot that answered.
