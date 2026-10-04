@@ -1,111 +1,199 @@
-# CI for Glide: uv, ruff, offline pytest.
+# CI for Glide: lint, offline tests, workflow lint, secret scan. Required status check: "ci-ok" (see the last job).
+# What is required, what is advisory and how to change it: .github/REVIEW_SETUP.md.
 #
-# Derived from consolidation-inputs/extension-local-archive-1/.github/workflows/ci.yml (the five archive copies of
-# ci.yml are byte-identical). Dropped from the archive version: the gitleaks job (it downloads a binary over the
-# network and needs a .gitleaks.toml that does not exist here), the Python 3.12 matrix leg (AGENTS.md runs 3.13).
-#
-# Tests are offline: tests/conftest.py refuses anything that reaches the machine, and no job here needs a secret.
-#
-# Required status check: the aggregate job "ci-ok" (it treats a skipped job as success). Whether the live ruleset
-# requires this name, or other names, must be checked online; see .github/REVIEW_SETUP.md. Nothing here changes it.
-#
-# Cost: the macOS job costs about ten times the Linux rate on private repos, so it runs on manual dispatch only
-# (Actions tab, Run workflow) until the owner decides to spend that. On a public repo it runs on every PR.
-#
-# Third-party actions are pinned to full commit SHAs. Each SHA was checked against its tag with read-only gh calls on
-# 2026-10-04 (actions/checkout v7.0.1, astral-sh/setup-uv v10.2.0); uv 0.12.22 exists as a release.
+# Tests are offline (tests/conftest.py refuses anything that reaches the machine) and no job here uses a secret.
+# Third-party actions are pinned to full commit SHAs, each checked against its tag with read-only gh calls on 2026-10-04.
 
 name: CI
 
 on:
   pull_request:
+    # `labeled` makes adding the ci-macos label start a run that includes the macOS job.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   workflow_dispatch:
 
-# Least privilege: a read-only token for every job.
-permissions:
-  contents: read
+# Nothing by default; every job asks for what it needs.
+permissions: {}
 
-# One run per PR or branch; a newer push cancels the older PR run; runs on main are never cancelled.
+# One run per PR or ref; a newer push cancels the older PR run; runs on main are never cancelled.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.22"
+  # actionlint release, and the sha256 of its linux_amd64 tarball. Source: the "digest" GitHub shows for the release asset,
+  # which also matches actionlint_1.7.12_checksums.txt in the same release (both read on 2026-10-04).
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  # gitleaks version the secret-scan action downloads (read from the environment by the action). Same version the
+  # .gitleaks.toml allowlist was tested with.
+  GITLEAKS_VERSION: "8.30.1"
 
 jobs:
   lint-test:
     name: lint-test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.12.22"
+          version: ${{ env.UV_VERSION }}
           python-version: "3.13"
           enable-cache: true
 
-      - name: Install (uv.lock must be current)
-        run: uv sync --locked
+      - run: uv sync --locked
+      - run: uv lock --check
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked pytest -q
 
-      - name: Ruff lint
-        run: uv run --locked ruff check .
+  # The declared floor is requires-python >= 3.12; lint-test runs 3.13.
+  test-py312:
+    name: test-py312
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Ruff format check
-        run: uv run --locked ruff format --check .
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
 
-      - name: Pytest (offline)
-        run: uv run --locked pytest -q
+      - run: uv sync --locked
+      - run: uv run --locked pytest -q
 
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The pinned release binary, checked against a sha256 before it runs. The runner's shellcheck is used if present.
+      - name: Install actionlint
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+
+      - run: ./actionlint -color
+
+  # Gitleaks needs no license on a personal account (assumption: this repo is owned by the user account CubergDev; an
+  # organization would need the GITLEAKS_LICENSE secret). Config: .gitleaks.toml. Comments are off so contents: read and
+  # pull-requests: read are enough. On a PR it scans the PR's commits; on push to main, the pushed commits.
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  # Cheap Linux job that decides whether the (about ten times dearer) macOS job runs. It runs only git diff on the PR's
+  # merge commit; no PR text reaches a shell.
+  macos-gate:
+    name: macos-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2 # on a PR: the merge commit and both parents, so HEAD^1 is the base-branch tip
+          persist-credentials: false
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-macos') }}
+        run: |
+          run=false
+          if [ "${EVENT}" != "pull_request" ]; then
+            run=true   # push to main, manual dispatch
+          elif [ "${HAS_LABEL}" = "true" ]; then
+            run=true   # label ci-macos
+          else
+            changed="$(git diff --name-only HEAD^1 HEAD)"
+            if printf '%s\n' "${changed}" | grep -Eq '^(glide/computer/|tests/conftest\.py$|pyproject\.toml$|uv\.lock$|\.github/workflows/ci\.yml$)'; then
+              run=true # a platform adapter changed
+            fi
+          fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          echo "macOS tests: ${run}"
+
+  # Not a required check by itself: ci-ok accepts "skipped" for this job only.
   test-macos:
     name: test-macos
-    # Private repo: manual runs only (billing). Public repo: every PR and push.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.repository.private == false
+    needs: macos-gate
+    if: needs.macos-gate.outputs.run == 'true'
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.12.22"
+          version: ${{ env.UV_VERSION }}
           python-version: "3.13"
           enable-cache: true
 
-      # Pulls the pyobjc and ocrmac wheels. Nothing here launches an app or touches a screen: conftest.py guards it.
-      - name: Install (uv.lock must be current)
-        run: uv sync --locked
+      # Pulls the pyobjc and ocrmac wheels. Nothing launches an app or touches a screen: conftest.py guards it.
+      - run: uv sync --locked
+      - run: uv run --locked pytest -q
 
-      - name: Pytest (offline)
-        run: uv run --locked pytest -q
-
+  # The one required check. Every job above must be success; only test-macos may be skipped. Add a job to `needs` to
+  # make it required. `always()` so a failed or cancelled job cannot make this job skip (a skipped check counts as passing).
   ci-ok:
     name: ci-ok
-    if: ${{ !cancelled() }}
-    needs: [lint-test, test-macos]
+    if: always()
+    needs: [lint-test, test-py312, actionlint, secret-scan, macos-gate, test-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions: {}
     steps:
-      - name: Every needed job must have succeeded or been skipped
+      - name: Check results
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          echo "needs results: ${RESULTS}"
-          for result in ${RESULTS}; do
-            case "${result}" in
-              success|skipped) ;;
-              *) echo "::error::a needed job ended as '${result}'"; exit 1 ;;
-            esac
-          done
+          printf '%s' "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s' "${NEEDS}" | jq -e '
+            to_entries | all(.value.result == "success" or (.key == "test-macos" and .value.result == "skipped"))
+          ' > /dev/null || { echo "::error::a required job did not succeed"; exit 1; }

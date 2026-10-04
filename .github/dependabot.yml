@@ -1,0 +1,29 @@
+# Weekly, grouped dependency updates. At most 3 open Dependabot PRs per ecosystem entry.
+#
+# The "uv" ecosystem (generally available) reads pyproject.toml and updates uv.lock together with it, so there is no
+# "pip" entry. Pins in pyproject.toml are exact (==), so a bump rewrites the pin and the lock in one PR.
+# Dependabot PRs get no Actions secrets, so the Claude review skips them.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7 # a release yanked within a week never reaches a PR
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7 # a release yanked within a week never reaches a PR
+    groups:
+      python:
+        patterns: ["*"]

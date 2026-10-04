@@ -1,0 +1,105 @@
+# CD: a GitHub Release from a version tag. Push a tag like v0.2.0 (steps in .github/REVIEW_SETUP.md).
+#
+# verify  : the tag is vMAJOR.MINOR.PATCH, equals the pyproject version, and points at a commit on main; then lint, offline
+#           tests and `uv build` (sdist and wheel). Read-only token.
+# release : the only job with contents: write. It creates the Release from the built files.
+# No PyPI publishing and no deploy to anything outside this repository.
+#
+# The tag name is text a person chose: it only ever reaches a shell through an environment variable.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+# Never cancel a release half-way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.12.22"
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # whole history, to check that the tagged commit is on main
+          persist-credentials: false
+
+      - name: Tag matches pyproject version and is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "${TAG}" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::tag is not vMAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "${TAG}" != "v${version}" ]; then
+            echo "::error::tag ${TAG} does not equal v${version} from pyproject.toml"
+            exit 1
+          fi
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main \
+            || { echo "::error::the tagged commit is not on main"; exit 1; }
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.13"
+          enable-cache: false # the release is built from a clean cache: nothing restored from earlier runs
+
+      - run: uv sync --locked
+      - run: uv lock --check
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked pytest -q
+
+      - name: Build sdist and wheel
+        run: |
+          uv build
+          ls -l dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: release
+    needs: verify
+    # The checks above live in this same file, so anyone who can push a tag could push a commit that edits them out.
+    # The environment is the gate that file cannot remove: give "release" a required reviewer and a deployment tag
+    # rule `v*.*.*` in Settings > Environments (see .github/REVIEW_SETUP.md).
+    if: github.ref_type == 'tag'
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the Release and upload its files; nothing else
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+
+      # No checkout here, so gh gets the repository from GH_REPO. --verify-tag refuses to create a tag.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          gh release create "${TAG}" dist/* --verify-tag --title "${TAG}" --generate-notes

@@ -1,0 +1,51 @@
+# SwiftUI app: build and offline tests on macOS. Runs only when app/** or this file changes.
+#
+# ADVISORY, deliberately not part of ci-ok and not a required check:
+#   - A path-filtered workflow reports nothing on PRs that do not touch app/, so a required check named here would sit
+#     "pending" forever on those PRs and block them.
+#   - It uses a macOS runner (about ten times the Linux rate on a private repo) and the Swift toolchain of "macos-latest",
+#     which can change under it.
+# Read it as a signal on app PRs. app/scripts/test.sh never launches the app, the screen, the microphone or the network.
+
+name: App CI
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/app-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/app-ci.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: app-ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  app-test:
+    name: app-test
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The workflow also runs when only this file changes. Until the app directory exists on the branch there is
+      # nothing to test, which is not a failure.
+      - name: Is there an app to test
+        id: app
+        run: |
+          if [ -f app/scripts/test.sh ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "no app/ on this branch: nothing to test"; fi
+
+      - name: Swift tests
+        if: steps.app.outputs.present == 'true'
+        run: sh app/scripts/test.sh
