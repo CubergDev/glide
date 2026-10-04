@@ -515,7 +515,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 
 def cmd_webhooks_serve(args: argparse.Namespace) -> int:
     """`glide webhooks serve`: its `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
-    from .memory.settings import SettingsError, find_config
+    from .memory.settings import SettingsError, locate_config
 
     words = list(args.rest)
     if not _help_asked(words):
@@ -525,7 +525,8 @@ def cmd_webhooks_serve(args: argparse.Namespace) -> int:
             return 2
         if not any(word == "--config" or word.startswith("--config=") for word in words):
             try:
-                words = ["--config", str(features.webhooks_file(os.environ, find_config(os.environ, path=args.config))), *words]
+                found, foreign = locate_config(os.environ, path=args.config)
+                words = ["--config", str(features.webhooks_file(os.environ, found, foreign=foreign)), *words]
             except SettingsError as exc:
                 print(f"glide webhooks: {exc}", file=sys.stderr)
                 return 2

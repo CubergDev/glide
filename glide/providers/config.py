@@ -29,7 +29,9 @@ A glide.toml found in the current directory (not `--config`, not $GLIDE_CONFIG, 
 ~/.config/glide/glide.toml) is somebody else's file until the user says otherwise: a repository can ship one. It is
 used, and said to be (a notice in `GlideConfig.warnings` names the file), but a key is never sent from it to a host
 the user did not name: the vendors Glide knows by name, the hosts in the user's own config and this machine are
-trusted, any other host makes that slot "skipped" with the reason. See `load_config`.
+trusted, any other host makes that slot "skipped" with the reason. See `load_config`. Such a file also cannot lower a
+safety setting ([speech] confirm_*, [memory], [webhooks], [mcp]): those keys are left out and the notice names them
+(`glide/trust.py`). A .env cannot choose the configuration either (GLIDE_CONFIG, GLIDE_PIN_*).
 
 Pinning, with no code change: GLIDE_PIN_LLM_FAST, GLIDE_PIN_LLM_SMART, GLIDE_PIN_STT, GLIDE_PIN_TTS and
 GLIDE_PIN_CLASSIFIER name a slot (its full name or a prefix naming one); a trailing "!" makes it strict, so
@@ -53,6 +55,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .. import trust
 from . import classifier as classifier_mod
 from . import llm as llm_mod
 from . import stt as stt_mod
@@ -555,6 +558,9 @@ class GlideConfig:
         `trusted_hosts` is for a file that is not the user's own (see the module docstring): the hosts, besides the
         vendors Glide knows by name and this machine, that a key may be sent to. Left out, the file is trusted.
         """
+        left: tuple[str, ...] = ()
+        if trusted_hosts is not None:  # somebody else's file: it may not lower a safety setting (see glide/trust.py)
+            data, left = trust.strip(data)
         providers = _providers(data.get("providers", {}))
         roles = _roles(data, providers)
         warnings = tuple(f"{source}: ignoring the unknown table [{key}]" for key in data if key not in KNOWN_TABLES)
@@ -563,6 +569,8 @@ class GlideConfig:
                 f"{source}: read from the current directory, so a key is sent only to the vendors Glide knows, "
                 "this machine, and hosts named in your own configuration (~/.config/glide/glide.toml)",
             )
+            if left:
+                warnings += (trust.notice(source, left),)
         for warning in warnings:
             log.warning(warning)
         # Chains the file leaves out come from the built-in defaults. They name presets, and a file that
@@ -596,6 +604,11 @@ class GlideConfig:
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"{source} is not valid TOML: {e}") from None
         return cls.from_dict(data, env=env, source=source, builders=builders, trusted_hosts=trusted_hosts)
+
+    @property
+    def foreign(self) -> bool:
+        """True when the file is a glide.toml of the current directory, not the user's own (see glide/trust.py)."""
+        return self._trusted_hosts is not None
 
     def __repr__(self) -> str:
         return f"<GlideConfig {self.source}: {', '.join(self.roles)}>"  # nothing from the environment, ever

@@ -31,15 +31,15 @@ def extra_message(command: str, extra: str, lacking: list[str]) -> str:
     return f"{command} needs the {extra} extra (missing: {', '.join(lacking)}): uv sync --extra {extra}"
 
 
-def webhooks_file(environ: Mapping[str, str] | None, toml: Path | None) -> Path:
+def webhooks_file(environ: Mapping[str, str] | None, toml: Path | None, *, foreign: bool = False) -> Path:
     """The webhook service's JSON file: $GLIDE_WEBHOOK_CONFIG, else `config = ...` under [webhooks] in `toml` (the
-    glide.toml in use, or None), else webhooks.json."""
+    glide.toml in use, or None), else webhooks.json. A `foreign` file (a project's own glide.toml) may not name it."""
     from .memory.settings import SettingsError, read_table
 
     env = os.environ if environ is None else environ
     if named := (env.get(WEBHOOKS_ENV) or "").strip():
         return Path(named).expanduser()
-    table = read_table("webhooks", toml)
+    table = read_table("webhooks", toml, foreign=foreign)
     for key in table:
         if key not in _WEBHOOKS_KEYS:
             raise SettingsError(f"[webhooks] has an unknown key {key!r} (known: {', '.join(_WEBHOOKS_KEYS)})")
@@ -108,7 +108,7 @@ def _memory(glide_config, env) -> str:
 
 
 def _webhooks(glide_config, env) -> str:
-    path = webhooks_file(env, _source(glide_config))
+    path = webhooks_file(env, _source(glide_config), foreign=_foreign(glide_config))
     if not path.is_file():
         return f"off (no {path})"
     try:
@@ -139,8 +139,12 @@ def _source(glide_config) -> Path | None:
     return source if source.is_file() else None
 
 
+def _foreign(glide_config) -> bool:
+    return bool(getattr(glide_config, "foreign", False))
+
+
 def table(glide_config, name: str) -> Mapping[str, Any]:
     """One top-level table of the glide.toml the configuration was read from ({} when there is none, or no such table)."""
     from .memory.settings import read_table
 
-    return read_table(name, _source(glide_config))
+    return read_table(name, _source(glide_config), foreign=_foreign(glide_config))
