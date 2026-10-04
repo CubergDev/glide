@@ -40,7 +40,7 @@ def load_sounddevice():
         import sounddevice
     except (ImportError, OSError) as exc:
         raise AudioUnavailable(
-            f"audio needs the 'sounddevice' package and PortAudio ({type(exc).__name__}); install it with: uv add sounddevice"
+            f"audio needs the 'sounddevice' package and PortAudio ({type(exc).__name__}); install it with: uv sync --extra speech"
         ) from exc
     return sounddevice
 

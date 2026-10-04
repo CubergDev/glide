@@ -429,7 +429,9 @@ def _record(
             recorded.set()
 
     def work() -> None:
-        reply = assistant.handle_audio(chunks(), act=act, wait=False, language=args.lang)
+        reply = assistant.handle_audio(
+            chunks(), act=act, wait=False, language=args.lang or getattr(getattr(config, "voice", None), "language", None)
+        )
         if reply.route == "none" and not reply.error and not reply.heard:  # something heard and then cut is not silence
             print("(nothing heard)", flush=True)
 

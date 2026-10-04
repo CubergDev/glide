@@ -31,3 +31,37 @@ def test_a_config_without_voice_settings_adds_no_phrase(tmp_path):
         assert config.calls.llm >= 1
     finally:
         assistant.close()
+
+
+def test_listen_uses_the_speech_language_of_glide_toml(monkeypatch):
+    # finding 16: `glide listen` took only --lang and ignored [speech] language, which `glide voice` honours
+    import test_assistant_cli as rig_module
+
+    languages = []
+
+    class RecordingSTT(rig_module.FakeSTT):
+        def stream(self, chunks, *, sample_rate=16000, language=None):
+            languages.append(language)
+            return super().stream(chunks, sample_rate=sample_rate, language=language)
+
+    config = rig_module.answering("Four.")
+    config.voice = SpeechSettings(language="yue")
+    rig = rig_module.listen_rig(monkeypatch, RecordingSTT(final="two plus two"), config=config)
+    rig_module.talk(rig)
+    rig.keys.press("q")
+    assert rig_module.finish(rig.thread, rig.result) == 0
+    assert languages == ["yue"]
+
+
+def test_the_missing_audio_package_hint_is_the_extra_every_other_command_names():
+    import sys
+
+    import pytest
+
+    from glide.assistant.audio_io import AudioUnavailable, SoundDeviceOutput
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(sys.modules, "sounddevice", None)
+        with pytest.raises(AudioUnavailable) as caught:
+            SoundDeviceOutput()
+    assert "uv sync --extra speech" in str(caught.value) and "uv add" not in str(caught.value)

@@ -349,7 +349,7 @@ def test_a_missing_package_is_a_clear_error_not_an_import_error(monkeypatch, bac
     monkeypatch.setitem(sys.modules, "sounddevice", None)  # makes `import sounddevice` raise ImportError
     with pytest.raises(AudioUnavailable) as caught:
         backend()
-    assert "sounddevice" in str(caught.value) and "uv add" in str(caught.value)
+    assert "sounddevice" in str(caught.value) and "uv sync --extra speech" in str(caught.value)
 
 
 def test_a_missing_portaudio_library_is_the_same_clear_error(monkeypatch):
