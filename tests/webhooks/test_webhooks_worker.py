@@ -807,7 +807,7 @@ def test_the_command_line_by_default_runs_reports_only_and_wires_no_desktop(wire
     assert options["allow_desktop"] is False and options["act"] is False
     assert options["executor"] is None and options["approver"] is None and callable(options["reporter"])
     assert wired.built == [("http://127.0.0.1:8000", "laptop", "GLIDE_AGENT_TOKEN")] and wired.closed == [True]
-    assert wired.loaded == [None]
+    assert wired.loaded == [None] and wired.config.asked == ["smart"]  # reports need only the smart chain
 
 
 def test_the_command_line_wires_the_real_executor_and_the_terminal_approver_only_for_the_desktop_flag(wired, tmp_path):
@@ -1179,3 +1179,13 @@ def test_an_interrupted_run_keeps_its_call_for_the_operator_until_reconciled_the
         assert marker not in json.dumps(store.get("laptop", message.id))
     finally:
         store.close()
+
+
+def test_the_lease_threads_stop_when_the_run_ends_and_send_nothing_afterwards():
+    transport = OfflineTransport(duration=0.9)
+    started = time.monotonic()
+    assert worker.run_one(transport, **handlers_for(transport, lambda *_: {"outcome": "completed"}))
+    assert time.monotonic() - started < 3  # joined at once, not after their six-second timeout
+    seen = len(transport.requests)
+    time.sleep(0.4)
+    assert len(transport.requests) == seen
