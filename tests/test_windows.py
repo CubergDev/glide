@@ -6,6 +6,7 @@ import pytest
 
 from glide.computer import windows
 from glide.computer.models import ROLE_WORDS, TEXT_ROLES, Missed
+from glide.computer.platform_adapter import dispatching
 from glide.computer.windows import (
     KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP,
@@ -157,7 +158,7 @@ def test_a_click_that_did_not_land_presses_nothing(monkeypatch):
     locations = iter([(500.0, 500.0), (0.0, 0.0)])  # the abort check reads the pointer first, then the landing check
     monkeypatch.setattr(windows, "mouse_location", lambda: next(locations))
     monkeypatch.setattr(windows, "_send", sent.append)
-    with pytest.raises(Missed, match="not \\(640, 480\\)"):
+    with dispatching(), pytest.raises(Missed, match="not \\(640, 480\\)"):
         windows.click_at((640.0, 480.0))
     assert sent == []
 
@@ -167,7 +168,8 @@ def test_a_click_that_landed_presses_and_releases(monkeypatch):
     monkeypatch.setattr(windows, "_move", lambda point: None)
     monkeypatch.setattr(windows, "mouse_location", lambda: (640.0, 480.0))
     monkeypatch.setattr(windows, "_send", sent.append)
-    windows.click_at((640.4, 479.6))
+    with dispatching():
+        windows.click_at((640.4, 479.6))
     assert [event.u.mi.dwFlags for event in sent] == [windows.MOUSEEVENTF_LEFTDOWN, windows.MOUSEEVENTF_LEFTUP]
 
 

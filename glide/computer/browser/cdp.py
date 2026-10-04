@@ -13,6 +13,7 @@ Recording permission.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import shutil
 import socket
@@ -92,13 +93,40 @@ def _traced(kind: str, **details):
     event(f"browser_{kind}_completed", provider="cdp", **details, elapsed_s=time.perf_counter() - started, **extra)
 
 
+def is_loopback(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
+
+
+# An opener that names no proxy at all: `http_proxy` in the environment must not carry a request to the
+# debugging port of a browser on this machine somewhere else, or make the endpoint answer to someone else.
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _get_json(url: str, timeout: float = 5.0) -> Any:
-    with (
-        _traced("http", method="GET", endpoint=url, timeout_s=timeout) as done,
-        urllib.request.urlopen(url, timeout=timeout) as resp,
-    ):
+    direct = is_loopback(urllib.parse.urlsplit(url).hostname)
+    open_url = _DIRECT.open if direct else urllib.request.urlopen
+    with _traced("http", method="GET", endpoint=url, timeout_s=timeout) as done, open_url(url, timeout=timeout) as resp:
         done["status_code"] = getattr(resp, "status", None)
         return json.loads(resp.read())
+
+
+def _connect(ws_url: str, *, timeout: float, **options: Any) -> websocket.WebSocket:
+    """A websocket to `ws_url`, which never goes through a proxy when it is a loopback address.
+
+    websocket-client reads `http_proxy` from the environment unless told otherwise, and only honours a
+    no-proxy list next to a proxy host. So a loopback address is given itself as the (never used) proxy
+    host, and itself in the no-proxy list: the connection is direct, and a failure of that rule can only
+    reach the same loopback host.
+    """
+    host = urllib.parse.urlsplit(ws_url).hostname
+    if is_loopback(host):
+        options.update(http_proxy_host=host, http_proxy_port=1, http_no_proxy=[host])
+    return websocket.create_connection(ws_url, timeout=timeout, **options)
 
 
 class Chrome:
@@ -201,9 +229,7 @@ class Session:
         self.navigation_timeout = max(timeout, navigation_timeout) if navigation_timeout is not None else timeout
         self._id = 0
         with _traced("socket", endpoint=ws_url, timeout_s=timeout):
-            self._ws = websocket.create_connection(
-                ws_url, timeout=timeout, max_size=max_size, origin=origin, suppress_origin=suppress_origin
-            )
+            self._ws = _connect(ws_url, timeout=timeout, max_size=max_size, origin=origin, suppress_origin=suppress_origin)
         self.calls = 0
 
     # -- plumbing ----------------------------------------------------------

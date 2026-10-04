@@ -13,25 +13,100 @@ adapter in use: `host`, unless a `using(adapter)` block has put another one in i
 a remote computer that this process drives in place of its own. Callers hold `desktop` and never
 see the swap.
 
+Input reaches the machine only through `control.dispatch`: every adapter function that sends input or acts
+on another app is wrapped in `dispatched`, which refuses (`NotDispatched`) outside a `dispatching()` block,
+the block `dispatch` runs its action in.
+
 `Desktop` is the surface every adapter provides, and tests/test_platform_adapter.py holds macos.py
 and windows.py to it, parameter for parameter.
 """
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import importlib
 import sys
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
 from PIL import Image
 
-from .models import AxNode, Box, Field
+from .config import ABORT_CORNER_PX
+from .models import Abort, AxNode, Box, Field
 from .point_types import PointTarget
 
 OcrLine = tuple[str, float, Box]  # text, confidence, box in the image's own pixels
+
+# ------------------------------------------------------------------ the escape hatch both adapters share
+# Defined above `host = pick_host()`: the adapters import these while this module is still loading.
+
+
+def abort_if_stopped(mouse_location: Callable[[], tuple[float, float]]) -> None:
+    """Raise `Abort` when the run is stopped or the pointer is in the top-left corner.
+
+    An adapter's `check_abort` is `abort_if_stopped(mouse_location)` with its own pointer reader, looked up
+    at call time, so a test or `abort_on` that replaces either one is honoured.
+    """
+    from .control import checkpoint
+
+    checkpoint()
+    x, y = mouse_location()
+    if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
+        raise Abort("mouse in top-left corner")
+
+
+class NotDispatched(Exception):
+    """A primitive that drives the machine was called from outside `control.dispatch`.
+
+    Deliberately neither a `DesktopError` nor a `RuntimeError`: the runner reports those as a failed action
+    and carries on, and this is a bug in the caller, which must not be absorbed as one.
+    """
+
+
+_DISPATCHING: contextvars.ContextVar[bool] = contextvars.ContextVar("glide_dispatching", default=False)
+
+
+@contextmanager
+def dispatching() -> Iterator[None]:
+    """Mark the block as one `control.dispatch` is running: the only place the machine may be driven."""
+    token = _DISPATCHING.set(True)
+    try:
+        yield
+    finally:
+        _DISPATCHING.reset(token)
+
+
+def dispatched[**P, R](primitive: Callable[P, R]) -> Callable[P, R]:
+    """An adapter function that sends input or acts on another app: it refuses to run outside `dispatching()`.
+
+    `dispatch` is what takes the checkpoint and marks the outcome of the write unknown until it is observed
+    (AGENTS.md), so input that bypasses it would bypass both. Nested calls (`clear_field` pressing keys,
+    `open_url` activating) run inside the same block and pass.
+    """
+
+    @functools.wraps(primitive)
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
+        if not _DISPATCHING.get():
+            raise NotDispatched(f"{primitive.__name__} drives the machine and must be called through control.dispatch")
+        return primitive(*args, **kwargs)
+
+    return guarded
+
+
+def abort_hint() -> str:
+    return "Ctrl-C, or slam the mouse into the top-left corner"
+
+
+def sleep_watching(seconds: float) -> None:
+    """Sleep in short steps, asking the adapter in use (and so `abort_on`'s replacement) before each."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        current().check_abort()
+        time.sleep(0.1)
 
 
 class Desktop(Protocol):

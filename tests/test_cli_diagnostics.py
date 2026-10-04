@@ -15,7 +15,7 @@ from glide.computer.browser import cdp
 from glide.computer.execution import dom, playwright_cli, spawn
 from glide.computer.models import BrowserConnectionError
 
-GET_JSON = cdp._get_json  # the real function, taken before the guard replaces it; each test feeds it a fake urlopen
+GET_JSON = cdp._get_json  # the real function, taken before the guard replaces it; each test feeds it a fake opener
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def test_http_error_is_recorded_before_browser_connection_wrapping(monkeypatch, 
     def fail(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr(cdp.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(cdp._DIRECT, "open", fail)  # loopback is asked through the no-proxy opener
     monkeypatch.setattr(dom, "_get_json", GET_JSON)
     backend = dom.BrowserBackend("http://127.0.0.1:9417")
     with pytest.raises(BrowserConnectionError) as caught:
