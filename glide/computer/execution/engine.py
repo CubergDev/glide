@@ -185,7 +185,7 @@ class Execution:
         self.switches: list[SwitchEvent] = []  # browser providers replaced before the first action, in order
         # The plan and what has been used of the budgets.
         self.steps, self.revision, self.recoveries, self.questions = [], 0, 0, 0
-        self.clarifications, self.routes, self.bindings = [], [], {}
+        self.clarifications, self.answers, self.routes, self.bindings = [], [], [], {}
         # The operation in progress, kept for the read-only reconciliation after a stop.
         self.operation = self.step = self.action = self.before = None
         self.receipt, self.verification_step, self.op_started = "", None, 0.0
@@ -257,7 +257,7 @@ class Execution:
         with self.classifier_factory() as classifier:
             ctx = metered(self.ctx_factory(classifier, state.history), state.calls)
             scope = self._scope(ctx)
-            goal = cfg.goal + ("\n\nClarifications:\n" + "\n\n".join(self.clarifications) if self.clarifications else "")
+            goal = self._goal()
             # Analysis and authoring need no browser, CDP or desktop capture.
             observed = no_browser()
             if scope.workflow != "reason":
@@ -285,7 +285,14 @@ class Execution:
         if not reply:
             raise InvalidAction("Clarification was declined")
         self.clarifications.append(question + "\nUser: " + reply)
+        self.answers.append(reply)
         return reply
+
+    def _goal(self):
+        """The request with the exchange so far, for the models. Only the request and the replies are the user's words."""
+        goal = self.cfg.goal
+        shown = goal + ("\n\nClarifications:\n" + "\n\n".join(self.clarifications) if self.clarifications else "")
+        return grounding.Request(shown, stated="\n".join([goal, *self.answers]))
 
     def _scope(self, ctx):
         cfg = self.cfg
@@ -333,7 +340,7 @@ class Execution:
             self.supervisor = research.Supervisor(
                 cfg.goal, route, cfg.research_calls, tools=RESEARCH_TOOLS, search_url=browser_settings.current().search_url
             )
-            self.supervisor.replies = list(self.clarifications)
+            self.supervisor.replies, self.supervisor.answers = list(self.clarifications), list(self.answers)
             self.supervisor.questions = self.questions
         elif quick and not question:
             self.steps = quick

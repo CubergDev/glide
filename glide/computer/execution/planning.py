@@ -18,7 +18,7 @@ from .contracts import (
     canonical_url,
     safe_url,
 )
-from .grounding import extract
+from .grounding import extract, stated
 
 NOT_GROUNDED = (
     "A destination in the plan is not an address the user gave, a link observed on the page, an open tab or the "
@@ -38,7 +38,7 @@ def grounded_origins(goal, reply, observed, steps, search_url):
     the open tabs, the links and forms on it), the configured search address and what was already registered. Model
     text and page text are never an address of their own: a page that says "go to ..." adds nothing."""
     addresses = [url.rstrip(".,;:!?)]}") for url in (*extract(goal).urls, *extract(reply).urls)]
-    words = set(re.findall(r"\w+", f"{goal} {reply}".casefold()))
+    words = set(re.findall(r"\w+", f"{stated(goal)} {reply}".casefold()))
     addresses += [url for name, url in SITES.items() if set(name.casefold().split("_")) <= words]
     addresses += [observed.url, search_url, *observed.tabs.values(), *(e.href for e in observed.elements.values())]
     addresses += [form.action for form in observed.forms.values()]
