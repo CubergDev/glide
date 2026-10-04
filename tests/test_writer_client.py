@@ -86,7 +86,10 @@ def test_text_and_an_image_go_to_the_facade_as_chat_messages_and_the_text_comes_
     system, user = call["messages"]
     assert system == {"role": "system", "content": "Be brief."}
     image, text = user["content"]
-    assert image["image_url"]["url"].startswith("data:image/png;base64,") and text == {"type": "text", "text": "what is this?"}
+    assert image["image_url"]["url"].startswith("data:image/png;base64,") and text == {
+        "type": "text",
+        "text": "<data>\nwhat is this?\n</data>",
+    }  # the data is fenced
     assert (call["max_tokens"], call["schema"], call["temperature"]) == (200, SCHEMA, 0.0)
     assert (result.text, result.model, result.completed) == ("hi there", "model-x", True)
 
@@ -95,7 +98,7 @@ def test_a_text_only_request_has_no_image_part_and_no_instructions_means_no_syst
     writer, fast, _ = pair()
     generate(writer, instructions="")
     (user,) = fast.calls[0]["messages"]
-    assert user["content"] == [{"type": "text", "text": "hello"}]
+    assert user["content"] == [{"type": "text", "text": "<data>\nhello\n</data>"}]
 
 
 def test_an_empty_reply_is_empty_text_and_the_writer_then_refuses_the_step():
@@ -157,7 +160,9 @@ def test_the_writer_calls_route_by_what_they_are_for(screen, make_item):
     assert (len(fast.calls), len(smart.calls)) == (1, 1)
     image, text = smart.calls[0]["messages"][1]["content"]
     assert image["image_url"]["url"].startswith("data:image/png;base64,")
-    assert json.loads(text["text"])["screen_text_in_reading_order"] == ["SEP 19"]
+    assert json.loads(text["text"].removeprefix("<data>\n").removesuffix("\n</data>"))["screen_text_in_reading_order"] == [
+        "SEP 19"
+    ]
     assert smart.calls[0]["schema"]["required"] == ["achieved", "answer", "focus", "question"]
 
 

@@ -165,14 +165,22 @@ def _generation_error(error: ProviderError) -> GenerationError:
 def _messages(request: GenerationRequest) -> list[dict]:
     """The request as OpenAI chat messages: the instructions as the system prompt, then the user's turn.
 
-    The schema is not written into the prompt here: a facade given a `schema` enforces it where it can, and asks
+    The user's turn is the request's data, fenced (`_fenced`). The schema is not written into the prompt here: a facade given a `schema` enforces it where it can, and asks
     for JSON in the prompt where it cannot (llm.py).
     """
-    content: list[dict] = [{"type": "text", "text": request.text}]
+    content: list[dict] = [{"type": "text", "text": _fenced(request.text)}]
     if request.image is not None:
         content.insert(0, {"type": "image_url", "image_url": {"url": image_url(request.image)}})
     system = [{"role": "system", "content": request.instructions}] if request.instructions else []
     return [*system, {"role": "user", "content": content}]
+
+
+def _fenced(text: str) -> str:
+    """The request's JSON between <data> tags, which its instructions call untrusted data (writer.UNTRUSTED).
+
+    `</` becomes `<\\/`, which JSON reads as the same two characters, so nothing in the data can write the closing tag.
+    """
+    return "<data>\n" + text.replace("</", "<\\/") + "\n</data>"
 
 
 def _usage(usage: Usage | None) -> TokenUsage:
