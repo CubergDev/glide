@@ -31,8 +31,8 @@ import winocr
 from PIL import Image, ImageGrab
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
-from .config import ABORT_CORNER_PX
-from .models import Abort, AxNode, Field, Missed
+from .models import AxNode, Field, Missed
+from .platform_adapter import abort_hint, abort_if_stopped, sleep_watching  # noqa: F401  (the shared escape hatch)
 
 with suppress(AttributeError, OSError):  # pre-8.1 Windows without shcore, or awareness set by the host process
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
@@ -230,23 +230,7 @@ def mouse_location() -> tuple[float, float]:
 
 
 def check_abort() -> None:
-    from .control import checkpoint
-
-    checkpoint()
-    x, y = mouse_location()
-    if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
-        raise Abort("mouse in top-left corner")
-
-
-def abort_hint() -> str:
-    return "Ctrl-C, or slam the mouse into the top-left corner"
-
-
-def sleep_watching(seconds: float) -> None:
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        check_abort()
-        time.sleep(0.1)
+    abort_if_stopped(mouse_location)
 
 
 def accessibility_trusted() -> bool:

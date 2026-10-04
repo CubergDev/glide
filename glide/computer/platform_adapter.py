@@ -21,16 +21,47 @@ from __future__ import annotations
 
 import importlib
 import sys
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
 from PIL import Image
 
-from .models import AxNode, Box, Field
+from .config import ABORT_CORNER_PX
+from .models import Abort, AxNode, Box, Field
 
 OcrLine = tuple[str, float, Box]  # text, confidence, box in the image's own pixels
+
+# ------------------------------------------------------------------ the escape hatch both adapters share
+# Defined above `host = pick_host()`: the adapters import these while this module is still loading.
+
+
+def abort_if_stopped(mouse_location: Callable[[], tuple[float, float]]) -> None:
+    """Raise `Abort` when the run is stopped or the pointer is in the top-left corner.
+
+    An adapter's `check_abort` is `abort_if_stopped(mouse_location)` with its own pointer reader, looked up
+    at call time, so a test or `abort_on` that replaces either one is honoured.
+    """
+    from .control import checkpoint
+
+    checkpoint()
+    x, y = mouse_location()
+    if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
+        raise Abort("mouse in top-left corner")
+
+
+def abort_hint() -> str:
+    return "Ctrl-C, or slam the mouse into the top-left corner"
+
+
+def sleep_watching(seconds: float) -> None:
+    """Sleep in short steps, asking the adapter in use (and so `abort_on`'s replacement) before each."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        current().check_abort()
+        time.sleep(0.1)
 
 
 class Desktop(Protocol):
