@@ -32,6 +32,7 @@ from .point_voice import PointAssistant
 
 DEFAULT_QUESTION = "What is this, and what should I do next?"
 REASON_CHARS = 160
+POLL_S = 0.2  # how often a voice session looks up from waiting to see whether its loop has ended
 
 
 def _bounded(low: float, high: float):
@@ -175,7 +176,7 @@ def _ask(args, config, writer, selection, voice_factory) -> int:
             outcome["code"] = 3 if not data.get("closed") else 2
             if data.get("closed") or not args.voice:
                 finished.set()
-        elif kind == "stopped":
+        elif kind == "stopped" and not args.voice:  # a spoken Stop ends the answer in flight, never the session
             finished.set()
 
     if args.voice:
@@ -210,7 +211,10 @@ def _voice(args, config, writer, selection, voice_factory, emit, finished, outco
         loop.assistant.bind(session)
         _say("Ask about this point, then ask follow-up questions. Say Stop to interrupt an answer. Ctrl-C ends.")
         loop.start()
-        finished.wait()
+        while not finished.wait(POLL_S):
+            if loop.ended:  # the microphone was lost: its own warning has been printed, and nothing else will wake this
+                outcome["code"] = 2
+                break
     except Exception as error:  # a microphone that cannot open: what is missing, never a key
         _say(f"Voice input could not start ({type(error).__name__}): {config.scrub(str(error))}")
         outcome["code"] = 2

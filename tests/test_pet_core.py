@@ -226,6 +226,8 @@ class FakeLoop:
     def __init__(self, assistant) -> None:
         self.assistant = assistant
         self.calls: list[str] = []
+        self.ended = False  # as VoiceLoop: the thread made by start() has finished
+        self.failure: str | None = None  # as VoiceLoop: why a microphone fault ended it
 
     def start(self):
         self.calls.append("start")

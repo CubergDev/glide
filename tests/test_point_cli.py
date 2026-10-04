@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import _thread
+import signal
 import threading
 from types import SimpleNamespace
 
@@ -203,6 +204,59 @@ def test_a_voice_session_binds_the_pin_to_the_assistant_answers_a_spoken_questio
     assert code == 130 and out.out.strip() == "This is error 0007. Check the connection."
     assert made["settings"].headset is True and made["settings"].silence_ms == 900 and made["act"] is False
     assert isinstance(made["loop"].assistant, PointAssistant) and made["loop"].calls == ["start", "stop"]
+
+
+def press_ctrl_c() -> None:
+    """A real SIGINT to the main thread, which wakes a lock wait; `_thread.interrupt_main` alone does not."""
+    if hasattr(signal, "pthread_kill"):
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+    else:
+        _thread.interrupt_main()
+
+
+def voice_run(monkeypatch, on_start, *, watchdog_s=1.0):
+    """A voice session whose loop runs `on_start(loop)` when started. A watchdog presses Ctrl-C if the command has not
+    stopped the loop by itself, so a command that waits for ever fails the test instead of hanging it.
+
+    The readout cut is a no-op here: these tests are about when the command ends, not about the voice."""
+    monkeypatch.setattr(PointAssistant, "cut_voice", lambda self: None)
+    made = {}
+
+    def factory(config, settings, *, io, act, assistant_factory):
+        loop = FakeLoop(assistant_factory(config, io=io))
+        made["loop"] = loop
+
+        def start():
+            loop.calls.append("start")
+            on_start(loop)
+            threading.Thread(
+                target=lambda: wait_until(lambda: "stop" in loop.calls, watchdog_s) or press_ctrl_c(), daemon=True
+            ).start()
+
+        loop.start = start
+        return loop
+
+    with using(SyntheticDesktop()):
+        code = point_cli.main(
+            ["--delay", "0", "--allow-model", "--voice"], voice_factory=factory, load=lambda path: config_with(reply_writer())
+        )
+    return code, made["loop"]
+
+
+def test_a_spoken_stop_ends_the_answer_and_not_the_voice_session(monkeypatch):
+    # PR15-4175586924: the session says 'stopped' for the Stop phrase, which used to end the whole command
+    code, loop = voice_run(monkeypatch, lambda loop: loop.assistant._session.stop(), watchdog_s=0.3)
+    assert code == 130  # only Ctrl-C (here the watchdog's) ended it, and it ended it by the loop being stopped
+    assert loop.calls == ["start", "stop"]
+
+
+def test_a_microphone_that_is_lost_ends_the_voice_session_with_exit_two(monkeypatch):
+    # PR15-4175632435: the loop's thread ends on a device fault; nothing else wakes the command
+    def lose(loop):
+        loop.ended, loop.failure = True, "the microphone was disconnected"
+
+    code, loop = voice_run(monkeypatch, lose)
+    assert code == 2 and loop.calls == ["start", "stop"]
 
 
 def test_a_voice_stack_that_cannot_start_exits_two_with_what_is_missing(capsys):
