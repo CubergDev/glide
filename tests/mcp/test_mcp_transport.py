@@ -192,6 +192,7 @@ def _sdk_installed() -> bool:
         return False
 
 
+@pytest.mark.expect_refusals
 @pytest.mark.skipif(not _sdk_installed(), reason="the MCP SDK is not installed")
 def test_the_guard_refuses_the_real_sdk_transport():
     from mcp.client.stdio import stdio_client

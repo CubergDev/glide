@@ -296,6 +296,7 @@ def test_lease_owner_and_operator_resolution_scopes(environment):
     assert env.client.post(path + "heartbeat", json={"lease_token": claimed["lease_token"]}, headers=auth(env)).status_code == 409
 
 
+@pytest.mark.expect_refusals
 def test_listener_and_desktop_boundaries_are_guarded():
     from glide.webhooks import cli, worker
 

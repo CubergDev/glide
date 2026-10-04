@@ -48,6 +48,7 @@ def test_a_disabled_configuration_does_not_start(config, capsys):
     assert error.value.code == 2
 
 
+@pytest.mark.expect_refusals
 def test_serving_requires_the_listener_which_the_guard_refuses_in_tests(config):
     with pytest.raises(RuntimeError, match="real machine"):
         cli.main(["--config", str(config())])
@@ -97,6 +98,7 @@ def test_loopback_hosts_are_local_without_the_flag(config, host, capsys):
     assert cli.main(["--config", str(config()), "--host", host, "--check-config"]) == 0
 
 
+@pytest.mark.expect_refusals
 def test_a_public_bind_with_the_proxy_flag_reaches_the_listener_which_the_guard_refuses(config):
     with pytest.raises(RuntimeError, match="real machine"):
         cli.main(["--config", str(config()), "--host", "0.0.0.0", "--behind-proxy"])
