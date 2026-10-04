@@ -1,23 +1,9 @@
-"""Browser backend: DOM-driven computer use, no pixels, no OCR."""
+"""Browser backend: the CDP client the execution backends attach through.
 
-from .cdp import CDPError, Chrome, Session, find_chrome, free_port
-from .decide import BROWSER_ACTIONS, Decision, decide
-from .perceive import Element, Page, perceive
-from .runner import RunResult, Step, run_goal
+Importing this package imports only `cdp`. The older DOM loop (`runner`, `decide`, `perceive`, `report`, `act`) is not
+production code and is no longer pulled in by it: import those modules by name. See docs/notes/legacy-browser-loop.md.
+"""
 
-__all__ = [
-    "BROWSER_ACTIONS",
-    "CDPError",
-    "Chrome",
-    "Decision",
-    "Element",
-    "Page",
-    "RunResult",
-    "Session",
-    "Step",
-    "decide",
-    "find_chrome",
-    "free_port",
-    "perceive",
-    "run_goal",
-]
+from .cdp import CDPError, Session
+
+__all__ = ["CDPError", "Session"]
