@@ -173,3 +173,23 @@ def test_the_folder_glide_inspect_writes_a_screenshot_and_screen_text_to_is_not_
     assert 'Path("inspections")' in source  # the default of --out
     ignored = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "inspections/" in ignored
+
+
+def test_the_readme_names_only_extras_that_exist_and_every_command_of_the_parser():
+    # finding 8: README listed an `ocr` extra that does not exist and had no row for `glide app-server`
+    import re
+    import tomllib
+    from pathlib import Path
+
+    from glide.cli import build_parser
+
+    root = Path(__file__).resolve().parent.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    extras = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["optional-dependencies"]
+    table = readme.split("| Extra |", 1)[1].split("\n\n", 1)[0]
+    named = set(re.findall(r"^\| `([a-z]+)` \|", table, re.MULTILINE))
+    assert named and named <= set(extras) and set(extras) <= named
+    parser = build_parser()
+    commands = next(a for a in parser._actions if getattr(a, "choices", None) and "ask" in a.choices).choices
+    for name in commands:
+        assert f"`glide {name}" in readme, f"README has no row for `glide {name}`"
