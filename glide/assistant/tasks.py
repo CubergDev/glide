@@ -11,7 +11,9 @@ A task is `runner.run` on a worker thread, so the assistant stays free to hear "
   while a task runs, `desktop.check_abort()` is replaced by one that also raises when that event is set,
   which keeps working for code that has no control in scope. After `stop()`, no further action is taken.
   An action that was already sent cannot be taken back; the run records it as "completion unknown", reads the
-  screen once and never replays it. The replacement is process-wide, so only one task runs at a time.
+  screen once and never replays it, and the `TaskResult` carries that (`uncertain`, `readback`) so the assistant tells
+  the person in a fixed sentence instead of reporting a clean stop. The replacement is process-wide, so only one task
+  runs at a time.
 - The loop's own words are data. What the writer read off the screen is spoken and printed, never routed.
 - A question the writer puts to the user is answered by `ComputerTask.answer` and by nothing else. It is opt-in
   (`on_question`): without it the loop never asks (`ask=None`), as before. A stop, or anything that stops the task,
@@ -95,9 +97,17 @@ class TaskResult:
     seconds: float = 0.0
     would_do: str | None = None  # a dry run's first move, in words
     stopped: bool = False  # the user stopped it: nothing is said
+    uncertain: bool = False  # the run ended with a write whose effect was never observed (RunState.uncertain)
+    readback: str = "not needed"  # what the run saw afterwards, in the runner's own words (RunState.readback)
 
     def spoken(self, language: str | None = None) -> str:
-        """What to say about the result: the writer's answer when there is one, else the outcome in a sentence."""
+        """What to say about the result: the writer's answer when there is one, else the outcome in a sentence.
+
+        A run that may have left a write half done says so, in a fixed sentence, whatever else the result holds: no answer,
+        no "done", and not the silence of an ordinary stop.
+        """
+        if self.uncertain:
+            return say("uncertain", language)
         if self.stopped:
             return ""
         if self.answer and self.outcome not in ("provider failure", "crashed"):
@@ -110,7 +120,10 @@ class TaskResult:
     def summary(self) -> str:
         """One or two lines for a terminal: what happened, why, and where the run folder is."""
         lines = [f"task {self.outcome}: {self.goal}"]
-        if self.answer:
+        if self.uncertain:
+            lines.append(say("uncertain"))
+            lines.append(f"what was seen afterwards: {self.readback}")
+        elif self.answer:
             lines.append(self.answer)
         if self.would_do:
             lines.append(f"would do: {self.would_do}")
@@ -235,8 +248,15 @@ class ComputerTask:
             try:
                 result = self._execute()
             except Exception as exc:  # a bug in the loop or its inputs: the user hears that it failed, the log has why
+                unknown = self.control.in_flight  # a write was sent and nothing has observed its effect since
                 result = TaskResult(
-                    self.goal, self.act, "crashed", failure=self._scrub(f"{type(exc).__name__}: {exc}"), folder=self.folder
+                    self.goal,
+                    self.act,
+                    "crashed",
+                    failure=self._scrub(f"{type(exc).__name__}: {exc}"),
+                    folder=self.folder,
+                    uncertain=unknown,
+                    readback="unavailable; completion unknown" if unknown else "not needed",
                 )
             result.seconds = round(time.monotonic() - started, 1)
             result.stopped = result.stopped or self.stop_event.is_set()
@@ -301,6 +321,8 @@ class ComputerTask:
             steps=len(state.history),
             would_do=state.would_do if state.outcome == "dry run" else None,
             stopped=state.outcome.startswith("aborted"),
+            uncertain=state.uncertain,
+            readback=state.readback,
         )
 
     def _scrub(self, text: str) -> str:

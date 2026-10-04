@@ -83,6 +83,13 @@ PHRASES: dict[str, dict[str, str]] = {
         "zh": "抱歉，我没听清。",
     },
     "stopped": {"en": "Stopped.", "yue": "停咗。", "zh": "已停止。"},
+    # Said when the loop ended after an action whose effect it could not confirm. Fixed words, never a model's, and
+    # nothing in it says the task was done: the person has to look.
+    "uncertain": {
+        "en": "I stopped, and the last action may or may not have happened: check the screen.",
+        "yue": "我停低咗，最後一個動作可能做咗，亦可能未做：請睇吓螢幕。",
+        "zh": "我停下了，最后一个操作可能已经执行，也可能没有：请查看屏幕。",
+    },
 }
 
 

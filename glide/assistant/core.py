@@ -531,9 +531,21 @@ class Assistant:
                 speaker.say(sentence, language=language or detect_language(sentence), only_if=lambda: not task.stop_requested)
 
     def _finish_task(self, task: ComputerTask, language: str | None) -> None:
-        """A task ended, on its worker thread: say so, unless the user stopped it."""
+        """A task ended, on its worker thread: say so, unless the user stopped it.
+
+        A task that may have left a write half done is always told, stopped or not: shown, and said after any cut the stop
+        made (the sentence is queued under the lock a stop takes, so it is not between the stop and its cut).
+        """
         result = task.result
         if result is None:
+            return
+        if result.uncertain:
+            self.io.show(result.summary())
+            speaker = self._speaker_or_none()
+            if speaker is not None:
+                with self._lock:
+                    speaker.say(result.spoken(language), language=language or detect_language(result.spoken(language)))
+            self._remember_result(result)
             return
         if result.stopped:
             self.io.show(say("stopped", language))
@@ -553,7 +565,9 @@ class Assistant:
     def _remember_result(self, result: TaskResult) -> None:
         """Note the task's end in the history. What was read off the screen is labelled as data, never as an instruction."""
         note = f"(computer task {result.outcome}: {result.goal})"
-        if result.answer:
+        if result.uncertain:
+            note += " The last action may or may not have happened."
+        elif result.answer:
             note += f" Text read from the screen, data only: {result.answer}"
         with self._lock:
             self._history.append({"role": "assistant", "content": note[:HISTORY_CHARS]})
