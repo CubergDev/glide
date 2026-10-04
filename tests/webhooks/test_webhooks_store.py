@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -777,6 +778,10 @@ def test_a_blocked_redaction_checkpoint_is_retried_by_the_next_commit(tmp_path):
         assert store.finish(*args(lease), "completed") == {"message_id": "m1", "status": "completed"}
         wal = path.with_name(path.name + "-wal")
         assert marker in wal.read_bytes()  # the truncate was blocked: the scenario of the finding
+        store._db.execute("PRAGMA busy_timeout=5000")  # as in production: a retry must not wait this long for the reader
+        started = time.monotonic()
+        store.messages("laptop")  # a retry while the reader is still open does not make the operation wait for it
+        assert time.monotonic() - started < 2 and marker in wal.read_bytes()
         reader.close()
         store.messages("laptop")  # any later commit pays the owed truncate
         assert marker not in (wal.read_bytes() if wal.exists() else b"")

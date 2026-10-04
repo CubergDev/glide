@@ -34,6 +34,7 @@ MAX_CALL_BYTES = 65536
 MAX_EVENT_BYTES = 8192
 MAX_TASK_EVENTS = 100
 MAX_SUMMARY_BYTES = 4096
+BUSY_TIMEOUT_MS = 5000
 RECEIPT_RETENTION_S = 30 * 86400  # how long a finished delivery's receipt is kept once the receipt table is full
 REDACTED_GOAL = "redacted"
 RESOLVED_NOTE = "Reconciled by an operator."
@@ -121,7 +122,7 @@ class QueueStore:
         self._db = sqlite3.connect(self.path, timeout=5, isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         try:
-            self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
@@ -226,20 +227,27 @@ class QueueStore:
                 self._db.commit()
                 self._protect_files()
                 if self._wal_owed:
-                    self._checkpoint()
+                    self._checkpoint(wait=False)
 
-    def _checkpoint(self) -> None:
+    def _checkpoint(self, *, wait: bool = True) -> None:
         """Fold the WAL into the database and truncate it, so replaced content does not linger in old frames.
 
         A reader on another connection can make the truncate come back busy (or fail). Then the replaced text is
-        still in the log, so the truncate is owed: it is tried again after every later commit and at close.
+        still in the log, so the truncate is owed: it is tried again after every later commit and at close. Only the
+        first try waits for readers (the connection's busy timeout); a retry never makes a queue operation wait.
         """
         with self._lock:
             if self._closed:
                 return
             busy = True
-            with contextlib.suppress(sqlite3.Error):
-                busy = bool(self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0])
+            if not wait:
+                self._db.execute("PRAGMA busy_timeout=0")
+            try:
+                with contextlib.suppress(sqlite3.Error):
+                    busy = bool(self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0])
+            finally:
+                if not wait:
+                    self._db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
             self._wal_owed = busy
             self._protect_files()
 
