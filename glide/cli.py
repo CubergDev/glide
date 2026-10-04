@@ -684,6 +684,16 @@ def inspect_main(argv: Sequence[str] | None = None) -> int:
     return main(["inspect", *(sys.argv[1:] if argv is None else argv)])
 
 
+def webhooks_serve_main(argv: Sequence[str] | None = None) -> int:
+    """The `glide-webhooks` command: `glide webhooks serve`, so the glide.toml default and the missing-extra message apply."""
+    return main(["webhooks", "serve", *(sys.argv[1:] if argv is None else argv)])
+
+
+def webhooks_work_main(argv: Sequence[str] | None = None) -> int:
+    """The `glide-webhook-worker` command: `glide webhooks work`, under its older name."""
+    return main(["webhooks", "work", *(sys.argv[1:] if argv is None else argv)])
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args, rest = parser.parse_known_args(argv)

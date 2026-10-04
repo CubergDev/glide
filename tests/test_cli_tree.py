@@ -240,6 +240,17 @@ def test_the_old_command_names_are_the_same_commands(monkeypatch):
     assert seen == [["computer", "a goal", "--act"], ["inspect", "--no-open"], ["computer", "x"]]
 
 
+def test_the_old_webhook_command_names_are_the_same_commands(monkeypatch):
+    """PR13-4175620240: `glide-webhooks` must read glide.toml like `glide webhooks serve`, not call the bare parser."""
+    seen = []
+    monkeypatch.setattr(cli, "main", lambda argv: seen.append(argv) or 0)
+    assert cli.webhooks_serve_main(["--port", "9"]) == 0
+    assert cli.webhooks_work_main(["--once"]) == 0
+    monkeypatch.setattr(sys, "argv", ["glide-webhooks", "--check-config"])
+    cli.webhooks_serve_main()
+    assert seen == [["webhooks", "serve", "--port", "9"], ["webhooks", "work", "--once"], ["webhooks", "serve", "--check-config"]]
+
+
 def test_every_entry_point_names_a_function_that_exists():
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
     assert set(scripts) == {"glide", "glide-computer", "glide-inspect", "glide-webhooks", "glide-webhook-worker"}
@@ -247,6 +258,8 @@ def test_every_entry_point_names_a_function_that_exists():
         module, _, function = target.partition(":")
         assert callable(getattr(__import__(module, fromlist=[function]), function)), name
     assert scripts["glide-computer"] == "glide.cli:computer_main" and scripts["glide-inspect"] == "glide.cli:inspect_main"
+    assert scripts["glide-webhooks"] == "glide.cli:webhooks_serve_main"
+    assert scripts["glide-webhook-worker"] == "glide.cli:webhooks_work_main"
 
 
 def test_memory_and_mcp_status_run_for_real_through_the_tree_and_create_nothing(isolated, never_loads, capsys):

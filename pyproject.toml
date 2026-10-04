@@ -75,8 +75,8 @@ glide = "glide.cli:main"
 glide-computer = "glide.cli:computer_main"
 glide-inspect = "glide.cli:inspect_main"
 # The two webhook commands under their older names: `glide webhooks serve` and `glide webhooks work` run the same code.
-glide-webhooks = "glide.webhooks.cli:main"
-glide-webhook-worker = "glide.webhooks.worker:main"
+glide-webhooks = "glide.cli:webhooks_serve_main"
+glide-webhook-worker = "glide.cli:webhooks_work_main"
 
 [dependency-groups]
 dev = ["pytest==9.1.1", "ruff==0.16.8"]
