@@ -61,6 +61,25 @@ class TaskEvent:
     spoken_text: str = ""
 
 
+class _Registration:
+    """One `closing_on_cancel` block's callback: it runs only while the block is open, and the block cannot end under it."""
+
+    def __init__(self, close: Callable[[], None]) -> None:
+        self._close = close
+        self._live = True
+        self._lock = threading.RLock()  # re-entrant: a callback may end the block that owns it
+
+    def run(self) -> None:
+        with self._lock:
+            if self._live:
+                with suppress(Exception):
+                    self._close()
+
+    def retire(self) -> None:
+        with self._lock:
+            self._live = False
+
+
 class RunControl:
     def __init__(self, task_id: str = "", emit: Callable[[TaskEvent], None] | None = None):
         self.in_flight = False
@@ -70,21 +89,25 @@ class RunControl:
         self.reason = CANCELLED
         self.ready = threading.Event()
         self.ready.set()
-        self._callbacks: set[Callable[[], None]] = set()
-        self._lock = threading.Lock()
+        self._callbacks: list[_Registration] = []  # in the order they were made
+        self._lock = threading.Lock()  # guards the reason, the flag and the list; never held while a callback runs
 
     def cancel(self, reason: str = "") -> None:
-        """Stop the task. The first reason given is the one every later check reports."""
+        """Stop the task. The first reason given is the one every later check reports, however many threads cancel at once.
+
+        The reason and the flag change together under one lock, so a second canceller finds the flag already set.
+        Each callback registered with `closing_on_cancel` then runs once, unless its block has exited by then, and
+        exiting a block waits for its own callback if it is running, so a callback never runs after its block is over
+        (a connection that is back in a pool is not shut down by it).
+        """
         with self._lock:
             if not self.cancelled.is_set():
                 self.reason = reason or CANCELLED
-        self.cancelled.set()
+                self.cancelled.set()
+            registrations = tuple(self._callbacks)
         self.ready.set()
-        with self._lock:
-            callbacks = tuple(self._callbacks)
-        for close in callbacks:
-            with suppress(Exception):
-                close()
+        for registration in registrations:
+            registration.run()
 
     def pause(self) -> None:
         self.ready.clear()
@@ -103,14 +126,20 @@ class RunControl:
 
     @contextmanager
     def closing_on_cancel(self, close: Callable[[], None]) -> Iterator[None]:
+        """For the block, a cancel calls `close()` from the cancelling thread. `Abort` at once if already cancelled.
+
+        When the block exits, `close` is not called again, and if it is being called right now the exit waits for it.
+        """
+        registration = _Registration(close)
         with self._lock:
-            self._callbacks.add(close)
+            self._callbacks.append(registration)
         try:
             self.check(wait=False)
             yield
         finally:
+            registration.retire()
             with self._lock:
-                self._callbacks.discard(close)
+                self._callbacks.remove(registration)
 
     def interruptible[R](self, call: Callable[[], R]) -> R:
         """`call()`, run on a helper thread, or `Abort` the moment this control is cancelled, whichever is first.

@@ -23,6 +23,11 @@ has one, which is cut with the speech. A cancel is silent: it is never shown as 
 
 `stop()` is safe from any thread at any moment: it cancels every request in flight, the speech, and the task.
 `interrupt_speech()` is the barge-in hook, called by whatever hears the person start to talk.
+
+A stop that the person SAID or that the router detected is for what was in progress before it. Every request takes a
+ticket, in order, when it is made; a stop inside request N cancels the requests with a ticket up to N, the task they
+started, and the speech they queued, and leaves a later request alone (a new utterance that began right after the stop
+word is answered). The public `stop()` has no request of its own and takes everything made so far.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ from ..providers.config import ConfigError
 from ..providers.errors import CANCELLED, ProviderError
 from .audio_io import SAMPLE_RATE, Player, rms
 from .phrases import say
-from .router import Route, Router, answer_messages, fast_path, is_stop, stop_phrases
+from .router import DATA_CHARS, Route, Router, answer_messages, fast_path, is_stop, screen_data, stop_phrases
 from .speech import SentenceSplitter, Speaker, detect_language, split_sentences
 from .tasks import DEFAULT_RUNS_DIR, ComputerTask, TaskBusy, TaskResult, TaskRunner
 
@@ -48,6 +53,8 @@ HISTORY_CHARS = 400  # how much of one earlier message the router and the answer
 ANSWER_TOKENS = 1024  # room for a reasoning model's thinking as well as a short spoken answer (see router.ROUTER_TOKENS)
 ANSWER_TEMPERATURE = 0.3
 UNWIND_S = 2.0  # how long a request waits for the task whose question it dropped to end, so that its own task can start
+CLOSE_WAIT_S = 5.0  # how long `close()` waits for a stopped task to unwind before it gives up and says so
+CLOSE_POLL_S = 0.05  # how often the wait looks at the clock again
 MIN_SPEECH_RMS = 150.0  # audio quieter than this overall is silence: an empty transcript is believed, not retried
 
 
@@ -110,7 +117,8 @@ class _Turn:
     earlier, still unfinished request can tell it from an answer being written.
     """
 
-    def __init__(self, *, hearing: bool = False) -> None:
+    def __init__(self, seq: int, *, hearing: bool = False) -> None:
+        self.seq = seq  # the ticket it was made with: a stop inside request N is for the turns with seq up to N
         self.control = RunControl()
         self.hearing = hearing
         self.parts: list[str] = []
@@ -156,8 +164,10 @@ class Assistant:
         clock: Callable[[], float] = time.monotonic,
         clarify: bool = False,
         extra_stop_phrases: Iterable[str] = (),
+        close_wait_s: float = CLOSE_WAIT_S,
     ) -> None:
         self._config = config
+        self._close_wait_s = close_wait_s
         self._stops = stop_phrases(extra_stop_phrases)
         self.io = io or IO()
         self._clock = clock
@@ -165,7 +175,11 @@ class Assistant:
         self._history: deque[dict] = deque(maxlen=max(0, history_turns) * 2)
         self._lock = threading.RLock()
         self._live: set[_Turn] = set()  # the requests being heard or answered
-        self._epoch = 0  # bumped by every stop and barge-in: a request begun before one never answers
+        self._seq = 0  # the last ticket given to a request
+        self._floor = 0  # a request with a ticket up to this was made before a stop or barge-in and never answers
+        self._epoch = 0  # how many stops and barge-ins there have been (observed by the voice loop's tests)
+        self._task_seq = 0  # the ticket of the request that started the current task
+        self._speech_turn: _Turn | None = None  # the newest request that queued speech since the last cut
         self._speaker: Speaker | None = None
         self._voice: _Voice | None = None
         self._speech_off = False
@@ -186,24 +200,24 @@ class Assistant:
         A request that is cancelled (a stop, or a newer request) while it is being answered returns
         `Reply("none")` and says nothing, not even that something failed.
         """
-        return self._handle(text, act, wait, hint_language, self._epoch)
+        return self._handle(text, act, wait, hint_language, self._ticket())
 
     def _handle(
-        self, text: str, act: bool, wait: bool, hint_language: str | None, epoch: int, turn: _Turn | None = None
+        self, text: str, act: bool, wait: bool, hint_language: str | None, ticket: int, turn: _Turn | None = None
     ) -> Reply:
         started = self._clock()
         text = " ".join(text.split())
         if not text:
             return Reply("none")
         if fast_path(text, self._stops) is not None:  # before any model is built or asked: stopping must never wait
-            self.stop()
+            self._stop(turn.seq if turn is not None else ticket)
             return Reply("stop", timings={"total_s": self._clock() - started})
 
         own = turn is None
         if own:
-            turn = self._enter(epoch, hearing=False)
+            turn = self._enter(ticket, hearing=False)
         try:
-            if turn is None or not self._begin(turn):  # a stop or a barge-in came after this request was made
+            if turn is None or not self._begin(turn):  # a stop or a barge-in came for this request after it was made
                 return Reply("none")
             with controlled(turn.control):
                 return self._respond(turn, text, act, wait, hint_language, started)
@@ -227,7 +241,7 @@ class Assistant:
             why = route.error.kind if route.error is not None else "unreadable reply"
             self.io.warn(f"could not route the request ({why}): answering instead of acting")
         if route.route == "stop":  # the model heard a stop that the fast path did not
-            self.stop()
+            self._stop(turn.seq)
             reply.route = "stop"
             return reply
         language = route.language or hint_language
@@ -267,8 +281,7 @@ class Assistant:
         shown, not remembered, not answered). The voice loop opens one while Glide is speaking and a sound is
         not yet clearly the person, so that Glide's own transcribed echo can never become a request.
         """
-        epoch = self._epoch
-        turn = self._enter(epoch, hearing=True)
+        turn = self._enter(self._ticket(), hearing=True)
         if turn is None:
             return Reply("none")
         try:
@@ -303,7 +316,7 @@ class Assistant:
                 if not stop_only:
                     self.io.partial(transcript.text)  # a probe's interim text, Glide's own echo among it, is never shown
                 if is_stop(transcript.text, self._stops):
-                    self._silence()  # a stop that is still being said already silences the voice
+                    self._silence(turn)  # a stop that is still being said already silences the voice
         except ProviderError as exc:
             error = exc
         finally:
@@ -335,7 +348,7 @@ class Assistant:
         if stop_only and not is_stop(heard, self._stops):
             return Reply("none")  # not a stop: nothing of it is kept
         self.io.heard(heard)
-        reply = self._handle(heard, act, wait, spoken_language or language, self._epoch, turn)
+        reply = self._handle(heard, act, wait, spoken_language or language, turn.seq, turn)
         reply.heard = heard
         return reply
 
@@ -349,10 +362,20 @@ class Assistant:
         is waiting on is closed the same way. An action that was already sent cannot be taken back.
         """
         with self._lock:
+            return self._stop(self._seq)
+
+    def _stop(self, upto: int) -> bool:
+        """Stop what was made up to ticket `upto`: those requests, the task if one of them started it, and their speech.
+
+        Everything happens under the lock a request takes to begin or to start a task, so one that is made after
+        `upto` is either wholly before this (and is not touched) or wholly after it.
+        """
+        with self._lock:
             self._epoch += 1
-            self._cancel_turns(STOPPED)
-        had_task = self._tasks.stop()  # the turns are cancelled before the speech is cut, so a result cannot slip out after it
-        self._cancel_speech()
+            self._floor = max(self._floor, upto)
+            self._cancel_turns(STOPPED, upto=upto)
+            had_task = self._task_seq <= upto and self._tasks.stop()  # after the turns, so a result cannot slip out
+            self._cut_speech(upto)
         return had_task
 
     def interrupt_speech(self, *, drop_pending: bool = True) -> None:
@@ -370,14 +393,18 @@ class Assistant:
         with self._lock:
             if drop_pending:
                 self._epoch += 1
-                self._cancel_turns(STOPPED)
+                self._floor = self._seq
+                self._cancel_turns(STOPPED, upto=self._seq)
             else:
-                self._cancel_turns(STOPPED, hearing=False)
-        self._cancel_speech()
+                self._cancel_turns(STOPPED, upto=self._seq, hearing=False)
+            self._cut_speech(self._seq)
 
-    def _silence(self) -> None:
-        """Cut the voice and the answers being written, without dropping a request that is still being heard."""
-        self.interrupt_speech(drop_pending=False)
+    def _silence(self, turn: _Turn) -> None:
+        """A stop is being said inside `turn`: cut the voice and the answers begun before it, without dropping a request
+        that is still being heard (this one included) or one made after it."""
+        with self._lock:
+            self._cancel_turns(STOPPED, upto=turn.seq, hearing=False)
+            self._cut_speech(turn.seq)
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Block until everything said so far has been played. False if `timeout` ran out first."""
@@ -408,12 +435,35 @@ class Assistant:
         task = self._tasks.current
         return task.answer(text) if task is not None else False
 
-    def close(self) -> None:
+    def close(self) -> bool:
+        """Stop everything, wait for a running task to unwind, and close the voice. True if nothing was left running.
+
+        A task that is stopped finishes its current action before it reports how it ended, and its thread is a daemon:
+        returning at once would let the process end in the middle of a write. So `close` waits up to `close_wait_s`
+        (on the assistant's clock) for the task to be done and to have reported (`task.result`). If it has not, that
+        is said through `io.warn` and False is returned: the last action may still be in flight.
+        """
+        deadline = self._clock() + self._close_wait_s
+        task = self._tasks.current
+        waiting = task is not None and task.running
         self.stop()
+        unwound = not waiting or self._wait_for(task, deadline)
+        if not unwound:
+            self.io.warn(
+                "a task was still stopping when Glide closed, so its last action may or may not have happened: check the screen"
+            )
         if self._speaker is not None:
             self._speaker.close()
         elif self.io.player is not None:
             self.io.player.close()
+        return unwound
+
+    def _wait_for(self, task: ComputerTask, deadline: float) -> bool:
+        """Whether `task` has finished (and reported) by `deadline` on the assistant's clock. No lock is held while waiting."""
+        while not task.wait(CLOSE_POLL_S):
+            if self._clock() >= deadline:
+                return False
+        return True
 
     # -- answering ------------------------------------------------------------------------------
 
@@ -464,7 +514,11 @@ class Assistant:
         self.io.show(sentence)
         speaker = self._speaker_or_none()
         if speaker is not None:
-            speaker.say(sentence, language=language, only_if=lambda: not turn.cancelled)
+            with self._lock:  # queued and noted together, so a cut sees what it would be cutting
+                if speaker.say(sentence, language=language, only_if=lambda: not turn.cancelled) and (
+                    self._speech_turn is None or turn.seq >= self._speech_turn.seq
+                ):
+                    self._speech_turn = turn
         return language
 
     # -- computer tasks -------------------------------------------------------------------------
@@ -488,6 +542,7 @@ class Assistant:
                 if turn.cancelled:
                     reply.route = "stop"
                     return
+                self._task_seq = turn.seq
                 task = self._tasks.start(
                     goal,
                     act=act,
@@ -523,9 +578,21 @@ class Assistant:
                 speaker.say(sentence, language=language or detect_language(sentence), only_if=lambda: not task.stop_requested)
 
     def _finish_task(self, task: ComputerTask, language: str | None) -> None:
-        """A task ended, on its worker thread: say so, unless the user stopped it."""
+        """A task ended, on its worker thread: say so, unless the user stopped it.
+
+        A task that may have left a write half done is always told, stopped or not: shown, and said after any cut the stop
+        made (the sentence is queued under the lock a stop takes, so it is not between the stop and its cut).
+        """
         result = task.result
         if result is None:
+            return
+        if result.uncertain:
+            self.io.show(result.summary())
+            speaker = self._speaker_or_none()
+            if speaker is not None:
+                with self._lock:
+                    speaker.say(result.spoken(language), language=language or detect_language(result.spoken(language)))
+            self._remember_result(result)
             return
         if result.stopped:
             self.io.show(say("stopped", language))
@@ -545,20 +612,29 @@ class Assistant:
     def _remember_result(self, result: TaskResult) -> None:
         """Note the task's end in the history. What was read off the screen is labelled as data, never as an instruction."""
         note = f"(computer task {result.outcome}: {result.goal})"
-        if result.answer:
-            note += f" Text read from the screen, data only: {result.answer}"
+        entry = {"role": "assistant", "content": note[:HISTORY_CHARS]}
+        if result.uncertain:
+            entry["content"] += " The last action may or may not have happened."
+        elif result.answer and result.answer.strip():
+            entry["data"] = " ".join(result.answer.split())[:DATA_CHARS]  # untrusted: wrapped when it is shown (`_messages`)
         with self._lock:
-            self._history.append({"role": "assistant", "content": note[:HISTORY_CHARS]})
+            self._history.append(entry)
 
     # -- plumbing -------------------------------------------------------------------------------
 
-    def _enter(self, epoch: int, *, hearing: bool) -> _Turn | None:
-        """Take up a request: it can now be cancelled by a stop or a barge-in. None when one has happened since `epoch`
-        was read, which is when the request was made."""
+    def _ticket(self) -> int:
+        """The place of a request in the order requests are made. Taken when it is made, before anything is heard."""
         with self._lock:
-            if epoch != self._epoch:
+            self._seq += 1
+            return self._seq
+
+    def _enter(self, ticket: int, *, hearing: bool) -> _Turn | None:
+        """Take up a request: it can now be cancelled by a stop or a barge-in. None when one has come for it since its
+        ticket was taken."""
+        with self._lock:
+            if ticket <= self._floor:
                 return None
-            turn = _Turn(hearing=hearing)
+            turn = _Turn(ticket, hearing=hearing)
             self._live.add(turn)
             return turn
 
@@ -566,10 +642,11 @@ class Assistant:
         with self._lock:
             self._live.discard(turn)
 
-    def _cancel_turns(self, reason: str, *, hearing: bool = True, keep: _Turn | None = None) -> None:
-        """Cancel the requests in flight (those still being heard too, unless `hearing` is False). Called with the lock held."""
+    def _cancel_turns(self, reason: str, *, upto: int, hearing: bool = True, keep: _Turn | None = None) -> None:
+        """Cancel the requests in flight with a ticket up to `upto` (those still being heard too, unless `hearing` is
+        False). Called with the lock held."""
         for turn in tuple(self._live):
-            if turn is not keep and (hearing or not turn.hearing):
+            if turn is not keep and turn.seq <= upto and (hearing or not turn.hearing):
                 turn.control.cancel(reason)
 
     def _begin(self, turn: _Turn) -> bool:
@@ -582,19 +659,26 @@ class Assistant:
             if turn.cancelled:
                 return False
             turn.hearing = False
-            self._cancel_turns(SUPERSEDED, hearing=False, keep=turn)
+            self._cancel_turns(SUPERSEDED, upto=self._seq, hearing=False, keep=turn)
             waiting = self._tasks.current
             if waiting is not None and waiting.pending_question is not None:
                 waiting.stop()
                 dropped = waiting
-        self._cancel_speech()
+            self._cut_speech(self._seq)  # whoever begins last supersedes what is being said, whatever order they were made in
         if dropped is not None:
             dropped.wait(UNWIND_S)  # a correction that is itself a task ("open Safari instead") must find the machine free
         return True
 
     def _messages(self) -> list[dict]:
         with self._lock:
-            return [{"role": m["role"], "content": m["content"][:HISTORY_CHARS]} for m in self._history]
+            return [
+                {
+                    "role": m["role"],
+                    "content": m["content"][:HISTORY_CHARS]
+                    + (" Text read from the screen, data only: " + screen_data(m["data"]) if "data" in m else ""),
+                }
+                for m in self._history
+            ]
 
     def _remember(self, user: str, assistant: str) -> None:
         with self._lock:
@@ -616,6 +700,19 @@ class Assistant:
                 self._voice = _Voice(tts)
                 self._speaker = Speaker(self._voice, self.io.player, on_error=self._speech_failed)
             return self._speaker
+
+    def _cut_speech(self, upto: int) -> None:
+        """Silence the speech of the requests up to ticket `upto`. Called with the lock held, with the turns already
+        cancelled, so what they queued is dead and what a later request queues comes after the cut.
+
+        When a later request is the one speaking, its own beginning has already cut what was before it (and
+        cancelled what could still add to it), so the cut is left out: it would silence a request the stop is not for.
+        """
+        newest = self._speech_turn
+        if newest is not None and newest.seq > upto and not newest.cancelled:
+            return
+        self._speech_turn = None
+        self._cancel_speech()
 
     def _cancel_speech(self) -> None:
         """Silence now. The lane is marked dead and its queue drained BEFORE the sentence being made is cut: the thread
