@@ -41,6 +41,10 @@ def run_process(argv: list[str], env: Mapping[str, str], *, wait: bool) -> str:
     return (done.stdout + done.stderr)[:OUTPUT_CAP]
 
 
+def _live_probe(cfg: GlideConfig, role: str, info: object) -> doctor.Row:
+    return doctor._probe(cfg, role, info, 20.0, time.monotonic)
+
+
 class SetupServer:
     def __init__(
         self,
@@ -55,7 +59,7 @@ class SetupServer:
         self.env = os.environ if env is None else env
         self.idle_s = idle_s
         self.runner = runner
-        self.prober = prober or (lambda cfg, role, info: doctor._probe(cfg, role, info, 20.0, time.monotonic))
+        self.prober = prober or (lambda c, r, i: _live_probe(c, r, i))
         self.keys: dict[str, str] = {}  # env var name -> pasted value, in memory only
         self.url_token = secrets.token_urlsafe(24)
         self.session = secrets.token_urlsafe(24)

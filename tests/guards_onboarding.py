@@ -20,10 +20,9 @@ def _refuse(what: str):
 def no_setup_machine_reach(monkeypatch):
     import webbrowser
 
-    from glide.providers import doctor
     from glide.setup import cli, server
 
     monkeypatch.setattr(webbrowser, "open", _refuse("webbrowser.open (a real browser)"))
     monkeypatch.setattr(cli, "webbrowser", type("W", (), {"open": staticmethod(_refuse("webbrowser.open"))}))
     monkeypatch.setattr(server, "run_process", _refuse("glide.setup.server.run_process (starts Glide)"))
-    monkeypatch.setattr(doctor, "_probe", _refuse("the live doctor probe (spends tokens)"))
+    monkeypatch.setattr(server, "_live_probe", _refuse("the live doctor probe (spends tokens)"))
