@@ -4,6 +4,7 @@ import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,3 +83,39 @@ def test_readme_is_declared_once_it_exists():
         assert PROJECT["project"]["readme"] == "README.md"
     else:
         assert "readme" not in PROJECT["project"]
+
+
+def test_extras_name_only_features_with_code_and_all_covers_them():
+    """F5: `ocr` (rapidocr, which drags in opencv and fetches models from a third-party host) had no code at all."""
+    assert "ocr" not in EXTRAS
+    names = {r.name for lines in EXTRAS.values() for r in requirements(lines)}
+    assert "rapidocr" not in names
+    (everything,) = [r for r in requirements(EXTRAS["all"])]
+    assert set(everything.extras) == set(EXTRAS) - {"all"}
+
+
+def test_speech_extra_lists_no_package_nothing_imports():
+    """F5: `websockets` was listed, but the code speaks websocket-client (a core dependency)."""
+    assert "websockets" not in {r.name for r in requirements(EXTRAS["speech"])}
+    imported = "\n".join(p.read_text() for p in (ROOT / "glide").rglob("*.py"))
+    assert "import websockets" not in imported and "from websockets" not in imported
+
+
+def test_lock_records_the_same_requirements_as_pyproject():
+    """`uv lock --check` is the real check; this one runs offline in every test run."""
+    (glide,) = [p for p in LOCK["package"] if p["name"] == "glide"]
+    locked = glide["metadata"]["requires-dist"]
+    locked_names = {canonicalize_name(r["name"]) for r in locked}
+    wanted = {canonicalize_name(r.name) for r in requirements(PROJECT["project"]["dependencies"])}
+    wanted |= {canonicalize_name(r.name) for lines in EXTRAS.values() for r in requirements(lines)}
+    assert locked_names == wanted
+    assert set(glide["metadata"]["provides-extras"]) == set(EXTRAS)
+
+
+def test_version_is_not_allowed_to_drift_from_pyproject():
+    """F7: glide/computer/__init__.py repeats the version. Until that line is deleted, keep the two equal."""
+    from glide import computer
+
+    version = getattr(computer, "__version__", None)
+    if version is not None:
+        assert version == PROJECT["project"]["version"]
