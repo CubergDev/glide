@@ -11,7 +11,6 @@ from PIL import Image
 
 from glide.assistant.point_answer import POINT_DEADLINE_S, ROLE, PointAnswer, compose_point_answer
 from glide.computer.generation import (
-    AnthropicProvider,
     GenerationError,
     GenerationRequest,
     GenerationResult,
@@ -74,20 +73,23 @@ def test_an_error_never_repeats_what_the_provider_wrote():
     assert "SECRET" not in str(error.value) and "null" not in str(error.value)
 
 
+def counting_provider(stop):
+    """A provider that, like the old Anthropic one, counts every stop reason except max_tokens and refusal as completed."""
+    return SimpleNamespace(
+        generate=lambda request, cancel=None: GenerationResult(GOOD, "fixture", completed=True, stop_reason=stop)
+    )
+
+
 @pytest.mark.parametrize("stop", ["stop_sequence", "tool_use", "pause_turn"])
 def test_a_read_only_answer_must_end_normally_even_when_the_provider_counts_the_stop_as_completed(stop):
-    """AnthropicProvider treats every stop reason except max_tokens and refusal as completed, so the strict check
-    has to look at the stop reason itself (ported from the archive-3 lineage with its two tests)."""
-    reply = SimpleNamespace(content=[SimpleNamespace(type="text", text=GOOD)], stop_reason=stop, usage=None, model="m")
-    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: reply), base_url="https://example.invalid")
+    """A provider may count any stop reason except max_tokens and refusal as completed, so the strict check has to
+    look at the stop reason itself (ported from the archive-3 lineage with its two tests)."""
     with pytest.raises(WriterError, match="incomplete"):
-        compose_point_answer(AnthropicProvider(client), "Explain", {})
+        compose_point_answer(counting_provider(stop), "Explain", {})
 
 
-def test_a_normal_end_turn_is_accepted_through_the_anthropic_provider():
-    reply = SimpleNamespace(content=[SimpleNamespace(type="text", text=GOOD)], stop_reason="end_turn", usage=None, model="m")
-    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: reply), base_url="https://example.invalid")
-    assert compose_point_answer(AnthropicProvider(client), "Explain", {}).text.startswith("This is error 0007")
+def test_a_normal_end_turn_is_accepted_from_a_provider_that_counts_stops_as_completed():
+    assert compose_point_answer(counting_provider("end_turn"), "Explain", {}).text.startswith("This is error 0007")
 
 
 class Facade:
