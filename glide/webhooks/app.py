@@ -7,6 +7,7 @@ enabled too (D5). Callback bytes are verified exactly as received, before anythi
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import os
@@ -36,6 +37,17 @@ from .translation import translate_github, translate_standard
 JSON_TYPES = {"application/json", "application/cloudevents+json"}
 # The service's own permission names: what a worker token needs to claim a message and to report on one.
 WORKER_SCOPES = {"claim": "agent:claim", "report": "agent:report"}
+
+
+PURGE_INTERVAL_S = 3600  # how often the uncertain-row retention limit is enforced while the service runs
+
+
+async def _purge_uncertain(store: QueueStore) -> None:
+    """Purge once now, then every `PURGE_INTERVAL_S` seconds. A failed pass is retried at the next one, never fatal."""
+    while True:
+        with contextlib.suppress(sqlite3.Error, RuntimeError, OSError):
+            await run_in_threadpool(store.purge_uncertain)
+        await asyncio.sleep(PURGE_INTERVAL_S)
 
 
 class Limiter:
@@ -223,10 +235,16 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             settings.max_events,
             record_content=settings.record_content,
             receipt_retention_s=settings.receipt_retention_days * 86400,
+            uncertain_retention_s=settings.uncertain_retention_days * 86400,
         )
+        # D3 exception, bounded: an uncertain run's goal and context are deleted once the limit passes. Purge at
+        # start, then on a periodic pass.
+        purger = asyncio.create_task(_purge_uncertain(app.state.queue))
         try:
             yield
         finally:
+            purger.cancel()
+            await asyncio.gather(purger, return_exceptions=True)
             if owned:
                 app.state.queue.close()
 

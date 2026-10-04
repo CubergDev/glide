@@ -28,9 +28,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import features
 from ..assistant.core import IO, Assistant, Reply
 from ..assistant.point_ask import capture_point
 from ..assistant.tasks import DEFAULT_RUNS_DIR
+from ..computer import config as computer_config
 from ..providers.chain import SwitchEvent
 from ..providers.config import ConfigError
 from .point_core import POINT_DELAY_S, PointMode
@@ -65,6 +67,7 @@ class PetEvent:
     - `switch`: `role`, `from_slot`, `to_slot`, `kind`, `reason`. One per provider fallback; none is silent.
     - `mic`: `open`, and `detail` (a short machine reason, never user content).
     - `recording`: `on`. Whether the core keeps content (D3).
+    - `engine`: `name`, `legacy` or `structured`: the execution engine computer tasks use (set through `PetCore.engine`).
     - `point`: `kind` (`status`, `selecting`, `selected`, `preview`, `thinking`, `answer`, `error`, `stopped`, `closed`)
       and that kind's fields (point_core.py, point_session.py). Point and ask, read only.
     - `notice`: `message`, something the person should see that is not an answer.
@@ -197,6 +200,22 @@ class PetCore:
         """The core reads this when a task starts (assistant/tasks.py). Content is kept only while it is True."""
         self._config.record_content = bool(on)
         self._emit("recording", on=bool(on))
+
+    @property
+    def engine(self) -> str:
+        """The execution engine computer tasks use: `features.engine_for`, the resolver every front end shares. A bad setting
+        shows the default here; `glide doctor` and the task itself say why."""
+        try:
+            return features.engine_for(self._config)
+        except ValueError:
+            return computer_config.DEFAULT_ENGINE
+
+    @engine.setter
+    def engine(self, name: str) -> None:
+        """Choose the engine for the tasks that start from now on. Raises ValueError (one line) for anything but a known engine."""
+        features.engine_for(self._config, "" if name is None else name)  # the resolver is the one judge of a value
+        self._config.engine_choice = name
+        self._emit("engine", name=name)
 
     @property
     def busy(self) -> bool:
@@ -467,6 +486,7 @@ class PetView:
         self.mood = "idle"
         self.mic = False
         self.recording = False
+        self.engine = computer_config.DEFAULT_ENGINE
         self.working = False
         self.lines: deque[str] = deque(maxlen=LINES)
         self._result: tuple[str, str] | None = None  # how the last task ended, kept until something else happens
@@ -576,6 +596,10 @@ class PetView:
     def _recording(self, on: bool) -> None:
         self.recording = on
         self.lines.append("recording content: ON" if on else "recording content: off")
+
+    def _engine(self, name: str) -> None:
+        self.engine = name
+        self.lines.append(f"engine: {name}")
 
     def _notice(self, message: str) -> None:
         self.lines.append(message[:500])

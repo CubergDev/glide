@@ -138,3 +138,53 @@ def test_an_ipv6_bind_is_refused_with_a_reason(config, capsys, host):
     with pytest.raises(SystemExit) as error:
         cli.main(["--config", str(config()), "--host", host, "--behind-proxy", "--check-config"])
     assert error.value.code == 2 and "IPv6" in capsys.readouterr().err
+
+
+MARKER = "RECONCILE-MARKER-71c2-do-not-store"
+
+
+def seed_uncertain(path):
+    from glide.webhooks.store import QueueStore
+
+    store = QueueStore(path)
+    call = {
+        "id": "m1",
+        "task_id": "t1",
+        "agent_id": "team",
+        "operation": "execute",
+        "goal": "do " + MARKER,
+        "source": "standard",
+        "event_id": "m1",
+        "allow_actions": False,
+        "context": {"x": MARKER},
+    }
+    store.enqueue("standard", "m1", "digest", call)
+    lease = store.claim("team", "worker")
+    store.finish("team", "worker", "m1", lease["lease_token"], "uncertain")
+    store.close()
+
+
+@pytest.mark.parametrize(("verdict", "status"), [("done", "completed"), ("not-done", "cancelled"), ("unknown", "failed")])
+def test_reconcile_records_the_verdict_and_deletes_the_content(config, tmp_path, capsys, verdict, status):
+    from glide.webhooks.store import QueueStore
+
+    seed_uncertain(tmp_path / "q.sqlite3")
+    assert cli.reconcile(["--config", str(config()), "m1", verdict]) == 0
+    assert status in capsys.readouterr().out
+    store = QueueStore(tmp_path / "q.sqlite3")
+    row = store.get("team", "m1")
+    store.close()
+    assert row["status"] == status and row["call"]["goal"] == "redacted"
+    assert MARKER.encode() not in b"".join(p.read_bytes() for p in tmp_path.glob("q.sqlite3*"))
+
+
+def test_reconcile_refuses_unknown_messages_and_verdicts(config, tmp_path):
+    seed_uncertain(tmp_path / "q.sqlite3")
+    for words in (["nope", "done"], ["m1", "maybe"]):
+        with pytest.raises(SystemExit) as error:
+            cli.reconcile(["--config", str(config()), *words])
+        assert error.value.code != 0
+    cli.reconcile(["--config", str(config()), "m1", "done"])
+    assert cli.reconcile(["--config", str(config()), "m1", "done"]) == 0  # the same verdict again is a no-op
+    with pytest.raises(SystemExit):  # a different verdict on a reconciled row is refused
+        cli.reconcile(["--config", str(config()), "m1", "not-done"])

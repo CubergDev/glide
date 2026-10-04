@@ -130,7 +130,11 @@ def test_every_role_slot_provider_and_model_name_comes_from_the_file(make):
         "language": "yue",
         "silence_ms_range": [200, 2000],
     }
-    assert settings["privacy"] == {"record_content": False} and settings["computer"] == {"act_enabled": False}
+    assert settings["privacy"] == {"record_content": False} and settings["computer"] == {
+        "act_enabled": False,
+        "engine": "legacy",
+        "engines": ["legacy", "structured"],
+    }
 
 
 def test_a_slot_reports_the_name_of_its_key_variable_and_whether_it_is_set_and_nothing_else(make):
@@ -199,6 +203,8 @@ def test_a_change_made_against_an_old_revision_is_refused_whole(make):
         ("voice.hands_free", "yes"),
         ("privacy.record_content", 1),
         ("computer.act_enabled", None),
+        ("computer.engine", "turbo"),
+        ("computer.engine", True),
         ("voice.language", 5),
         ("voice.language", "not a language"),
         ("roles.pin", "llm.fast"),
@@ -216,6 +222,24 @@ def test_a_change_the_core_does_not_accept_is_refused_with_its_key_and_applies_n
     assert result["ok"] is False and result["revision"] == 1
     assert [e["key"] for e in result["errors"]] == [key]
     assert read(rig)[1]["voice"]["silence_ms"] == 700  # the good change next to it was not applied either
+
+
+def test_the_engine_starts_where_the_environment_puts_it_and_a_change_reaches_every_task(make, monkeypatch):
+    from glide import features
+
+    monkeypatch.delenv("GLIDE_ENGINE", raising=False)
+    rig = make()
+    assert read(rig)[1]["computer"]["engine"] == "legacy" and features.engine_for(rig.config) == "legacy"
+    result = rig.settings(("computer.engine", "structured"), revision=1)
+    assert result["ok"] is True and features.engine_for(rig.config) == "structured"
+    assert read(rig)[1]["computer"]["engine"] == "structured"
+    assert rig.settings(("computer.engine", "legacy"))["ok"] is True and features.engine_for(rig.config) == "legacy"
+    monkeypatch.setenv("GLIDE_ENGINE", "structured")
+    assert read(make())[1]["computer"]["engine"] == "structured"
+    monkeypatch.setenv(
+        "GLIDE_ENGINE", "turbo"
+    )  # a bad setting does not stop the app: the default shows, doctor and tasks say why
+    assert read(make())[1]["computer"]["engine"] == "legacy"
 
 
 def test_there_is_no_way_to_send_a_key_through_settings(make):

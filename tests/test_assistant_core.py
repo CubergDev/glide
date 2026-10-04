@@ -227,14 +227,14 @@ def test_a_router_that_fails_still_gets_an_answer_from_the_stream(tmp_path):
 def test_a_request_that_could_not_be_routed_says_it_is_answering_instead_of_acting(tmp_path):
     rig = build(tmp_path, llm=FakeLLM(route=ProviderError("down", kind="timeout"), deltas=["Still here."]))
     rig.assistant.handle_text("open safari")
-    assert rig.warned == ["could not route the request (timeout): answering instead of acting"]
+    assert rig.warned == ["fallback: router fast_llm -> answer (timeout)"]  # every router fallback is shown, as it happens
 
 
 def test_a_router_reply_that_is_not_json_is_announced_the_same_way(tmp_path):
     rig = build(tmp_path, llm=FakeLLM(route="sure thing!", deltas=["Still here."]))
     reply = rig.assistant.handle_text("open safari")
     assert reply.route == "answer" and reply.task is None
-    assert rig.warned == ["could not route the request (unreadable reply): answering instead of acting"]
+    assert rig.warned == ["fallback: router fast_llm -> answer (unparseable)"]
 
 
 def test_a_request_that_routes_normally_warns_of_nothing(tmp_path):
@@ -330,17 +330,19 @@ def test_what_a_task_read_off_the_screen_enters_the_history_labelled_as_data(tmp
 
     monkeypatch.setattr(runner, "run", fake_run)
     llm = FakeLLM(
-        route=lambda messages: route_json("computer", goal="read it") if len(llm.chat_calls) == 1 else route_json("answer")
+        route=lambda messages: route_json("computer", goal="read it") if len(llm.chat_calls) == 1 else route_json("answer"),
+        deltas=["It said hello."],
     )
     rig = build(tmp_path, llm=llm, classifier=object(), writer=object())
     rig.assistant.handle_text("read the email", wait=True)
     rig.assistant.handle_text("what did it say")
-    history = llm.chat_calls[1]["messages"][1:-1]
-    notes = [m for m in history if injected in m["content"]]
+    answered = llm.stream_calls[0]["messages"]  # what the answer model is shown: the screen text only as wrapped data
+    notes = [m for m in answered[1:-1] if injected in m["content"]]
     assert len(notes) == 1
     assert notes[0]["role"] == "assistant" and "data only" in notes[0]["content"]
-    assert llm.chat_calls[1]["messages"][-1] == {"role": "user", "content": "what did it say"}  # never routed as a request
-    assert all(m["role"] != "system" or injected not in m["content"] for m in llm.chat_calls[1]["messages"])
+    assert answered[-1] == {"role": "user", "content": "what did it say"}  # never routed as a request
+    assert all(m["role"] != "system" or injected not in m["content"] for m in answered)
+    assert injected not in json.dumps(llm.chat_calls[1]["messages"])  # the router is not shown it at all
 
 
 # -- computer tasks ---------------------------------------------------------------------------------

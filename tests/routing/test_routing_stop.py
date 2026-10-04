@@ -1,9 +1,7 @@
-"""The stop matcher moved to `glide.routing.stop` unchanged. The old module and the new one must agree on every case.
+"""The one stop matcher, `glide.routing.stop`. Everything that recognises "stop" imports it from there.
 
-`STOP_CASES` and `NOT_STOP_CASES` are the cases of `tests/test_assistant_router.py` (copied, so this file survives that
-file being moved when the router shim is applied), plus the configured extra phrases. Each case runs through
-`glide.routing.stop` and `glide.assistant.router`, which must return the same answer; once `assistant/router.py` is a
-shim that re-exports this module, the parity test is trivially true and can be deleted with the old module.
+`STOP_CASES` and `NOT_STOP_CASES` are the cases of the old `tests/test_assistant_router.py`, kept when that file went with
+the router it tested. `glide.assistant.router` is only a re-export shim for `glide/speech/` and must be the same objects.
 """
 
 # ruff: noqa: RUF001  the tests are about full-width punctuation and letters
@@ -67,24 +65,18 @@ NOT_STOP_CASES = [
 
 
 @pytest.mark.parametrize("text", STOP_CASES)
-def test_a_stop_phrase_is_a_stop_in_both_places(text):
+def test_a_stop_phrase_is_a_stop(text):
     assert new.is_stop(text) is True
-    assert old.is_stop(text) is True
 
 
 @pytest.mark.parametrize("text", NOT_STOP_CASES)
-def test_anything_more_than_a_stop_phrase_is_not_a_stop_in_either_place(text):
+def test_anything_more_than_a_stop_phrase_is_not_a_stop(text):
     assert new.is_stop(text) is False
-    assert old.is_stop(text) is False
 
 
-@pytest.mark.parametrize("text", [*STOP_CASES, *NOT_STOP_CASES, "hold on please", "Hold ON, please!", "別吵"])
-def test_the_two_matchers_never_disagree(text):
-    extra_new = new.stop_phrases(["hold on please", "別吵"])
-    extra_old = old.stop_phrases(["hold on please", "別吵"])
-    assert extra_new == extra_old
-    assert new.is_stop(text, extra_new) == old.is_stop(text, extra_old)
-    assert new.normalize(text) == old.normalize(text)
+def test_the_old_module_is_only_a_re_export_of_the_one_list():
+    assert (old.is_stop, old.normalize, old.stop_phrases) == (new.is_stop, new.normalize, new.stop_phrases)
+    assert not hasattr(old, "STOP_CORE") and not hasattr(old, "fast_path")  # no second list can grow back there
 
 
 def test_a_configured_phrase_must_be_the_whole_utterance():

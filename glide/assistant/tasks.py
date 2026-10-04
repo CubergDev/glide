@@ -170,9 +170,17 @@ class ComputerTask:
     """
 
     def __init__(
-        self, goal: str, *, act: bool, config, folder: Path, on_question: Callable[[ComputerTask, str], None] | None = None
+        self,
+        goal: str,
+        *,
+        act: bool,
+        config,
+        folder: Path,
+        on_question: Callable[[ComputerTask, str], None] | None = None,
+        route: str = "",
     ) -> None:
         self.goal = goal
+        self.route = route  # what the router decided ("execute" or "research"); "" when nothing did
         self.act = act
         self.folder = folder
         self.stop_event = threading.Event()
@@ -290,12 +298,18 @@ class ComputerTask:
                 failure="this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security",
             )
         try:
+            engine_fields = self._engine_fields()
+        except ValueError as exc:  # a bad [computer], [browser] or [research] setting: nothing was started
+            return TaskResult(self.goal, self.act, "not configured", failure=self._scrub(str(exc)), folder=self.folder)
+        try:
             writer = self._config.writer()
             cfg = runner.RunConfig(
                 goal=self.goal,
                 out=self.folder,
                 act=self.act,
                 record_content=bool(getattr(self._config, "record_content", False)),
+                **engine_fields,
+                route=self.route,
                 journal=self.folder.parent,  # one journal for every run folder under the runs directory
             )
 
@@ -332,6 +346,23 @@ class ComputerTask:
             readback=state.readback,
         )
 
+    def _engine_fields(self) -> dict:
+        """The engine in force (`features.engine_for`: the one resolver every front end shares) and, for the structured one, its
+        browser and research settings from glide.toml. A bad setting raises ValueError, which `_execute` reports as not configured."""
+        from .. import features
+        from ..computer import browser_settings
+        from ..computer import config as computer_config
+
+        engine = features.engine_for(self._config)
+        if engine != "structured":
+            return {}
+        browser_settings.use(features.table(self._config, "browser"))
+        return {
+            "engine": engine,
+            "execution_browser": computer_config.browser(),
+            "research_calls": computer_config.research_budget(features.table(self._config, "research")),
+        }
+
     def _scrub(self, text: str) -> str:
         scrub = getattr(self._config, "scrub", None)
         return scrub(text) if callable(scrub) else text
@@ -350,6 +381,7 @@ class TaskRunner:
         goal: str,
         *,
         act: bool = False,
+        route: str = "",
         on_done: Callable[[ComputerTask], None] | None = None,
         on_question: Callable[[ComputerTask, str], None] | None = None,
     ) -> ComputerTask:
@@ -357,7 +389,9 @@ class TaskRunner:
         if not _ACTIVE.acquire(blocking=False):
             raise TaskBusy("a task is already running")
         try:
-            task = ComputerTask(goal, act=act, config=self._config, folder=self._fresh_folder(), on_question=on_question)
+            task = ComputerTask(
+                goal, act=act, config=self._config, folder=self._fresh_folder(), on_question=on_question, route=route
+            )
             self.current = task
             task.start(on_done, release=_ACTIVE.release)
         except BaseException:

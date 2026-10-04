@@ -10,7 +10,7 @@ import pytest
 
 from glide.computer import macos, windows
 from glide.computer.browser import cdp
-from glide.computer.browser.cdp import Chrome, Session
+from glide.computer.browser.cdp import Session
 from glide.computer.platform_adapter import dispatching
 
 
@@ -70,8 +70,6 @@ def test_the_windows_pointer_reads_as_mid_screen_too():
 @pytest.mark.parametrize(
     "touch",
     [
-        lambda tmp: Chrome(port=9, profile=str(tmp)).start(),
-        lambda tmp: cdp.find_chrome(),
         lambda tmp: cdp._get_json("http://127.0.0.1:9/json/version"),
         lambda tmp: Session("ws://127.0.0.1:9/devtools/page/X", origin="http://127.0.0.1:9"),
         lambda tmp: subprocess.Popen(["true"]),

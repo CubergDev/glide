@@ -99,10 +99,11 @@ def main(argv: list[str] | None, glide_config) -> int:
     parser.add_argument("--act", action="store_true", help="actually click and type (default: dry run, one step)")
     parser.add_argument(
         "--engine",
-        choices=["legacy", "structured"],
-        default="legacy",
+        metavar="{legacy,structured}",
+        default=None,
         help="legacy: the screen loop. structured: planned effects checked after each action, through the "
-        "provider chains of glide.toml (browser and desktop tasks; research and reasoning)",
+        "provider chains of glide.toml (browser and desktop tasks; research and reasoning). "
+        f"Default: {config.ENGINE_ENV}, then [computer] engine in glide.toml, then {config.DEFAULT_ENGINE}",
     )
     parser.add_argument(
         "--readiness-timeout",
@@ -136,6 +137,7 @@ def main(argv: list[str] | None, glide_config) -> int:
     try:
         # glide.toml's [browser] table and [research] budget, under the environment and the flags; a bad one stops the run
         # here, before anything has been started.
+        engine = features.engine_for(glide_config, args.engine)
         browser_settings.use(features.table(glide_config, "browser"))
         browser_settings.apply_arguments(args)
         research_calls = config.research_budget(features.table(glide_config, "research"))
@@ -147,7 +149,8 @@ def main(argv: list[str] | None, glide_config) -> int:
         print(WRITER_DISABLED)
     else:
         print(f"writer: {provider(writer)}")
-    if args.engine == "structured":
+    print(f"engine: {engine}")
+    if engine == "structured":
         print(f"browser: {browser_settings.description()}")
 
     cfg = RunConfig(
@@ -162,7 +165,7 @@ def main(argv: list[str] | None, glide_config) -> int:
         app=args.app,
         url=args.url,
         record_content=args.record_content,
-        engine=args.engine,
+        engine=engine,
         execution_browser=config.browser(),
         readiness_timeout=args.readiness_timeout,
         research_calls=research_calls,

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..assistant.point_ask import MAX_QUESTION
-from ..computer.config import writer_vision
+from ..computer.config import ENGINES, writer_vision
 from . import pet, pet_overlay
 from .core import MAX_TEXT, PetCore, PetView, provider_lines
 from .raccoon.widget import VOICE, icon_send
@@ -59,6 +59,7 @@ class PetWindow(RaccoonWindow):
         self.core, self.config = core, config
         self.view = PetView()
         self.view.recording = core.record_content
+        self.view.engine = core.engine
         self.setWindowTitle("Glide · Raccoon")
         self.input.setMaxLength(MAX_TEXT)
         self.input.setPlaceholderText("Ask Glide…")
@@ -97,6 +98,12 @@ class PetWindow(RaccoonWindow):
             "Computer actions are on",
         )
         self.act_banner.setStyleSheet(f"color: white; background: {ACT_COLOR}; padding: 4px; border-radius: 6px;")
+        self.engine_box = QComboBox()
+        self.engine_box.addItems(list(ENGINES))
+        self.engine_box.setCurrentText(self.view.engine)
+        self.engine_box.setToolTip("legacy: the screen loop (default). structured: planned effects, checked after each action.")
+        self.engine_box.setAccessibleName("Execution engine for computer tasks")
+        self.engine_badge = _plain(QLabel(""), "Active execution engine")
         self.headset = QCheckBox("Headphones · allow spoken interruptions")
         self.record = QCheckBox("Record task and page content for debugging (off by default)")
         self.record.setChecked(core.record_content)
@@ -105,7 +112,15 @@ class PetWindow(RaccoonWindow):
             "Content recording is on",
         )
         self.record_banner.setStyleSheet(f"color: white; background: {REC_COLOR}; padding: 4px; border-radius: 6px;")
-        for widget in (self.act, self.act_banner, self.headset, self.record, self.record_banner):
+        for widget in (
+            self.act,
+            self.act_banner,
+            self.engine_box,
+            self.engine_badge,
+            self.headset,
+            self.record,
+            self.record_banner,
+        ):
             layout.addWidget(widget)
         self.providers = _plain(QLabel(""), "Provider chains")
         layout.addWidget(self.providers)
@@ -158,6 +173,7 @@ class PetWindow(RaccoonWindow):
         self.share.toggled.connect(self.refresh)
         self.ask_button.clicked.connect(self.ask_typed)
         self.act.toggled.connect(self._set_act)
+        self.engine_box.currentTextChanged.connect(self._set_engine)
         self.headset.toggled.connect(self._set_headset)
         self.record.toggled.connect(self._set_record)
         self.text_submitted.connect(self.submit_text)
@@ -229,6 +245,14 @@ class PetWindow(RaccoonWindow):
         self.core.act = on
         self.refresh()
 
+    def _set_engine(self, name: str) -> None:
+        try:
+            self.core.engine = name  # the shared resolver judges it; the core emits `engine`
+        except ValueError as error:
+            self.view.lines.append(str(error))
+        self.view.engine = self.core.engine
+        self.refresh()
+
     def _set_headset(self, on: bool) -> None:
         self.core.headset = on
 
@@ -268,15 +292,27 @@ class PetWindow(RaccoonWindow):
         bar = self.log.verticalScrollBar()
         bar.setValue(bar.maximum())
         locked = self.core.voice_active or self.core.busy
-        for box in (self.act, self.headset, self.record):
+        for box in (self.act, self.engine_box, self.headset, self.record):
             box.setEnabled(not locked)
         self.record.blockSignals(True)  # showing the state must never change it
         self.record.setChecked(self.view.recording)
         self.record.blockSignals(False)
         self.record_banner.setVisible(self.view.recording)
+        self.engine_box.blockSignals(True)
+        self.engine_box.setCurrentText(self.view.engine)
+        self.engine_box.blockSignals(False)
+        self.engine_badge.setText(f"Engine: {self.view.engine}" + ("" if self.view.engine == "legacy" else " (opt-in)"))
         sharing = self.point_mode and self.share.isChecked()
+        structured = self.view.engine != "legacy" and not self.point_mode
         badges = [
-            text for text, show in (("● REC", self.view.recording), ("ACT", self.act.isChecked()), ("SHARE", sharing)) if show
+            text
+            for text, show in (
+                ("● REC", self.view.recording),
+                ("ACT", self.act.isChecked()),
+                ("ENGINE: " + self.view.engine, structured),
+                ("SHARE", sharing),
+            )
+            if show
         ]
         self.badges.setText("  ".join(badges))
         self.badges.setStyleSheet(BADGE_STYLE % (REC_COLOR if self.view.recording else ACT_COLOR))
@@ -289,6 +325,8 @@ class PetWindow(RaccoonWindow):
         point, active, holding = self.point_mode, self.core.point.active, self.core.point.holding
         self.activity.setEnabled(not locked and not active)
         self.act.setVisible(not point)
+        self.engine_box.setVisible(not point)
+        self.engine_badge.setVisible(not point)
         self.act_banner.setVisible(self.act.isChecked() and not point)
         for widget in self.point_widgets:
             widget.setVisible(point)

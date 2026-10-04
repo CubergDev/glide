@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from glide.computer.control import RunControl, controlled
+from glide.computer.control import RunControl, checkpoint, controlled
 from glide.computer.execution import dom
 from glide.computer.execution.contracts import Action, Element, Observation
 from glide.computer.models import Abort, DesktopError
@@ -231,6 +231,25 @@ def test_stop_between_clearing_and_typing_prevents_the_text():
     with controlled(control), pytest.raises(Abort):
         backend.execute(Action("type", obs.identity, "7", "new text"), obs)
     assert "Input.insertText" not in calls
+
+
+def test_a_stop_after_a_key_goes_down_still_releases_it_and_sends_no_second_press():
+    control, calls = RunControl(), []
+    backend = dom.BrowserBackend("http://127.0.0.1:9222", "tab")
+
+    def call(method, params=None):
+        checkpoint()  # what a real session does before every request
+        calls.append(params["type"])
+        if params["type"] == "keyDown":
+            control.cancel()
+        return {}
+
+    backend.page = SimpleNamespace(evaluate=lambda text: None, call=call)
+    with controlled(control):
+        backend.key("return", ())  # the stop lands after the press: the release is cleanup and still goes out
+        with pytest.raises(Abort):
+            backend.key("escape", ())  # and nothing new is pressed once stopped
+    assert calls == ["keyDown", "keyUp"]
 
 
 def test_a_click_is_checked_against_the_observed_label_and_the_point_before_it_is_pressed():

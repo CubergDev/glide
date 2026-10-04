@@ -11,7 +11,7 @@
     glide inspect [GOAL]           capture the screen and show what the classifier would be sent; `glide-inspect` too
     glide memory ...               local memory administration (off unless [memory] enabled = true)
     glide mcp ...                  serve Glide over MCP and show the MCP settings
-    glide webhooks serve|work ...  the webhook listener and its worker (serve needs the webhooks extra)
+    glide webhooks serve|work|reconcile ...  the webhook listener, its worker, a verdict on an uncertain run
     glide app-server [--socket PATH]  serve the SwiftUI app over a local Unix socket (never a network port)
 
 `memory`, `mcp` and `webhooks` have their own options and help (`glide memory --help`); everything after the
@@ -38,10 +38,11 @@ from pathlib import Path
 
 from . import features
 from .assistant.audio_io import AudioUnavailable, Endpointer, Microphone, Player
-from .assistant.core import IO, Assistant, Reply
-from .assistant.router import is_stop
+from .assistant.core import IO, Assistant, Reply, routing_table
 from .assistant.tasks import DEFAULT_RUNS_DIR
 from .computer.execution.reading import clean as printable
+from .routing import RoutingSettings
+from .routing.stop import is_stop
 
 ACT_BANNER = (
     "ACT MODE: Glide will click and type on this Mac. Stop it by saying or typing stop, with Ctrl-C, "
@@ -54,6 +55,10 @@ FAILED_OUTCOMES = frozenset(  # a task that could not run
     {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
 )
 POLL_S = 0.1  # how often the terminal loop looks up from waiting for a line
+ENGINE_HELP = (
+    "execution engine for computer tasks: legacy (the screen loop) or structured (planned, verified effects). "
+    "Default: $GLIDE_ENGINE, then [computer] engine in glide.toml, then legacy"
+)
 QUIT_WORDS = frozenset({"q", "quit", "exit", "/quit", "/exit"})
 
 
@@ -75,6 +80,7 @@ def _load(path: str | None):
 
     _dotenv()
     config = load_config(path)
+    RoutingSettings.from_table(routing_table(config))  # a bad [routing] table is one line and exit 2, not a traceback later
     config.on_switch(lambda event: print(format_switch(event, config), file=sys.stderr, flush=True))
     return config
 
@@ -91,6 +97,13 @@ def _doctor(config, live: bool) -> int:
     from .providers import doctor
 
     print(f"config: {config.source}")
+    try:
+        print(f"engine: {features.engine_for(config)}")
+    except ValueError as exc:
+        print(f"engine: error: {clean(str(exc), config)}")
+        engine_ok = False
+    else:
+        engine_ok = True
     if config.defaulted:
         print(f"built-in chains in use for: {', '.join(config.defaulted)}")
     for warning in config.warnings:
@@ -103,7 +116,7 @@ def _doctor(config, live: bool) -> int:
     report = features.feature_report(config)
     for name, _, line in report:
         print(f"  {name:<9}{clean(line, config)}")
-    return 1 if doctor.failed(rows) or not all(ok for _, ok, _ in report) else 0
+    return 1 if doctor.failed(rows) or not engine_ok or not all(ok for _, ok, _ in report) else 0
 
 
 def _read_line(prompt: str = "") -> str:
@@ -241,7 +254,8 @@ def _prompt(text: str, state: dict, turn: threading.Thread | None) -> None:
 
 
 def cmd_chat(args: argparse.Namespace, config) -> int:
-    assistant = Assistant(config, io=_make_io(config, speak=args.speak), runs_dir=args.runs)
+    # clarify=True: the router (or a task) may put ONE question to the user, and the next line typed is its answer.
+    assistant = Assistant(config, io=_make_io(config, speak=args.speak), runs_dir=args.runs, clarify=True)
     act = args.act
     lines = LineReader(_read_line)
     print("glide chat. Type a request, /help for commands, /quit to leave.")
@@ -276,6 +290,8 @@ def cmd_chat(args: argparse.Namespace, config) -> int:
                 if is_stop(line):  # heard here, not on a worker: stopping must not wait for a thread to start
                     print("stopped" if assistant.stop() else "stopped (nothing was running)")
                     continue
+                if assistant.pending_question is not None and assistant.answer_pending(line):
+                    continue  # the line answered the question Glide asked; anything else is a new request below
                 assistant.interrupt_speech()  # a new request replaces the last answer, spoken or still being written
                 turn = _spawn(lambda text=line, act=act: _chat_turn(assistant, text, act, args, config), config)
             except KeyboardInterrupt:
@@ -284,6 +300,8 @@ def cmd_chat(args: argparse.Namespace, config) -> int:
                     break
                 interrupted = True
                 print("\nstopped (Ctrl-C again to leave)")
+        if assistant.pending_question is not None:
+            assistant.stop()  # leaving with a question open: nothing will answer it, so do not wait out its timeout
         _finish(assistant, turn)
     except KeyboardInterrupt:
         assistant.stop()
@@ -521,8 +539,8 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return mcp.main(_forward(args))
 
 
-def cmd_webhooks_serve(args: argparse.Namespace) -> int:
-    """`glide webhooks serve`: its `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
+def cmd_webhooks_serve(args: argparse.Namespace, entry: str = "main") -> int:
+    """`glide webhooks serve|reconcile`: their `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
     from .memory.settings import SettingsError, locate_config
 
     words = list(args.rest)
@@ -540,7 +558,11 @@ def cmd_webhooks_serve(args: argparse.Namespace) -> int:
                 return 2
     from .webhooks import cli as webhooks
 
-    return webhooks.main(words)
+    return getattr(webhooks, entry)(words)
+
+
+def cmd_webhooks_reconcile(args: argparse.Namespace) -> int:
+    return cmd_webhooks_serve(args, "reconcile")
 
 
 def cmd_webhooks_work(args: argparse.Namespace) -> int:
@@ -605,6 +627,18 @@ def print_status(config) -> None:
             print(f"  {format_switch(event, config)}")
 
 
+def _choose_engine(config, flag: str | None) -> str | None:
+    """Settle the execution engine for ask, chat, listen and voice before anything starts: a bad value is one line and exit 2.
+    The choice goes on the configuration, where `ComputerTask` reads it through the same resolver as every front end."""
+    try:
+        engine = features.engine_for(config, flag)
+    except ValueError as exc:
+        print(f"glide: {clean(str(exc), config)}", file=sys.stderr)
+        return None
+    config.engine_choice = flag
+    return engine
+
+
 # -- Entry ------------------------------------------------------------------------------------------
 
 
@@ -622,6 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     work.add_argument(
         "--act", action="store_true", help="really click and type on this Mac (default: a dry run that says what it would do)"
     )
+    work.add_argument("--engine", metavar="ENGINE", help=ENGINE_HELP)
     work.add_argument("--runs", type=Path, default=DEFAULT_RUNS_DIR, help="where a computer task writes its run folder")
     work.add_argument(
         "--timings", action="store_true", help="print how long the route, first word and first audio took, to stderr"
@@ -651,6 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     voice = commands.add_parser("voice", help="hands-free voice loop: always listening, interruptible (speech extra)")
     voice.add_argument("--act", action="store_true", help="really click and type on this Mac (default: tasks are dry runs)")
+    voice.add_argument("--engine", metavar="ENGINE", help=ENGINE_HELP)
     voice.set_defaults(handler=cmd_voice)
 
     # The rest take their own options. Their parsers live in their own modules and are imported only when the command
@@ -680,9 +716,10 @@ def build_parser() -> argparse.ArgumentParser:
     passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)
     passthrough(commands, "mcp", cmd_mcp, "serve Glide over MCP, show the MCP settings (`glide mcp --help`)", config=True)
     webhooks = commands.add_parser("webhooks", help="the webhook listener and its worker (`glide webhooks serve --help`)")
-    parts = webhooks.add_subparsers(dest="webhooks_command", required=True, metavar="serve|work")
+    parts = webhooks.add_subparsers(dest="webhooks_command", required=True, metavar="serve|work|reconcile")
     passthrough(parts, "serve", cmd_webhooks_serve, "receive authenticated webhooks and queue agent requests (webhooks extra)")
     passthrough(parts, "work", cmd_webhooks_work, "consume queued requests, one at a time", config=True)
+    passthrough(parts, "reconcile", cmd_webhooks_reconcile, "record what happened to an uncertain run and delete its content")
     return parser
 
 
@@ -722,6 +759,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"glide: {clean(str(exc))}", file=sys.stderr)
         return 2
     try:
+        if hasattr(args, "engine") and not getattr(args, "passthrough", False):
+            engine = _choose_engine(config, args.engine)
+            if engine is None:
+                return 2
         return args.handler(args, config)
     finally:
         with contextlib.suppress(Exception):

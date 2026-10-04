@@ -23,6 +23,10 @@
         "value": false
       },
       {
+        "key": "computer.engine",
+        "value": "structured"
+      },
+      {
         "key": "roles.pin",
         "value": {
           "role": "tts",

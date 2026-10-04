@@ -9,6 +9,7 @@ broken assistant.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -41,8 +42,21 @@ class Log(list):
             self.append(entry)
 
 
-def route_json(route: str = "answer", reply: str = "", goal: str = "", language: str = "en") -> str:
-    return json.dumps({"route": route, "reply": reply, "goal": goal, "language": language})
+def route_json(
+    route: str = "answer", reply: str = "", goal: str = "", language: str = "en", confidence: str = "high", question: str = ""
+) -> str:
+    """The reply of the router's fast tier (glide/routing/tiers.py `FAST_SCHEMA`). "computer" is read as "execute"."""
+    route = "execute" if route == "computer" else route
+    return json.dumps(
+        {
+            "route": route,
+            "confidence": confidence,
+            "reply": reply,
+            "goal": goal,
+            "question": question,
+            "language": language,
+        }
+    )
 
 
 class FakeLLM:
@@ -221,7 +235,21 @@ class FakeConfig:
     defaulted: tuple = ()
     warnings: tuple = ()
 
-    def __init__(self, llm=None, stt=None, tts=None, classifier=None, writer=None, secret: str = "") -> None:
+    def __init__(
+        self,
+        llm=None,
+        stt=None,
+        tts=None,
+        classifier=None,
+        writer=None,
+        secret: str = "",
+        routes_with_classifier: bool = False,
+    ) -> None:
+        # `classifier` is the executor's, for `runner.run`. The router (glide/routing) asks the same facade for its own
+        # first tier, and the stand-ins here cannot answer a Choice question: so unless a test says
+        # `routes_with_classifier=True` the router is built without that tier and the fast LLM alone decides, which is
+        # what these tests were written against.
+        self.routes_with_classifier = routes_with_classifier
         self.fast = llm
         self.smart = llm
         self._stt = stt
@@ -256,6 +284,8 @@ class FakeConfig:
         return self._need("tts", self._tts)
 
     def classifier(self):
+        if not self.routes_with_classifier and sys._getframe(1).f_code.co_name == "build_router":
+            raise NoUsableProvider("no usable classifier provider for the router in this test rig.")
         self.calls.classifier += 1
         return self._need("classifier", self._classifier)
 

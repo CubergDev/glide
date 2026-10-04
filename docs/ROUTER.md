@@ -1,8 +1,9 @@
 # The router (`glide/routing/`)
 
 One entry point decides who owns a request: `Router.route(utterance, context) -> Decision`. It replaces the two routers
-that duplicated each other (`glide/assistant/router.py` and `glide/computer/execution/routing.py`'s `decide`). The package is
-**new and not yet wired in**; section 7 is the plan to do that in under an hour. Decision D9 in `HANDOFF.md`.
+that duplicated each other (`glide/assistant/router.py` and `glide/computer/execution/routing.py`'s `decide`). The assistant core, the CLI
+and the structured engine are wired to it (section 7 records how); `glide/assistant/router.py` is only a re-export of the stop
+matcher for `glide/speech/`. Decision D9 in `docs/DECISIONS.md`.
 
 ## 1. What it decides
 
@@ -144,7 +145,18 @@ accept the double check); the stop matcher does not match "hey glide never mind"
 Latency is unmeasured: the classifier call precedes every answer, which the old design paid once (fast call), so expect the
 streamed answer to start later by one classifier call unless `speculative_fast` and a short classifier timeout are used.
 
-## 7. Integration plan (line numbers are against `06-barge-in` d1a61be; check them)
+## 7. Integration plan (DONE in the swap branch, except what the notes below say; line numbers are against `06-barge-in` d1a61be)
+
+**Status of the swap.** Done: 1 (config: `routing` in `OWN_TABLES`, the commented block in `glide.toml.example`), 2 for `glide/cli.py`,
+3 (`RunConfig.route`, `ComputerTask`/`TaskRunner.start(route=)`, the engine's `_scope` takes it; `routing.decide` stays for
+`glide-computer` run directly and for a `clarify` route), 4 (core: `Assistant(routing=, clarify=, clarify_wait_s=)`, the `[routing]`
+table is read from the file the configuration came from, `clarifier.py`, `reason` from the smart model, a downgrade answers with
+`NOT_DONE_NOTE`), 5 (`answer.py` holds the answer prompt; `router.py` keeps only `is_stop`, `normalize`, `stop_phrases`), 6 (tests; `FakeConfig`
+builds the router without the classifier tier unless `routes_with_classifier=True`), `glide chat` sets `clarify=True` and routes the next
+line to `answer_pending`. **Not done:** `glide/speech/settings.py` and `speech/approval.py` still import from `assistant/router.py` (the
+voice owner changes them to `routing.stop`, then the shim is deleted); `glide listen`/`voice` and the pet/app keep `clarify` off (a
+spoken answer needs the voice loop to treat the next utterance as the answer: a decision for the voice owner); `decide` is not folded
+into `routing.tiers` (the criteria texts still live in two places).
 
 Files owned by other agents are marked (owner). Each step is one commit and keeps the suite green. **Parallel-safe order:** steps 1
 (providers), 2 (cli and speech imports) and 3 (engine, runner, tasks) touch disjoint files and can be done at the same time by

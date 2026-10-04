@@ -28,6 +28,7 @@ class FakeCore:
     def __init__(self) -> None:
         self.act = self.headset = self.record_content = False
         self.silence_ms = 600
+        self.engine = "legacy"
         self.voice_active = self.busy = False
         self.calls: list = []
         self.queue: list[PetEvent] = []

@@ -169,3 +169,13 @@ def table(glide_config, name: str) -> Mapping[str, Any]:
     from .memory.settings import read_table
 
     return read_table(name, _source(glide_config), foreign=_foreign(glide_config))
+
+
+def engine_for(glide_config, flag: str | None = None, environ: Mapping[str, str] | None = None) -> str:
+    """The execution engine in force: `flag`, else the choice a front end set on the configuration (`engine_choice`: the
+    app's or the pet's toggle), else GLIDE_ENGINE, else `[computer] engine`, else legacy. Raises ValueError (one line)."""
+    from .computer import config
+
+    if flag is None:
+        flag = getattr(glide_config, "engine_choice", None)
+    return config.engine(table(glide_config, "computer"), environ, flag)

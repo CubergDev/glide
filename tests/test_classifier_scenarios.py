@@ -19,7 +19,6 @@ from types import SimpleNamespace
 
 import httpx2
 import pytest
-import test_browser_loop as browser_loop
 import test_scenarios
 import world
 from typesafe_sdk import Choice, ChoiceAnswer, Noul, NoulAnswer
@@ -27,9 +26,6 @@ from world import FakeWriter, Page, World, scripted
 
 from glide.computer import runner
 from glide.computer.actions import Context
-from glide.computer.browser.decide import decide as browser_decide
-from glide.computer.browser.decide import verify_typed as browser_verify
-from glide.computer.browser.perceive import perceive
 from glide.providers.base import ChatResult, ProviderSpec, Usage
 from glide.providers.classifier import ChainedClassifier, LLMClassifier, build_client
 from glide.providers.errors import AllProvidersFailed, ProviderError
@@ -537,118 +533,6 @@ def drive_with(w: World, classifier, *, steps=20, monkeypatch, tmp_path, writer=
         ),
         classifier_factory=lambda: classifier,
     )
-
-
-# ---------------------------------------------------------------------------------------------
-# The browser backend takes any of them as its client
-# ---------------------------------------------------------------------------------------------
-
-
-def llm(inner) -> LLMClassifier:
-    return LLMClassifier(ClientBackedLLM(inner))
-
-
-def test_the_browser_loop_clicks_the_element_the_llm_classifier_chose(tmp_path):
-    page = browser_loop.FakeBrowser(browser_loop.login_page())
-    result, folder = browser_loop.run(page, llm(browser_loop.FakeTypeSafe(("click", "2"))), tmp_path, steps=1)
-
-    assert result.steps[0].action == "click" and result.steps[0].confidence == pytest.approx(0.9)
-    # `clicking` needs the element answer to be a real ChoiceAnswer; otherwise the step reads "click None -> element missing".
-    assert result.steps[0].detail.startswith("click 2") and "missing" not in result.steps[0].detail
-    answers = json.loads((folder.root / "step-01-answers.json").read_text())
-    assert answers["kind"]["type"] == "choice" and answers["satisfied"]["type"] == "noul"  # serialize_answers knows both
-    assert answers["element"]["choice"] == "2" and sum(answers["kind"]["probabilities"].values()) == pytest.approx(1.0)
-
-
-def test_the_browser_loop_verifies_typing_with_a_noul_question_through_the_adapter(tmp_path):
-    writer = browser_loop.FakeWriter({"fill": True, "text": "alice", "reason": "the goal"})
-
-    page = browser_loop.FakeBrowser(browser_loop.login_page(), values={0: "alice"})
-    result, _ = browser_loop.run(
-        page, llm(browser_loop.FakeTypeSafe(("type_text", "0"))), tmp_path / "ok", writer=writer, steps=1
-    )
-    assert page.typed == ["alice"] and "verify 0.95" in result.steps[0].detail
-
-    class Unsure(browser_loop.FakeTypeSafe):
-        def system_one(self, *, state, questions, model=None):
-            if set(questions) == {"ok"}:
-                return SimpleNamespace(answers={"ok": NoulAnswer(noul=0.2)})
-            return super().system_one(state=state, questions=questions, model=model)
-
-    page = browser_loop.FakeBrowser(browser_loop.login_page(), values={0: "alice"})
-    result, _ = browser_loop.run(page, llm(Unsure(("type_text", "0"))), tmp_path / "doubt", writer=writer, steps=1)
-    assert "verify 0.20, cleared" in result.steps[0].detail
-
-
-def test_the_browser_loop_ends_on_a_satisfied_noul_from_the_adapter(tmp_path):
-    class Satisfied(browser_loop.FakeTypeSafe):
-        def system_one(self, *, state, questions, model=None):
-            reply = super().system_one(state=state, questions=questions, model=model)
-            if "satisfied" in reply.answers:
-                reply.answers["satisfied"] = NoulAnswer(noul=0.9)
-            return reply
-
-    page = browser_loop.FakeBrowser(browser_loop.listing_page())
-    result, _ = browser_loop.run(page, llm(Satisfied(("wait", None))), tmp_path, steps=3)
-    assert result.outcome == "done" and len(result.steps) == 1
-
-
-def test_the_browser_decision_is_the_same_through_the_adapter_and_through_typesafe_directly():
-    page = perceive(browser_loop.FakeBrowser(browser_loop.login_page()))
-    direct = browser_decide(browser_loop.FakeTypeSafe(("click", "2")), "sign in", page, [])
-    adapted = browser_decide(llm(browser_loop.FakeTypeSafe(("click", "2"))), "sign in", page, [])
-
-    assert (adapted.kind.choice, adapted.element.choice, adapted.satisfied.noul) == (
-        direct.kind.choice,
-        direct.element.choice,
-        0.0,
-    )
-    assert adapted.state == direct.state and adapted.clicking and adapted.chosen_element == 2
-    assert browser_verify(llm(browser_loop.FakeTypeSafe()), "g", "Username", "alice", "alice") == pytest.approx(0.95)
-
-
-def test_the_browser_loop_through_a_chain_of_the_llm_and_typesafe(tmp_path):
-    """The first slot's model is useless (it answers nothing the schema allows), so the TypeSafe slot answers."""
-
-    class Useless:
-        name, model = "policy", MODEL
-
-        def chat(self, messages, **kw):
-            return ChatResult("no", Usage(), f"policy:{MODEL}", MODEL, 0.0)
-
-    inner = browser_loop.FakeTypeSafe(("click", "2"))
-    typesafe = build_client(SPEC, "jev-latest", KEY, transport=browser_server(inner))
-    classifier = ChainedClassifier.from_clients([LLMClassifier(Useless(), name="llm:useless"), typesafe])
-
-    page = browser_loop.FakeBrowser(browser_loop.login_page())
-    with classifier:
-        result, _ = browser_loop.run(page, classifier, tmp_path, steps=1)
-
-    assert result.steps[0].action == "click" and classifier.last_slot == "jev:jev-latest"
-    assert [(e.from_slot, e.kind) for e in classifier.chain.events] == [("llm:useless", "content")]
-
-
-def browser_server(inner) -> httpx2.MockTransport:
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        body = json.loads(request.content)
-        asked = {
-            name: Noul(instructions=q.get("instructions"), criteria=q.get("criteria"))
-            if q["type"] == "noul"
-            else Choice(instructions=q.get("instructions"), criteria=q["criteria"])
-            for name, q in body["questions"].items()
-        }
-        answers = inner.system_one(state=body["state"], questions=asked, model=body.get("model")).answers
-        wire = {
-            name: {"type": "noul", "noul": a.noul}
-            if isinstance(a, NoulAnswer)
-            else {"type": "choice", "choice": a.choice, "confidence": a.confidence, "probabilities": dict(a.probabilities)}
-            for name, a in answers.items()
-        }
-        return httpx2.Response(
-            200, json={"model": "jev-latest", "usage": {"input_tokens": 1, "output_tokens": 1}, "answers": wire}
-        )
-
-    return httpx2.MockTransport(handler)
 
 
 def test_an_all_providers_failed_error_is_a_provider_error_the_runner_catches():

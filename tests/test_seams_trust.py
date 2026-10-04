@@ -154,7 +154,9 @@ def test_the_doctor_says_memory_is_not_read_by_the_assistant_while_that_is_true(
     import glide.assistant as assistant_package
 
     for path in Path(assistant_package.__file__).parent.glob("*.py"):
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8").replace(
+            "from ..memory.settings import", ""
+        )  # the shared glide.toml table reader, not the store
         assert "glide.memory" not in text and "from ..memory" not in text, f"{path.name} reads memory: update the doctor line"
     config = load_config(None, {"HOME": str(tmp_path)}, cwd=tmp_path, home=tmp_path)
     line = dict((n, line) for n, _, line in feature_report(config, {"GLIDE_MEMORY": "1", "GLIDE_DATA_DIR": str(tmp_path)}))[

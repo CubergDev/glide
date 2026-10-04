@@ -85,6 +85,7 @@ the bullets from `glide/speech/` to `glide/ui/` and `app/`, and the last (`docs/
   vocabulary, `base.py` the shapes every adapter speaks. LLM, speech-to-text, text-to-speech and the
   classifier each have a module here. `glide doctor` measures what a key can actually reach.
 - `glide/assistant/`: turns input (text or speech) into an answer or a computer task, and speaks the result.
+- `glide/routing/`: the one router (`docs/ROUTER.md`): stop phrase, classifier, fast model; a failed or unsure router answers, it never acts. `stop.py` is the one stop list.
 - `glide/speech/`: hands-free voice (turn detection, a full-duplex device, the voice loop). Optional: `speech` extra.
 - `glide/memory/`: opt-in memory, context planning and a bounded tool harness. Off by default.
 - `glide/mcp/`: Glide as an MCP server and client. Optional: `mcp` extra.

@@ -107,6 +107,24 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 # barge_min_erle_db = 6.0     # no interruption by voice until the canceller removes at least this much echo
 # stop_phrases = ["hold on please"]   # whole-utterance phrases that stop Glide, besides the built-in ones
 
+# Routing (glide/routing): who owns a request (answer, reason, execute, research, clarify, stop). See docs/ROUTER.md.
+# Every number is a default, not a claim about a model; measure yours. Doubt about acting never acts: it answers.
+#
+# [routing]
+# min_confidence = 0.6        # answer, reason, clarify need at least this, after calibration
+# act_min_confidence = 0.8    # execute and research drive the machine, so they need more
+# act_min_margin = 0.2        # ...and the classifier must put this much more on them than on the runner-up
+# stop_min_confidence = 0.9   # a stop the MODEL heard (the phrase list is exact)
+# escalate_to_reason = true   # sure it is not an action, unsure how deep: the frontier model, not a guess
+# history_turns = 4           # earlier exchanges the router may read (0-12)
+# history_chars = 300         # of each turn
+# memory_hints = false        # use hints the front end passes from memory (it passes none unless memory is on)
+# speculative_fast = false    # ask the fast model beside the classifier: one extra call, less waiting
+# confirm_acting = false      # two keys to act: the fast model must read an execute/research request the same way
+# fast_timeout_s = 15.0       # the fast model's JSON call
+# max_clarifications = 1      # questions put to the user for one request (glide chat only; other front ends do not ask)
+# calibration_file = ""       # a reliability table from a live run on YOUR providers (docs/ROUTER.md section 6)
+
 # Personalization and memory (`glide memory`). Off unless you turn it on, and it saves what you typed or said, so
 # it stays on this machine, in files only you can read. GLIDE_MEMORY=1 or 0 in the environment overrides `enabled`.
 # Today only `glide memory` and `glide mcp serve` read it: chat, ask and voice do not save or use memory yet.
@@ -182,3 +200,14 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 
 # [research]
 # calls = 12
+
+# ---------------------------------------------------------------------------------------------------------------
+# Execution engine for computer tasks, from `glide ask`, `chat`, `listen`, `voice`, `computer`, the app and the pet.
+#   engine  "legacy" (the default: the screen loop) or "structured" (planned effects checked after each action,
+#           with the research route and the [browser] providers). The structured engine is not live-qualified yet,
+#           so it stays opt-in until you have run docs/LIVE_CHECKS.md. GLIDE_ENGINE overrides this and --engine
+#           overrides both.
+# ---------------------------------------------------------------------------------------------------------------
+
+# [computer]
+# engine = "legacy"

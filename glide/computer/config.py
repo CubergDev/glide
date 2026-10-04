@@ -18,6 +18,9 @@ DEFAULT_HANDOFFS = 10  # each one is a call to the answer model, a few seconds a
 DEFAULT_RESEARCH_CALLS = 24  # model calls one research task may use, each a few seconds and a few cents
 MAX_RESEARCH_CALLS = 32  # the most any setting may allow
 DEFAULT_BROWSER = "Google Chrome"
+ENGINES = ("legacy", "structured")
+DEFAULT_ENGINE = "legacy"  # the structured engine is not live-qualified yet; flipping this is the user's call after live checks
+ENGINE_ENV = "GLIDE_ENGINE"
 
 # Sites the classifier can pick by name. Anything else goes through the writer.
 SITES: dict[str, str] = {
@@ -88,3 +91,17 @@ def research_budget(table: Mapping[str, Any] | None = None, env: Mapping[str, st
             f"The research budget ([research] calls or GLIDE_RESEARCH_CALLS) must be a whole number from 1 to {MAX_RESEARCH_CALLS}"
         )
     return calls
+
+
+def engine(table: Mapping[str, Any] | None = None, env: Mapping[str, str] | None = None, flag: str | None = None) -> str:
+    """The execution engine: `flag` (--engine, or the app's or pet's setting) over GLIDE_ENGINE over `engine` in the
+    `[computer]` table over the default. The one resolver every front end uses. A ValueError names the setting, one line."""
+    env = os.environ if env is None else env
+    table = {} if table is None else table
+    for key in table:
+        if key != "engine":
+            raise ValueError(f"[computer] has an unknown key {key!r} (known: engine)")
+    chosen = flag if flag is not None else env.get(ENGINE_ENV, "").strip() or table.get("engine", DEFAULT_ENGINE)
+    if chosen not in ENGINES:
+        raise ValueError(f"The engine (--engine, {ENGINE_ENV} or [computer] engine) must be one of: {', '.join(ENGINES)}")
+    return chosen

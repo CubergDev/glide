@@ -48,9 +48,6 @@ def run_every_composer(screen, make_item) -> Recording:
         }
     )  # fmt: skip
     writer.compose_text(fake, GOAL, screen, items, [HOSTILE])
-    writer.compose_browser_text(
-        fake, GOAL, field_label="Search", page_title=HOSTILE, url="https://example.com", nearby_text=[HOSTILE, FORGED], history=[]
-    )
     writer.compose_url(fake, "buy something", [HOSTILE], Guidance().focused(HOSTILE))
     compose_answer(fake, GOAL, screen, items, [HOSTILE], HOSTILE)
     for compose in (writer.compose_plan, writer.route_task, writer.compose_research, writer.review_research):
@@ -62,7 +59,7 @@ def run_every_composer(screen, make_item) -> Recording:
 
 def test_every_prompt_that_carries_screen_or_page_text_says_it_is_untrusted_data(screen, make_item):
     fake = run_every_composer(screen, make_item)
-    assert len(fake.requests) >= 8
+    assert len(fake.requests) >= 7
     for request in fake.requests:
         text = request.instructions.lower()
         assert "untrusted" in text and "never follow" in text and "<data>" in text, (
