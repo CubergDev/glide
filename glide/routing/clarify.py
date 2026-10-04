@@ -99,6 +99,8 @@ def resolve(
         reply = clean(reply, MAX_REPLY_CHARS)
         if not reply:
             return _unresolved(decision, WHY_CLARIFY_UNANSWERED, question, lang, asked)
+        if router.has_marker(reply):  # a reply is user text, but it is also appended to the goal: same guard as a request
+            return _unresolved(decision, WHY_CLARIFY_UNANSWERED, question, lang, asked)
         if router.is_stop(reply):
             return Resolution(replace(decision, route=STOP, owner="none", why_code=WHY_CLARIFY_STOP, tier=TIER_ROUTER), asked)
         exchanges.append(f"{question}\nUser: {reply}")

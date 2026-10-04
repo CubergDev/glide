@@ -73,7 +73,7 @@ from .decision import (
     Span,
     clean,
 )
-from .features import Features, features
+from .features import Features, features, has_injection_marker
 from .settings import RoutingSettings
 from .stop import is_stop
 from .stop import stop_phrases as stop_phrases_of
@@ -187,7 +187,7 @@ class Router:
                     elif speculative is not None and tier == TIER_CLASSIFIER:
                         speculative[1].cancel("the classifier was sure")
                     return done(decision)
-                return done(self._fallback(results))
+                return done(self._fallback(results, text))
             except (Abort, _Cancelled):
                 return done(self._plain(ANSWER, WHY_CANCELLED, TIER_ROUTER, 0.0))
 
@@ -207,6 +207,10 @@ class Router:
             return False
         confidence, _ = self.calibration.apply(second.tier, second.route, second.raw)
         return second.route == result.route and confidence >= self.settings.min_confidence
+
+    def has_marker(self, text: str) -> bool:
+        """Whether `text` carries an override attempt (the built-in markers and the configured extras)."""
+        return has_injection_marker(text, self._markers)
 
     def is_stop(self, text: str) -> bool:
         """Whether `text` is, whole, a built-in or configured stop phrase."""
@@ -275,7 +279,7 @@ class Router:
             provider=result.provider,
         )
 
-    def _fallback(self, results: list[TierResult]) -> Decision:
+    def _fallback(self, results: list[TierResult], text: str) -> Decision:
         if not results:
             return self._plain(ANSWER, WHY_TIERS_FAILED, TIER_ROUTER, 0.0)
         if self.settings.escalate_to_reason:
@@ -288,7 +292,7 @@ class Router:
                     mass,
                     WHY_ESCALATED,
                     best.tier,
-                    goal=best.goal,
+                    goal=best.goal or text,
                     language=best.language,
                     provider=best.provider,
                 )

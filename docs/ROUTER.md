@@ -111,7 +111,7 @@ then to the raw number (reported as `calibrated=False`) when a bin has fewer tha
 number is used and a classifier that says 0.9 about everything is taken at its word, so **until a live table exists, turn on
 `confirm_acting`**.
 
-**Offline set**: `tests/routing/cases.jsonl` (186 labelled utterances: stop 24, small talk 15, factual 15, computer 32,
+**Offline set**: `tests/routing/cases.jsonl` (191 labelled utterances: stop 24, small talk 15, factual 15, computer 37,
 research 18, reasoning 17, ambiguous 20, overconfident 4, hostile 32, context 9; English 123, Cantonese 32, Mandarin 22,
 mixed 9). 38 are seeded from the prototype corpus (`consolidation-inputs/extension-local-prototype/evals/corpus/{decide,llm,
 workflows}`, read-only, unverified): only the user goal text was taken, each is marked `relabelled` and carries its source id
@@ -119,9 +119,9 @@ workflows}`, read-only, unverified): only the user goal text was taken, each is 
 through the real router over two fakes with simple documented behaviour (cue counting; `eval.py` docstring), in two configs:
 `default` and `careful` (`confirm_acting` plus a table cross-fitted on the other folds).
 
-Result of `python tests/routing/eval.py` at the time of writing: default accuracy 0.962, careful 0.984; false actions 0 on
+Result of `python tests/routing/eval.py` at the time of writing: default accuracy 0.958, careful 0.979; false actions 0 on
 hostile and ambiguous in both; the `overconfident` group (a classifier scripted to be sure and wrong) acts 4 of 4 by default and
-0 of 4 with two keys; calibration error 0.153 -> 0.083 (classifier) and 0.104 -> 0.050 (fast) after the cross-fitted table. With
+0 of 4 with two keys; calibration error 0.148 -> 0.073 (classifier) and 0.102 -> 0.046 (fast) after the cross-fitted table. With
 models that OBEY everything, the structure alone (sources, strict JSON, the override guard, failures) still never acts on 25+ cases.
 `tests/routing/test_routing_eval.py` asserts these bars and that the eval can fail (guard removed, thresholds removed).
 
@@ -136,7 +136,7 @@ if it is stale): it must never be pointed at by `calibration_file`. Real-model r
    calibration_file`; re-run after any provider or model change. Add your own utterances to `cases.jsonl` (no `fake` key).
 
 `--live` was written without being run (no network, no keys, and it must not be run by an agent): treat it as unverified.
-Other limits: the override-marker set is narrow and multilingual only for Cantonese/Mandarin phrasings written here; a user who
+Other limits: the override-marker set is narrow (it needs override framing, so "turn on developer mode" is a task, with hard negatives in the set) and covers only Cantonese/Mandarin phrasings written here; a user who
 really says an override sentence gets an answer, not an action; the quoted-passage feature is passed to models but no rule
 reads it; `LLM.chat(schema=...)` in `providers/llm.py` already trims a fence or sentence off a reply, so the strict parse here
 is a second line, not the first (providers-owned: have `chat(schema=)` return the raw reply or reject non-JSON-only text, or
@@ -146,7 +146,9 @@ streamed answer to start later by one classifier call unless `speculative_fast` 
 
 ## 7. Integration plan (line numbers are against `06-barge-in` d1a61be; check them)
 
-Files owned by other agents are marked (owner). Do it in this order; each step is one commit and keeps the suite green.
+Files owned by other agents are marked (owner). Each step is one commit and keeps the suite green. **Parallel-safe order:** steps 1
+(providers), 2 (cli and speech imports) and 3 (engine, runner, tasks) touch disjoint files and can be done at the same time by
+different owners; step 4 (core) needs step 3's `route` field; steps 5 and 6 follow step 4; step 7 is independent.
 
 1. **Config** (providers): the two lines in section 5; add `routing` to `glide doctor`'s table of roles if wanted.
 2. **Stop copies** (the stop matcher already lives in `glide/routing/stop.py`; there is no second list in this tree):
@@ -169,14 +171,18 @@ Files owned by other agents are marked (owner). Do it in this order; each step i
      `cli.format_switch`, `cli` imports the assistant); warn once about the tiers `build_router` returns as missing;
    - line 193: `fast_path(text, self._stops) is not None` -> `is_stop(text, self._stops)`; lines 300 and 330 already call `is_stop`;
    - `_respond` (221-236): replace `llm = self._config.llm("fast")` and `Router(llm...).route(text, self._messages())` with
-     `decision = router.resolve...`: `resolve(router, Span(text), Context.from_messages(self._messages(), running_task=<current task goal or "">, language=hint_language), clarifier)`
-     where `clarifier` is the `Clarifier` below when `self._clarify` else `None`; `decision.cancelled` -> return `Reply("none")`
-     (replaces the `turn.cancelled` check); the `route.source == "fallback"` warning is now `on_event`; `route == "stop"` -> `decision.route == "stop"`;
+     `resolution = resolve(router, Span(text), Context.from_messages(self._messages(), running_task=<current task goal or "">, language=hint_language), clarifier)`
+     and `decision = resolution.decision`, where `clarifier` is the `Clarifier` below when `self._clarify` else `None`;
+     `resolution.decision.cancelled` -> return `Reply("none")` (alongside the existing `turn.cancelled` check); the `route.source == "fallback"` warning is now `on_event`; `route == "stop"` -> `decision.route == "stop"`;
    - dispatch on `decision.route`: `stop` -> `self.stop()`; `answer` -> `_answer` unchanged (use `decision.reply`, `decision.language`);
      `reason` -> `_answer` but stream from `self._config.llm("smart")` (the frontier, one response, no browser; the `ANSWER_PROMPT` plus
      "give a complete answer" is enough) and `reply.route = "answer"`; `execute` and `research` -> `_computer(...)` with
      `goal = decision.goal or text` and `route=decision.route` passed to `self._tasks.start(...)`; `reply.route = "computer"`;
      `clarify` -> if `Resolution.unresolved`, `self._emit(turn, resolution.said, ...)` and `reply.route = "clarify"`, no task;
+   - after a downgrade (`why_code` in `injection_marker`, `unconfirmed_action`, `uncertain_answer`, `tiers_failed`) the answer must not
+     claim to have done anything: pass the answer prompt one line ("Nothing was done on the computer for this request; do not say you
+     did it. If the user asked for an action, say you did not do it and what is needed"), or speak a fixed phrase. An attempted action is
+     not a verified effect (AGENTS.md); a model that sees only "open my bank" will say "opening it now".
    - the `Clarifier` (new, in core.py): `ask(question)` shows and says the question (`_ask_user`), then waits on a `threading.Event`
      that `answer_pending(text)` sets (check this router-level wait before the task's, line `answer_pending`), and returns `None` on
      a stop, a new request (`_begin`, which already drops a pending task question: drop this one too) or a timeout; `pending_question`

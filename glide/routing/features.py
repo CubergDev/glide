@@ -31,8 +31,8 @@ _LATIN_MARKERS = tuple(
     for p in (
         r"\b(ignore|disregard|forget|override|bypass|discard)\b.{0,40}\b(instructions?|rules|prompts?|guidelines|directions|restrictions)\b",
         r"\b(previous|prior|above|earlier) (instructions?|prompts?|messages?)\b.{0,30}\b(ignore|void|obsolete|irrelevant)\b",
-        r"\b(system|developer) (prompt|message|override|mode)\b",
-        r"\bnew (instructions?|rules|system prompt)\b",
+        r"\bsystem prompt\b",
+        r"\b(system|developer) override\b",
         r"\byou are now\b",
         r"\bjailbreak\b",
         r"\b(do not|dont) (tell|inform|alert) the user\b",
@@ -45,10 +45,15 @@ _CJK_MARKERS = tuple(
         r"(忽略|無視|无视|忘記|忘记|不要理會|不要理会|唔好理)[^，。]{0,12}(指令|指示|提示|規則|规则|說明|说明|設定|设定)",
         r"(忽略|無視|无视|忘記|忘记)[^，。]{0,20}(instructions?|rules|prompts?|guidelines)",
         r"(ignore|disregard|forget|bypass)[^，。]{0,12}(指令|指示|提示|規則|规则)",
-        r"(系統|系统)(提示|指令|訊息|消息)",
+        r"(系統|系统)(提示詞|提示词|指令)",
         r"(以上|之前|先前|上面)[^，。]{0,6}(指令|指示|提示)[^，。]{0,6}(無效|无效|作廢|作废|唔算數)",
         r"(你現在是|你现在是|你而家係)[^，。]{0,8}(管理員|管理员|開發者|开发者|越獄|越狱)",
     )
+)
+# Override framing in the raw text, where the colon still exists: a line that opens with a fake instruction or role tag.
+_RAW_MARKERS = (
+    re.compile(r"(^|[.!?\n]\s*)(new|updated|additional) (instructions?|rules)\s*:"),
+    re.compile(r"(^|\n)\s*(system|assistant)\s*:"),
 )
 _QUOTE = re.compile(r"[\"“”「」『』`]{1}[^\"“”「」『』`]{40,}[\"“”「」『』`]{1}")
 
@@ -100,6 +105,8 @@ def has_injection_marker(text: str, extra: Iterable[str] = ()) -> bool:
         return True
     compact = "".join(norm.split())
     folded = text.casefold()
+    if any(p.search(folded) for p in _RAW_MARKERS):
+        return True
     if any(p.search(folded) or p.search(compact) for p in _CJK_MARKERS):
         return True
     extra_norm = [e for e in map(normalize, extra) if e]
