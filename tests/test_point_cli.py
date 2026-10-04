@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import _thread
+import signal
 import threading
 from types import SimpleNamespace
 
@@ -160,10 +160,16 @@ def test_a_voice_session_binds_the_pin_to_the_assistant_answers_a_spoken_questio
 
         def start():
             loop.calls.append("start")
-            loop.assistant._handle("what is this", False, False, None, 0)  # what VoiceLoop does with a heard turn
-            # Nobody presses Ctrl-C in a test: once the answer is in the history, interrupt the main thread.
+            loop.assistant.handle_text("what is this", wait=False)  # what VoiceLoop does with a heard turn
+            # Nobody presses Ctrl-C in a test: once the answer is in the history, signal the main thread. It is a real
+            # signal to that thread (`interrupt_main` only sets a flag, which a main thread already blocked in
+            # `finished.wait()` never sees), so the test cannot hang when the machine is slow.
             threading.Thread(
-                target=lambda: wait_until(lambda: loop.assistant._session.history) and _thread.interrupt_main(), daemon=True
+                target=lambda: (
+                    wait_until(lambda: loop.assistant._session.history, 30),
+                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT),
+                ),
+                daemon=True,
             ).start()
 
         loop.start = start
@@ -198,7 +204,7 @@ def test_a_pin_that_expires_ends_a_voice_session_with_exit_two(capsys):
 
         def start():
             clock.advance(121)  # the person waited two minutes before speaking
-            loop.assistant._handle("what is this", False, False, None, 0)
+            loop.assistant.handle_text("what is this", wait=False)
 
         loop.start = start
         return loop
