@@ -40,6 +40,11 @@ def main(argv=None) -> int:
         action="store_true",
         help="let the core keep what is said, typed and read for debugging (off by default; the pet shows an indicator)",
     )
+    parser.add_argument(
+        "--engine",
+        metavar="ENGINE",
+        help="execution engine for computer tasks: legacy or structured (default: GLIDE_ENGINE, [computer] engine, then legacy)",
+    )
     args = parser.parse_args(argv)
     if args.silence_ms is not None and not MIN_SILENCE_MS <= args.silence_ms <= MAX_SILENCE_MS:
         parser.error(f"--silence-ms must be between {MIN_SILENCE_MS} and {MAX_SILENCE_MS}")
@@ -59,6 +64,11 @@ def main(argv=None) -> int:
     core = PetCore(config, runs_dir=workspace / "runs", record_content=args.record_content)
     if args.silence_ms is not None:
         core.silence_ms = args.silence_ms
+    if args.engine is not None:
+        try:
+            core.engine = args.engine
+        except ValueError as error:
+            parser.error(str(error))
     try:
         return open_window(core, config)
     except ImportError:
