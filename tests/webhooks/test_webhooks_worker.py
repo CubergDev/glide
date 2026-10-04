@@ -531,9 +531,26 @@ def test_report_failure_does_not_echo_provider_text_to_status():
     ],
 )
 def test_desktop_outcome_only_completes_on_a_verified_success(outcome, achieved, failure, stopped, expected):
-    result = SimpleNamespace(outcome=outcome, achieved=achieved, failure=failure, stopped=stopped, answer="text")
+    result = SimpleNamespace(outcome=outcome, achieved=achieved, failure=failure, stopped=stopped, answer="text", uncertain=False)
     mapped = worker.desktop_outcome(result)
     assert mapped["outcome"] == expected and mapped["note"] == f"Desktop run ended: {outcome}."
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"stopped": True, "outcome": "aborted (user)"},  # stopped while a write was in flight
+        {"outcome": "stalled"},
+        {"outcome": "done", "achieved": True},  # even a claimed success whose last write was never observed
+    ],
+)
+def test_a_write_whose_effect_was_never_observed_is_reported_uncertain(fields):
+    """PR7-4175624958: TaskResult.uncertain must reach the queue, or the agent unblocks after a possible write."""
+    from glide.assistant.tasks import TaskResult
+
+    result = TaskResult(goal="g", act=True, uncertain=True, **{"outcome": "done", **fields})
+    assert worker.desktop_outcome(result)["outcome"] == "uncertain"
+    assert worker.desktop_outcome(TaskResult(goal="g", act=True, outcome="stalled"))["outcome"] == "blocked"
 
 
 def test_terminal_approver_needs_an_explicit_yes_on_a_terminal():
@@ -721,7 +738,7 @@ def test_a_handler_is_used_only_for_its_own_operation():
 
 def test_desktop_outcome_summary_prefers_the_failure_then_the_answer_then_the_outcome():
     def mapped(**kw):
-        base = dict(outcome="done", achieved=True, failure=None, stopped=False, answer=None)
+        base = dict(outcome="done", achieved=True, failure=None, stopped=False, answer=None, uncertain=False)
         return worker.desktop_outcome(SimpleNamespace(**{**base, **kw}))
 
     assert mapped(failure="why", answer="what")["summary"] == "why"
@@ -875,7 +892,9 @@ class FakeTask:
     def __init__(self, *, finish_after=1, wait_raises=None, result=None):
         self.started, self.stopped, self.waits, self.finish_after = False, 0, 0, finish_after
         self.wait_raises, self.finished = wait_raises, threading.Event()
-        self.result = result or SimpleNamespace(outcome="done", achieved=True, failure=None, stopped=False, answer="ok")
+        self.result = result or SimpleNamespace(
+            outcome="done", achieved=True, failure=None, stopped=False, answer="ok", uncertain=False
+        )
 
     def start(self):
         self.started = True
@@ -1008,7 +1027,9 @@ def test_a_refused_completion_is_not_retried(status):
 
 
 def test_a_look_only_run_that_did_nothing_is_never_reported_as_done():
-    result = worker.desktop_outcome(SimpleNamespace(outcome="dry run", achieved=None, failure=None, stopped=False, answer=None))
+    result = worker.desktop_outcome(
+        SimpleNamespace(outcome="dry run", achieved=None, failure=None, stopped=False, answer=None, uncertain=False)
+    )
     assert result["outcome"] == "blocked" and result["note"] == "Desktop run ended: dry run."
 
 
