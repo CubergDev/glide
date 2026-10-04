@@ -178,7 +178,8 @@ class Assistant:
         self._responder = responder
         self._on_stop = on_stop
         self._close_wait_s = close_wait_s
-        self._stops = stop_phrases(extra_stop_phrases)
+        configured = getattr(getattr(config, "voice", None), "stop_phrases", ())  # [speech] stop_phrases, for every front end
+        self._stops = stop_phrases((*extra_stop_phrases, *configured))
         self.io = io or IO()
         self._clock = clock
         self._tasks = TaskRunner(config, runs_dir)
