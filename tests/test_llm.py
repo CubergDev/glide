@@ -6,6 +6,8 @@ that the test starts itself, to check what a mock cannot: connection reuse, chun
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import json
 import logging
 import socket
@@ -1508,12 +1510,34 @@ def test_a_role_only_first_delta_does_not_commit_the_chain_to_a_provider_that_th
     assert list(llm.stream(MSG)) == ["ok"] and llm.chain.events[0].from_slot == "a"
 
 
-def test_dropping_a_facade_stream_early_closes_the_connection():
+def _two_token_stream(held: list | None = None):
+    """A facade stream over two tokens. Generators handed to `held` stay referenced, so only an explicit close ends them."""
     body = Pieces([event(delta("one")), event(delta("two")), b"data: [DONE]\n\n"])
     a, _ = make(lambda: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body), name="a")
-    stream = llm_of(a).stream(MSG)
+    if held is not None:
+        original = a.stream
+        a.stream = lambda *args, **kwargs: held.append(original(*args, **kwargs)) or held[-1]
+    return body, llm_of(a).stream(MSG)
+
+
+def test_dropping_a_facade_stream_early_closes_the_connection():
+    """The explicit path: whoever stops reading closes the stream, and the chain closes the client's own stream with it,
+    though something else still holds that one, so the connection is not left to a collector."""
+    held: list = []
+    body, stream = _two_token_stream(held)
+    with contextlib.closing(stream):
+        assert next(stream) == "one"
+        assert not body.closed  # still open while it is being read
+    assert body.closed
+
+
+def test_a_collected_facade_stream_closes_the_connection():
+    """The best-effort path, for a caller that forgets to close: collection closes the generator. The collection is
+    forced here, so the test does not depend on when an interpreter happens to run it."""
+    body, stream = _two_token_stream()
     assert next(stream) == "one"
-    stream.close()
+    del stream
+    gc.collect()
     assert body.closed
 
 
