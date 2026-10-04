@@ -32,7 +32,7 @@ from PIL import Image, ImageGrab
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
 from .models import AxNode, DesktopError, Field, Missed
-from .platform_adapter import abort_hint, abort_if_stopped, sleep_watching  # noqa: F401  (the shared escape hatch)
+from .platform_adapter import abort_hint, abort_if_stopped, dispatched, sleep_watching  # noqa: F401  (the shared escape hatch)
 
 with suppress(AttributeError, OSError):  # pre-8.1 Windows without shcore, or awareness set by the host process
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
@@ -258,6 +258,7 @@ def _move(point: tuple[int, int]) -> None:
     time.sleep(EVENT_GAP)
 
 
+@dispatched
 def click_at(point: tuple[float, float]) -> None:
     """Move, read back where the cursor landed, then press and release there.
 
@@ -277,6 +278,7 @@ def click_at(point: tuple[float, float]) -> None:
         _send(_mouse(MOUSEEVENTF_LEFTUP))
 
 
+@dispatched
 def press(key: str, command: bool = False) -> None:
     check_abort()
     held = []
@@ -294,6 +296,7 @@ def press(key: str, command: bool = False) -> None:
             _send(_key(vk=vk, flags=flags | KEYEVENTF_KEYUP))
 
 
+@dispatched
 def type_text(text: str) -> None:
     for unit, flags in unicode_events(text):
         if flags & KEYEVENTF_KEYUP:
@@ -305,11 +308,13 @@ def type_text(text: str) -> None:
             _send(_key(scan=unit, flags=flags | KEYEVENTF_KEYUP))
 
 
+@dispatched
 def clear_field() -> None:
     press("a", command=True)
     press("delete")
 
 
+@dispatched
 def scroll(lines: int) -> None:
     """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
     check_abort()
@@ -363,6 +368,7 @@ def _find_window(app: str) -> int | None:
     return found[0] if found else None
 
 
+@dispatched
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
     check_abort()
@@ -383,6 +389,7 @@ def activate(app: str, timeout: float = 3.0) -> bool:
     return win32gui.GetForegroundWindow() == hwnd
 
 
+@dispatched
 def open_url(browser: str, url: str) -> bool:
     from .execution.contracts import safe_url
 
@@ -527,6 +534,7 @@ def focused_field() -> Field | None:
 # be dead, the app may refuse, and the bridge raises on both. False means "use synthetic input".
 
 
+@dispatched
 def ax_press(ref) -> bool:
     """Invoke an element, or run its named legacy default action: the same rule as `pressable`."""
     check_abort()
@@ -543,6 +551,7 @@ def ax_press(ref) -> bool:
     return False
 
 
+@dispatched
 def ax_focus(ref) -> bool:
     """Give an element the keyboard focus."""
     check_abort()
@@ -552,6 +561,7 @@ def ax_focus(ref) -> bool:
         return False
 
 
+@dispatched
 def ax_set_value(ref, text: str) -> bool:
     """Write an element's value. A read-only or unwilling element reports an error."""
     check_abort()
@@ -619,10 +629,12 @@ def execution_tabs(browser: str) -> dict:
     return {"tabs": {}, "active": "", "unsupported": True}
 
 
+@dispatched
 def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
     raise DesktopError("Stable browser tab operations on Windows require an explicitly configured CDP connection")
 
 
+@dispatched
 def execution_shortcut(key: str, modifiers: tuple[str, ...]) -> None:
     from .execution.contracts import MODIFIERS
 
@@ -693,6 +705,7 @@ def execution_labels(pid: int) -> list[dict]:
     return result
 
 
+@dispatched
 def execution_scroll(ref, direction: str) -> None:
     check_abort()
     if direction not in {"up", "down"}:

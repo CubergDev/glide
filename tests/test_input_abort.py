@@ -6,6 +6,14 @@ import pytest
 
 from glide.computer import actions, macos
 from glide.computer.models import Abort
+from glide.computer.platform_adapter import dispatching
+
+
+@pytest.fixture(autouse=True)
+def dispatched():
+    """The adapter only drives the machine from inside `control.dispatch`; these tests stand where it runs it."""
+    with dispatching():
+        yield
 
 
 @pytest.fixture

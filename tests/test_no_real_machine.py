@@ -11,6 +11,7 @@ import pytest
 from glide.computer import macos, windows
 from glide.computer.browser import cdp
 from glide.computer.browser.cdp import Chrome, Session
+from glide.computer.platform_adapter import dispatching
 
 
 @pytest.mark.parametrize(
@@ -26,8 +27,9 @@ from glide.computer.browser.cdp import Chrome, Session
     ],
 )
 def test_an_unpatched_call_refuses_instead_of_reaching_the_machine(touch):
-    # Off macOS the stand-in Quartz refuses first, before the guard is reached.
-    with pytest.raises(RuntimeError, match=r"real machine|unavailable on this OS"):
+    # Off macOS the stand-in Quartz refuses first, before the guard is reached. Inside a dispatch, as the
+    # adapter requires: outside one it would refuse for another reason, and prove nothing about the guard.
+    with dispatching(), pytest.raises(RuntimeError, match=r"real machine|unavailable on this OS"):
         touch()
 
 
@@ -54,8 +56,8 @@ def test_the_pointer_reads_as_mid_screen_so_no_test_aborts_by_chance():
     ],
 )
 def test_an_unpatched_windows_call_refuses_instead_of_reaching_the_machine(touch):
-    # Off Windows a stand-in module may refuse first, before the guard is reached.
-    with pytest.raises(RuntimeError, match=r"real machine|unavailable on this OS"):
+    # Off Windows a stand-in module may refuse first, before the guard is reached. Inside a dispatch (see above).
+    with dispatching(), pytest.raises(RuntimeError, match=r"real machine|unavailable on this OS"):
         touch()
 
 

@@ -7,6 +7,7 @@ so the real ones are captured at import time, before any guard runs, and each te
 below the one it exercises.
 """
 
+import contextvars
 import json
 import socket
 import subprocess
@@ -19,9 +20,9 @@ import pytest
 
 from glide.computer import macos, platform_adapter, windows
 from glide.computer.browser import cdp
-from glide.computer.control import RunControl, controlled
+from glide.computer.control import RunControl, controlled, dispatch
 from glide.computer.models import Abort, DesktopError
-from glide.computer.platform_adapter import using
+from glide.computer.platform_adapter import Desktop, NotDispatched, dispatched, dispatching, using
 
 # The real functions, read at collection, before the guard replaces them for each test.
 REAL_OSASCRIPT = macos.osascript
@@ -34,6 +35,14 @@ REAL_GET_JSON = cdp._get_json
 REAL_CREATE_CONNECTION = cdp.websocket.create_connection
 
 ADAPTERS = pytest.mark.parametrize("adapter", [macos, windows], ids=["macos", "windows"])
+
+
+@pytest.fixture(autouse=True)
+def inside_dispatch():
+    """Every test but the gate's own stands where `control.dispatch` runs the adapter (see the gate tests)."""
+    with dispatching():
+        yield
+
 
 # ------------------------------------------------------------------ the shared escape hatch (finding 12)
 
@@ -408,3 +417,109 @@ def test_an_address_that_is_not_loopback_keeps_the_environment_proxy_rules(monke
     monkeypatch.setattr(cdp.websocket, "create_connection", lambda url, **kw: seen.update(url=url, **kw))
     cdp.Session("ws://example.com:9222/devtools/page/1")
     assert "http_proxy_host" not in seen and "http_no_proxy" not in seen
+
+
+# ------------------------------------------------------------------ input only through dispatch (finding 7b)
+
+# What the adapters expose that neither sends input nor acts on another app. Everything else on the Desktop
+# surface must be gated, so a new primitive has to be classified here before the suite passes.
+OBSERVATION = {
+    "check_abort", "abort_hint", "sleep_watching", "accessibility_trusted", "screen_capture_trusted",
+    "request_permissions", "frontmost_app_and_pid", "browser_url", "open_path", "frontmost_window_bounds",
+    "screenshot", "display_scale", "recognize_text", "focused_field", "actionable_elements", "ax_value",
+    "execution_tabs", "execution_scrolls", "execution_labels",
+}  # fmt: skip
+SURFACE = {name for name, value in vars(Desktop).items() if callable(value) and not name.startswith("_")}
+GATED = sorted(SURFACE - OBSERVATION)
+CALLS = {
+    "click_at": ((1.0, 2.0),),
+    "press": ("a",),
+    "type_text": ("x",),
+    "clear_field": (),
+    "scroll": (1,),
+    "activate": ("Finder",),
+    "open_url": ("Google Chrome", "https://example.com"),
+    "ax_press": (None,),
+    "ax_focus": (None,),
+    "ax_set_value": (None, "x"),
+    "execution_tab": ("Google Chrome", "navigate", "", "https://example.com"),
+    "execution_shortcut": ("a", ()),
+    "execution_scroll": (None, "up"),
+}
+
+
+# Read at collection: by the time a test runs, the guard has put refusals in place of several of these.
+PRIMITIVES = {(adapter, name): getattr(adapter, name) for adapter in (macos, windows) for name in CALLS}
+
+
+def outside_any_dispatch(call):
+    """Run `call` in a fresh context, where nothing has marked a dispatch."""
+    return contextvars.Context().run(call)
+
+
+def test_every_input_primitive_on_the_desktop_surface_is_classified():
+    assert set(GATED) == set(CALLS), "a new Desktop method is either an observation or needs a gate and a call here"
+    assert OBSERVATION <= SURFACE
+
+
+@ADAPTERS
+@pytest.mark.parametrize("name", GATED)
+def test_an_input_primitive_refuses_to_run_outside_a_dispatch(adapter, name):
+    primitive = PRIMITIVES[adapter, name]
+    assert hasattr(primitive, "__wrapped__"), f"{adapter.__name__}.{name} is not gated"
+    with pytest.raises(NotDispatched, match=name):
+        outside_any_dispatch(lambda: primitive(*CALLS[name]))
+
+
+def test_the_gate_error_is_not_one_the_runner_absorbs_as_a_failed_action():
+    assert not issubclass(NotDispatched, (DesktopError, RuntimeError, Abort))
+
+
+def test_a_gated_primitive_runs_inside_the_block_and_the_mark_ends_with_it():
+    @dispatched
+    def probe(value):
+        return value
+
+    def run():
+        with pytest.raises(NotDispatched):
+            probe(1)
+        with dispatching():
+            assert probe(2) == 2
+        with pytest.raises(NotDispatched):
+            probe(3)
+        with pytest.raises(KeyError), dispatching():
+            raise KeyError
+        with pytest.raises(NotDispatched):
+            probe(4)
+
+    outside_any_dispatch(run)
+
+
+def test_the_primitives_that_call_each_other_pass_inside_one_block(monkeypatch):
+    pressed = []
+    monkeypatch.setattr(macos, "_down_then_up", lambda event: pressed.append(event(True)))
+    monkeypatch.setattr(macos, "Quartz", SimpleNamespace(
+        CGEventCreateKeyboardEvent=lambda _, code, down: code,
+        CGEventSetFlags=lambda event, flags: None,
+        kCGEventFlagMaskCommand=1,
+    ))  # fmt: skip
+
+    def run():
+        with dispatching():
+            macos.clear_field()  # presses command-a, then delete
+
+    outside_any_dispatch(run)
+    assert pressed == [0, 51]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="control.dispatch must enter platform_adapter.dispatching(): the patch is in the report. "
+    "Once it is applied this passes, strict xfail turns that into a failure, and the marker goes.",
+)
+def test_control_dispatch_marks_the_dispatch_for_the_adapters():
+    @dispatched
+    def probe():
+        return "reached"
+
+    assert outside_any_dispatch(lambda: dispatch(probe)) == "reached"

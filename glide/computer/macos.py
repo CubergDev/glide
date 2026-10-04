@@ -24,7 +24,7 @@ from PIL import Image
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
 from .models import AxNode, DesktopError, DesktopPermissionError, Field
-from .platform_adapter import abort_hint, abort_if_stopped, sleep_watching  # noqa: F401  (the shared escape hatch)
+from .platform_adapter import abort_hint, abort_if_stopped, dispatched, sleep_watching  # noqa: F401  (the shared escape hatch)
 
 KEYCODES = {"return": 36, "tab": 48, "escape": 53, "a": 0, "delete": 51, "[": 33}
 SHORTCUT_CODES = {
@@ -89,6 +89,7 @@ def _down_then_up(event: Callable[[bool], object]) -> None:
         _post(event(False))
 
 
+@dispatched
 def click_at(point: tuple[float, float]) -> None:
     # Check before moving: the synthetic move would otherwise take the pointer out of the abort corner.
     check_abort()
@@ -98,6 +99,7 @@ def click_at(point: tuple[float, float]) -> None:
     _down_then_up(lambda down: Quartz.CGEventCreateMouseEvent(None, kinds[down], point, Quartz.kCGMouseButtonLeft))
 
 
+@dispatched
 def press(key: str, command: bool = False) -> None:
     check_abort()
     code = KEYCODES[key]
@@ -117,6 +119,7 @@ def _unicode_key(ch: str, down: bool):
     return event
 
 
+@dispatched
 def type_text(text: str) -> None:
     """One character at a time, checking the abort corner before each."""
     for ch in text:
@@ -124,11 +127,13 @@ def type_text(text: str) -> None:
         _down_then_up(partial(_unicode_key, ch))
 
 
+@dispatched
 def clear_field() -> None:
     press("a", command=True)
     press("delete")
 
 
+@dispatched
 def scroll(lines: int) -> None:
     """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
     center = frontmost_window_center()
@@ -227,6 +232,7 @@ def frontmost_pid() -> int:
     return frontmost_app_and_pid()[1]
 
 
+@dispatched
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
     app_name(app)
@@ -244,6 +250,7 @@ def activate(app: str, timeout: float = 3.0) -> bool:
     return frontmost_app() == app
 
 
+@dispatched
 def open_url(browser: str, url: str) -> bool:
     app_name(browser)
     browser_address(url)
@@ -365,6 +372,7 @@ def focused_field() -> Field | None:
 # be dead, the app may refuse, and the bridge raises on both. False means "use synthetic input".
 
 
+@dispatched
 def ax_press(ref) -> bool:
     """Send AXPress to an element."""
     check_abort()
@@ -374,6 +382,7 @@ def ax_press(ref) -> bool:
         return False
 
 
+@dispatched
 def ax_focus(ref) -> bool:
     """Give an element the keyboard focus."""
     check_abort()
@@ -383,6 +392,7 @@ def ax_focus(ref) -> bool:
         return False
 
 
+@dispatched
 def ax_set_value(ref, text: str) -> bool:
     """Write an element's value. A read-only or unwilling element reports an error."""
     check_abort()
@@ -501,6 +511,7 @@ def execution_tabs(browser: str) -> dict:
     )
 
 
+@dispatched
 def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
     from .execution.contracts import safe_url
 
@@ -533,6 +544,7 @@ def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
     )
 
 
+@dispatched
 def execution_shortcut(key: str, modifiers: tuple[str, ...]) -> None:
     from .execution.contracts import MODIFIERS
 
@@ -606,6 +618,7 @@ def execution_labels(pid: int) -> list[dict]:
     return result
 
 
+@dispatched
 def execution_scroll(ref, direction: str) -> None:
     if direction not in {"up", "down"}:
         raise DesktopError("Invalid scroll direction")

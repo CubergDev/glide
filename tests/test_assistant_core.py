@@ -34,7 +34,7 @@ from glide.assistant.core import ANSWER_TOKENS, IO, Assistant
 from glide.assistant.tasks import abort_on
 from glide.computer import macos, runner
 from glide.computer.models import Abort
-from glide.computer.platform_adapter import desktop
+from glide.computer.platform_adapter import desktop, dispatching
 from glide.computer.runner import RunState
 from glide.providers.errors import ProviderError
 
@@ -552,7 +552,7 @@ def test_the_abort_hook_reaches_the_adapters_own_checks_so_a_stop_lands_mid_typi
 
     monkeypatch.setattr(macos, "_post", post)
     original = macos.check_abort
-    with abort_on(stop), pytest.raises(Abort, match="stopped by the user"):
+    with abort_on(stop), dispatching(), pytest.raises(Abort, match="stopped by the user"):
         macos.type_text("abc")
     assert events == [{"down": True, "text": "a"}, {"down": False, "text": "a"}]
     assert macos.check_abort is original

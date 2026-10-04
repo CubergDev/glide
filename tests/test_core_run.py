@@ -18,7 +18,7 @@ from glide.computer.actions import Context
 from glide.computer.config import DEFAULT_READINESS_TIMEOUT
 from glide.computer.control import RunControl, checkpoint, controlled, dispatch
 from glide.computer.models import Abort, BrowserConnectionError, DesktopPermissionError
-from glide.computer.platform_adapter import desktop
+from glide.computer.platform_adapter import desktop, dispatching
 from glide.computer.runner import RunConfig, RunState
 
 
@@ -301,7 +301,7 @@ def test_stop_during_typing_releases_key_but_types_no_next_character(monkeypatch
 
         monkeypatch.setattr(windows, "_send", send)
         expected = [(ord("a"), windows.KEYEVENTF_UNICODE), (ord("a"), windows.KEYEVENTF_UNICODE | windows.KEYEVENTF_KEYUP)]
-    with controlled(control), pytest.raises(Abort):
+    with controlled(control), dispatching(), pytest.raises(Abort):
         adapter.type_text("abc")
     assert sent == expected
 
