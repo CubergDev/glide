@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from typesafe_sdk import Choice, ChoiceAnswer, constants
 
-from glide.computer.generation import GenerationError, GenerationRequest
+from glide.computer.generation import GenerationError, GenerationRequest, GenerationUnavailable
 from glide.providers import config as config_module
 from glide.providers.base import Audio, ChatResult, SpeechAudio, Transcript, Usage
 from glide.providers.chain import SwitchEvent
@@ -891,6 +891,24 @@ def test_the_writer_names_the_variables_when_the_smart_chain_is_unusable():
     with pytest.raises(ConfigError) as caught:
         cfg.writer()
     assert caught.value.missing == ("DEEPSEEK_API_KEY",)
+
+
+def test_an_optional_chain_with_no_usable_slot_fails_only_its_own_requests():
+    """PR4-4175251083: an unused planner or research role with a missing key must not make every task 'not configured'."""
+    cfg, fakes = make(
+        FAST + '[llm.smart]\nchain = ["openai:gpt-big"]\n[llm.planner]\nchain = ["deepseek:plan"]\n'
+        '[llm.research]\nchain = ["deepseek:research"]',
+        env={"OPENAI_API_KEY": KEYS["OPENAI_API_KEY"]},
+    )
+    fakes.text = "{}"
+    writer = cfg.writer()  # used to raise NoUsableProvider
+    request = GenerationRequest("", "x", "y", {"type": "object"}, role="writer")
+    assert writer.generate(request).model == "gpt-a"
+    for role in ("planner", "research_supervisor"):
+        with pytest.raises(GenerationUnavailable, match="DEEPSEEK_API_KEY"):
+            writer.generate(GenerationRequest("", "x", "y", {"type": "object"}, role=role))
+    assert fakes.log == ["openai:gpt-a"]
+    assert "planner: ?" in writer.describe()  # visible at startup, not silent
 
 
 # -- finding the file ----------------------------------------------------------------------------

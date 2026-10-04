@@ -63,7 +63,7 @@ from .errors import ProviderError, redact
 from .llm import LLM
 from .stt import STT
 from .tts import TTS
-from .writer_client import ChainWriter
+from .writer_client import ChainWriter, UnavailableFacade
 
 log = logging.getLogger("glide.config")
 
@@ -814,11 +814,19 @@ class GlideConfig:
         return ChainWriter(
             self.llm("fast"),
             self.llm("smart"),
-            planner=self.llm("planner"),
-            research=self.llm("research"),
+            planner=self._optional_llm("planner"),
+            research=self._optional_llm("research"),
             timeout=timeout,
             deadlines=deadlines,
         )
+
+    def _optional_llm(self, role: str) -> Any:
+        """The facade of planner or research. A chain the file gave it that has no usable slot (a missing key) fails
+        only the requests that need it; fast and smart, which every task needs, are still required by `writer`."""
+        try:
+            return self.llm(role)
+        except NoUsableProvider as error:
+            return UnavailableFacade(str(error))
 
     def chain(self, role: str) -> Chain:
         """The chain of a role, for status, pinning and events. Raises ConfigError when no slot is usable."""
