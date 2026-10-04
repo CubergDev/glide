@@ -200,8 +200,13 @@ class Assistant:
 
     # -- requests -------------------------------------------------------------------------------
 
-    def handle_text(self, text: str, *, act: bool = False, wait: bool = True, hint_language: str | None = None) -> Reply:
+    def handle_text(
+        self, text: str, *, act: bool = False, wait: bool = True, hint_language: str | None = None, goal: str | None = None
+    ) -> Reply:
         """Answer, or do, what `text` asks. A computer task is a dry run unless `act=True`.
+
+        `goal` is a task the person already saw previewed and confirmed: it runs exactly that and `text` is not routed
+        again, so what runs cannot differ from what was confirmed.
 
         With `wait=True` a computer task has ended when this returns; with `wait=False` it runs on, and its
         result is shown and spoken when it ends. Speech of an answer is always asynchronous: this returns
@@ -210,10 +215,17 @@ class Assistant:
         A request that is cancelled (a stop, or a newer request) while it is being answered returns
         `Reply("none")` and says nothing, not even that something failed.
         """
-        return self._handle(text, act, wait, hint_language, self._ticket())
+        return self._handle(text, act, wait, hint_language, self._ticket(), goal=goal)
 
     def _handle(
-        self, text: str, act: bool, wait: bool, hint_language: str | None, ticket: int, turn: _Turn | None = None
+        self,
+        text: str,
+        act: bool,
+        wait: bool,
+        hint_language: str | None,
+        ticket: int,
+        turn: _Turn | None = None,
+        goal: str | None = None,
     ) -> Reply:
         started = self._clock()
         text = " ".join(text.split())
@@ -235,7 +247,7 @@ class Assistant:
                 if self._responder is not None:
                     reply = self._delegate(turn, text, hint_language, started)
                 else:
-                    reply = self._respond(turn, text, act, wait, hint_language, started)
+                    reply = self._respond(turn, text, act, wait, hint_language, started, goal)
             if turn.cancelled and reply.route == "answer":  # a stop or a newer request took it: not a completed answer
                 reply.route = "none"  # (the text is what was already said before the cut)
             return reply
@@ -257,7 +269,9 @@ class Assistant:
         reply.timings["total_s"] = self._clock() - started
         return reply
 
-    def _respond(self, turn: _Turn, text: str, act: bool, wait: bool, hint_language: str | None, started: float) -> Reply:
+    def _respond(
+        self, turn: _Turn, text: str, act: bool, wait: bool, hint_language: str | None, started: float, goal: str | None = None
+    ) -> Reply:
         speaker = self._speaker_or_none()
         if speaker is not None:
             speaker.mark()
@@ -267,7 +281,11 @@ class Assistant:
         except ConfigError as exc:
             return self._failed(reply, say("no_llm", hint_language), self._scrub(str(exc)), hint_language, speak=True)
 
-        route = Router(llm, clock=self._clock).route(text, self._messages())
+        route = (
+            Route("computer", goal=goal, language=hint_language, source="previewed")
+            if goal
+            else Router(llm, clock=self._clock).route(text, self._messages())
+        )
         reply.timings["route_s"] = route.latency_s
         if route.source == "fallback" and not turn.cancelled:  # a request to act becomes an answer: never silently
             why = route.error.kind if route.error is not None else "unreadable reply"
