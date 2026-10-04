@@ -67,6 +67,10 @@ PROVIDER_SENTENCES = {
 }
 GENERIC_PROVIDER_SENTENCE = "A model provider failed."
 NO_REPLAY = "No action was repeated."
+UNVERIFIED_WRITE = (
+    "An earlier identical action was not seen to do what was asked, so it was not repeated. It may or may not have "
+    "happened: review the page before a fresh task."
+)
 
 # What the research supervisor borrows from the executor, so that it imports none of the engine's modules.
 RESEARCH_TOOLS = research.Tools(planning.plan, wait_ready, lambda text: grounding.extract(text).urls, query.is_search_action)
@@ -97,6 +101,10 @@ def provider_sentence(error: ProviderError) -> str:
 def no_browser() -> Observation:
     """What the engine sees when there is no browser: nothing, and nothing it may do."""
     return Observation("", "", capabilities=set(), browser_front=False)
+
+
+class UnverifiedWrite(InvalidAction):
+    """The engine was about to send again an action that an earlier fresh observation did not show to have worked."""
 
 
 class Phases:
@@ -178,6 +186,7 @@ class Execution:
         self.action_source = self.cached = None
         self.failures = self.stale = 0
         self.transitions: set = set()
+        self.unverified: set = set()  # (step id, action identity) of writes whose milestone effect was not observed
         self.selection_error = ""
         # How the run failed, for the report.
         self.failure_stage = self.error_type = self.failure_code = ""
@@ -209,6 +218,8 @@ class Execution:
             self._stopped(error)
         except UnsupportedCapability as error:
             self._unsupported(error)
+        except UnverifiedWrite as error:
+            self._unverified(error)
         except ConfigError:
             raise  # the caller words a missing configuration, the same as for the legacy loop
         except Exception as error:
@@ -423,6 +434,10 @@ class Execution:
             return False
         self.stale = 0
         action = self.action
+        if (step.id, action.identity) in self.unverified:
+            # Generic evidence (a focus, a redrawn control) says that something changed, never that this write did what it
+            # was for. Sending it again could do it twice, so the run stops here and says that the outcome is unknown.
+            raise UnverifiedWrite(UNVERIFIED_WRITE)
         if self.supervisor:
             self.supervisor.validate_action(action, before)
         diagnostics.event("action_selected", stage="preflight", step_id=step.id, kind=action.kind, action_params=asdict(action))
@@ -582,6 +597,8 @@ class Execution:
             raise InvalidAction("Search submission was not verified; review the result before retrying")
         if not verified and not intermediate and action.kind in {"click", "type", "key", "tab_create", "tab_close"}:
             raise InvalidAction("Write outcome was not verified; review the effect before retrying")
+        if not verified and action.kind in {"click", "key"}:
+            self.unverified.add((step.id, action.identity))
         previous = ledger.count(step.id)
         ledger.finish(self.operation, step, verified, elapsed, intermediate)
         self.operation = None
@@ -649,6 +666,15 @@ class Execution:
         self.state.outcome = "unsupported"
         self.state.failure = UNSUPPORTED_SEARCH if error.missing == (query.FORM_CAPABILITY,) else str(error)
         self.state.unsupported_capabilities = list(error.missing)
+
+    def _unverified(self, error):
+        """Stopped before a repeat. The last write was followed by a fresh observation that did not show its effect, so
+        what that observation was is the read-back: nothing more is read."""
+        state = self.state
+        diagnostics.exception(error, stage=self.phases.stage)
+        self.failure_stage, self.error_type, self.failure_code = self.phases.stage, type(error).__name__, "unverified_write"
+        state.outcome, state.failure = "blocked", UNVERIFIED_WRITE
+        state.uncertain, state.readback = True, "the last observation did not show the effect; completion unknown"
 
     def _failed(self, error):
         state = self.state

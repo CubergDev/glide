@@ -315,8 +315,9 @@ def test_focus_cycle_cannot_claim_completion(monkeypatch, tmp_path):
 
     reasoner = Reasoner([response(step)])
     result = drive(monkeypatch, tmp_path, computer, reasoner, Jev(selection=select))
-    assert result.outcome == "blocked" and not result.answer
-    assert len(computer.actions) == 12 and result.progress[0]["verified"] == 0
+    assert result.outcome == "blocked" and not result.answer and result.progress[0]["verified"] == 0
+    # Changed from 12 identical key presses: a press that moved focus but did not show the effect is not sent again.
+    assert len(computer.actions) == 1 and result.uncertain
 
 
 @pytest.mark.parametrize(
