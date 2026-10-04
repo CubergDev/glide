@@ -25,7 +25,11 @@ from .vad import EnergyProbability, Probability, Silero, VadError
 
 
 def make_vad(settings: SpeechSettings, warn=lambda message: None) -> Probability:
-    if settings.vad == "energy" or (settings.vad == "auto" and not settings.silero_configured):
+    if settings.vad == "energy":
+        return EnergyProbability()
+    if settings.vad == "auto" and not settings.silero_configured:
+        if settings.vad_model_path or settings.vad_model_sha256:  # half a model is not none: say so
+            warn("voice detection falls back to loudness: the Silero model needs both vad_model_path and vad_model_sha256")
         return EnergyProbability()
     try:
         return Silero(Path(settings.vad_model_path).expanduser(), settings.vad_model_sha256)

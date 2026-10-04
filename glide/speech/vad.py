@@ -118,7 +118,10 @@ class Silero:
         options = ort.SessionOptions()
         options.inter_op_num_threads = options.intra_op_num_threads = 1
         self._np = np
-        self._session = ort.InferenceSession(str(path), sess_options=options, providers=["CPUExecutionProvider"])
+        try:
+            self._session = ort.InferenceSession(str(path), sess_options=options, providers=["CPUExecutionProvider"])
+        except Exception as exc:  # a file that matches its checksum may still not be a model this runtime can run
+            raise VadError(f"the VAD model could not be loaded ({type(exc).__name__})") from exc
         self.reset()
 
     def reset(self) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -65,6 +66,37 @@ class _Stream:
 
 def fake_device(**kw):
     return FullDuplexDevice(input_factory=lambda cb: _Stream(), output_factory=lambda cb, rate: _Stream(), **kw)
+
+
+@pytest.mark.parametrize("partial", [{"vad_model_path": "model.onnx"}, {"vad_model_sha256": "0" * 64}])
+def test_a_model_configured_by_half_is_a_visible_fallback_to_loudness(partial):
+    """PR6-4175621979: with vad = 'auto' and only the path or only the checksum, loudness was chosen without a word."""
+    warned = []
+    assert isinstance(make_vad(SpeechSettings(vad="auto", **partial), warned.append), EnergyProbability)
+    assert len(warned) == 1 and "vad_model_path" in warned[0] and "vad_model_sha256" in warned[0]
+    assert (
+        make_vad(SpeechSettings(vad="energy", **partial), warned.append) and len(warned) == 1
+    )  # asked for loudness: nothing to say
+
+
+def test_a_model_that_checks_out_but_cannot_be_loaded_is_a_visible_fallback_and_an_error_when_asked_for(tmp_path, monkeypatch):
+    """PR6-4175247849: an onnxruntime error escaped as itself instead of the documented warning and fallback."""
+    ort = pytest.importorskip("onnxruntime")
+    pytest.importorskip("numpy")
+    model = tmp_path / "vad.onnx"
+    model.write_bytes(b"not really a model")
+    digest = hashlib.sha256(model.read_bytes()).hexdigest()
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("secret model detail")
+
+    monkeypatch.setattr(ort, "InferenceSession", refuse)
+    settings = {"vad_model_path": str(model), "vad_model_sha256": digest}
+    warned = []
+    assert isinstance(make_vad(SpeechSettings(vad="auto", **settings), warned.append), EnergyProbability)
+    assert len(warned) == 1 and "could not be loaded (RuntimeError)" in warned[0] and "secret" not in warned[0]
+    with pytest.raises(VadError, match=r"could not be loaded \(RuntimeError\)"):
+        make_vad(SpeechSettings(vad="silero", **settings))
 
 
 def test_make_vad_is_loudness_unless_a_model_is_configured():
