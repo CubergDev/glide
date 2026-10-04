@@ -40,8 +40,8 @@ The state is read off a screen, so it can contain text addressed to the model. T
 data to classify and never instructions, and the schema holds every Choice to the offered keys, so
 what such text can do is bounded to picking a wrong option the loop would have offered anyway.
 
-`Score` questions are not answered: nothing in the loop sends one (glide/computer/decide.py and
-browser/decide.py only ever build Choice and Noul), and a chain falls through to a TypeSafe slot
+`Score` questions are not answered: nothing in the loop sends one (glide/computer/decide.py
+only ever builds Choice and Noul), and a chain falls through to a TypeSafe slot
 for one because the error kind is `unsupported`.
 """
 
@@ -106,8 +106,8 @@ SYSTEM = (
 class ClassifierReply:
     """What `system_one` returns: the three attributes the loop and `MeteredClassifier` read.
 
-    Answers are the SDK's own `ChoiceAnswer` and `NoulAnswer`, not look-alikes: browser/decide.py
-    tells them apart with `isinstance`, and a look-alike would quietly become "no element, not satisfied".
+    Answers are the SDK's own `ChoiceAnswer` and `NoulAnswer`, not look-alikes: `choices` and `nouls` below
+    tell them apart with `isinstance`, and a look-alike would quietly become "no element, not satisfied".
     """
 
     answers: dict[str, ChoiceAnswer | NoulAnswer]

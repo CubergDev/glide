@@ -286,48 +286,6 @@ def looks_credential(label: str) -> bool:
     return any(hint in lowered for hint in CREDENTIAL_HINTS)
 
 
-def compose_browser_text(
-    writer: Writer,
-    goal: str,
-    *,
-    field_label: str,
-    page_title: str,
-    url: str,
-    nearby_text: list[str],
-    history: list[str],
-) -> str:
-    """The exact string to type into a browser field. Empty means declined or refused."""
-    if looks_credential(field_label):
-        return ""
-    packet = {
-        "goal": goal,
-        "now": now_context(),
-        "page": {"title": page_title, "url": url},
-        "focused_field": field_label,
-        "text_near_field": nearby_text,
-        "previous_actions": history[-8:],
-    }
-    data = _structured(
-        writer,
-        system=(
-            "You fill in one text field on a web page for a user working toward a goal. You "
-            "receive the goal, recent actions, the field's label or placeholder, and nearby page "
-            "text. Decide the exact string to type. Never invent credentials, passwords, one-time "
-            "codes, card numbers, or personal data; for such fields, or when the field should not "
-            "be filled, set fill to false. Keep it short and literal - no explanation."
-        ),
-        packet=packet,
-        properties={"fill": {"type": "boolean"}, "text": {"type": "string"}, "reason": {"type": "string"}},
-        max_tokens=256,
-    )
-    text = data["text"].strip() if data["fill"] else ""
-    # Guard again on the way out: a label that looked innocent can still attract
-    # a credential-shaped value.
-    if looks_credential(field_label) or looks_credential(text):
-        return ""
-    return text
-
-
 def compose_url(writer: Writer, goal: str, history: list[str], guidance: Guidance | None = None) -> str:
     """The URL to open for this goal. Empty means no sensible site, or an invalid proposal."""
     # Jev has already selected browser navigation. A literal address is a fact,

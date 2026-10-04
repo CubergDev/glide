@@ -15,15 +15,10 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import json
-import shutil
-import socket
-import subprocess
-import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 import websocket
@@ -31,37 +26,9 @@ import websocket
 from ..control import checkpoint
 from ..diagnostics import event
 
-CHROME_CANDIDATES = (
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-)
-
-# A fresh profile per instance. A shared directory leaves a SingletonLock
-# behind after the first Chrome is killed, and the next launch then refuses to
-# start — which is exactly how a benchmark run silently produces no numbers.
-DEFAULT_PROFILE = ""
-
 
 class CDPError(RuntimeError):
     pass
-
-
-def find_chrome() -> str:
-    for path in CHROME_CANDIDATES:
-        if Path(path).exists():
-            return path
-    found = shutil.which("google-chrome") or shutil.which("chromium")
-    if found:
-        return found
-    raise CDPError("no Chrome/Chromium binary found")
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def local_debugger_url(url: str, port: int) -> str:
@@ -127,88 +94,6 @@ def _connect(ws_url: str, *, timeout: float, **options: Any) -> websocket.WebSoc
     if is_loopback(host):
         options.update(http_proxy_host=host, http_proxy_port=1, http_no_proxy=[host])
     return websocket.create_connection(ws_url, timeout=timeout, **options)
-
-
-class Chrome:
-    """A dedicated Chrome instance. Never touches the user's own profile."""
-
-    def __init__(self, *, port: int | None = None, headed: bool = False, profile: str | None = None):
-        self.port = port or free_port()
-        self.headed = headed
-        self.profile = profile or tempfile.mkdtemp(prefix="tscu-chrome-")
-        self._ephemeral = profile is None
-        self.proc: subprocess.Popen | None = None
-
-    @property
-    def origin(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def start(self, *, window: tuple[int, int] = (1440, 900), timeout: float = 25.0) -> Chrome:
-        args = [
-            find_chrome(),
-            # The debugging socket listens on the loopback address (Chrome's default;
-            # --remote-debugging-address is never passed), and accepts a websocket from
-            # one origin, which `attach` sends. Chrome 111+ refuses every other origin,
-            # so a web page cannot attach to this browser.
-            f"--remote-debugging-port={self.port}",
-            f"--remote-allow-origins={self.origin}",
-            f"--user-data-dir={self.profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-features=Translate,MediaRouter,OptimizationHints",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-extensions",
-            "--metrics-recording-only",
-            "about:blank",
-        ]
-        if not self.headed:
-            args.insert(1, "--headless=new")
-            args.insert(2, f"--window-size={window[0]},{window[1]}")
-        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                _get_json(f"http://127.0.0.1:{self.port}/json/version", timeout=1.0)
-                return self
-            except (urllib.error.URLError, OSError, json.JSONDecodeError):
-                time.sleep(0.1)
-        self.close()  # `with` never reaches __exit__ when __enter__ raises
-        raise CDPError(f"Chrome did not expose CDP on port {self.port} within {timeout}s")
-
-    def page_target(self, timeout: float = 10.0) -> str:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            for target in _get_json(f"http://127.0.0.1:{self.port}/json/list"):
-                if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
-                    return local_debugger_url(str(target["webSocketDebuggerUrl"]), self.port)
-            time.sleep(0.1)
-        raise CDPError("no page target available")
-
-    def __enter__(self) -> Chrome:
-        return self.start()
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-    def attach(self, **session_kwargs: Any) -> Session:
-        session = Session(self.page_target(), origin=self.origin, **session_kwargs)
-        session.call("Page.enable")
-        session.call("Runtime.enable")
-        return session
-
-    def close(self) -> None:
-        """Stop Chrome, and remove the profile when this instance made it."""
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        self.proc = None
-        if self._ephemeral:
-            shutil.rmtree(self.profile, ignore_errors=True)
 
 
 class Session:
