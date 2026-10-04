@@ -1,0 +1,168 @@
+{
+ "events": {
+  "default_limit": 50,
+  "kept_for_the_project": 1000,
+  "newest_first": [
+   1004,
+   1003,
+   1002
+  ],
+  "old_rows_are_deleted_by_the_next_write": 1,
+  "oldest_kept": 6,
+  "other_session_sees_only_its_own": [
+   "other"
+  ],
+  "row_keys": [
+   "created_at",
+   "id",
+   "kind",
+   "payload"
+  ],
+  "thirty_days_later_nothing_is_readable": []
+ },
+ "refusals": {
+  "apply_ok": 1,
+  "apply_revision_bool": "ValueError: expected_revision must be a nonnegative integer",
+  "apply_revision_negative": "ValueError: expected_revision must be a nonnegative integer",
+  "apply_twice": "ValueError: proposal must belong to this project and be draft",
+  "apply_unknown_proposal": "ValueError: proposal must belong to this project and be draft",
+  "apply_with_a_stale_revision": "ValueError: harness revision conflict; refresh before applying",
+  "closed_store": "RuntimeError: store is closed",
+  "closed_store_enter": "RuntimeError: store is closed",
+  "database_path_is_a_directory": "ValueError: database path must reference a regular file",
+  "database_path_is_a_uri": "ValueError: database path must be a regular local path or :memory:",
+  "event_kind_blank": "ValueError: identifier must be nonempty and contain no control characters",
+  "event_not_a_dict": "ValueError: event payload must be a dictionary",
+  "event_not_json": "ValueError: event payload must contain bounded JSON values",
+  "event_with_credential": "ValueError: text appears to contain credentials; redact them first",
+  "events_limit_bool": "ValueError: limit must be an integer between 1 and 1000",
+  "events_limit_too_big": "ValueError: limit must be an integer between 1 and 1000",
+  "events_limit_zero": "ValueError: limit must be an integer between 1 and 1000",
+  "forget_blank_id": "ValueError: identifier must be nonempty and contain no control characters",
+  "outcome_success_not_bool": "ValueError: success must be a boolean",
+  "outcome_summary_too_long": "ValueError: text must be a bounded string without NUL characters",
+  "outcome_summary_with_credential": "ValueError: text appears to contain credentials; redact them first",
+  "outcome_summary_with_url": "ValueError: run summaries must not contain URLs; describe the tactic instead",
+  "outcome_summary_with_www": "ValueError: run summaries must not contain URLs; describe the tactic instead",
+  "propose_bad_target": "ValueError: target must be prompt:NAME or skill:ID using letters, digits, ._-",
+  "propose_blank_text": "ValueError: proposal text must be nonempty",
+  "propose_duplicate_evidence": "ValueError: evidence IDs must be distinct",
+  "propose_evidence_not_a_list": "ValueError: evidence IDs must be a list",
+  "propose_no_evidence": "ValueError: a proposal requires 1 to 64 outcome evidence IDs",
+  "propose_too_much_evidence": "ValueError: a proposal requires 1 to 64 outcome evidence IDs",
+  "propose_unknown_evidence": "ValueError: evidence must reference outcomes from this user and project",
+  "remember_assigned_secret": "ValueError: text appears to contain credentials; redact them first",
+  "remember_bad_level": "ValueError: memory requires nonempty text and a valid level",
+  "remember_blank_key": "ValueError: identifier must be nonempty and contain no control characters",
+  "remember_blank_text": "ValueError: memory requires nonempty text and a valid level",
+  "remember_confidence_bool": "ValueError: confidence must be finite and between 0 and 1",
+  "remember_confidence_high": "ValueError: confidence must be finite and between 0 and 1",
+  "remember_confidence_inf": "ValueError: confidence must be finite and between 0 and 1",
+  "remember_confidence_nan": "ValueError: confidence must be finite and between 0 and 1",
+  "remember_confidence_negative": "ValueError: confidence must be finite and between 0 and 1",
+  "remember_confidence_text": "ValueError: confidence must be finite and between 0 and 1",
+  "remember_control_character_in_key": "ValueError: identifier must be nonempty and contain no control characters",
+  "remember_credential": "ValueError: text appears to contain credentials; redact them first",
+  "remember_key_too_long": "ValueError: text must be a bounded string without NUL characters",
+  "remember_nul": "ValueError: text must be a bounded string without NUL characters",
+  "remember_ok": "no error",
+  "remember_placeholder_secret_is_fine": "no error",
+  "remember_text_not_a_string": "ValueError: text must be a bounded string without NUL characters",
+  "remember_text_too_long": "ValueError: text must be a bounded string without NUL characters",
+  "remember_ttl_beyond_ten_years": "ValueError: TTL must be finite, positive and at most ten years",
+  "remember_ttl_bool": "ValueError: TTL must be finite, positive and at most ten years",
+  "remember_ttl_inf": "ValueError: TTL must be finite, positive and at most ten years",
+  "remember_ttl_nan": "ValueError: TTL must be finite, positive and at most ten years",
+  "remember_ttl_negative": "ValueError: TTL must be finite, positive and at most ten years",
+  "remember_ttl_ten_years_is_fine": "no error",
+  "remember_ttl_text": "ValueError: TTL must be finite, positive and at most ten years",
+  "remember_ttl_zero": "ValueError: TTL must be finite, positive and at most ten years",
+  "rollback_after_a_newer_change": "ValueError: target changed after this proposal; rollback refused",
+  "rollback_draft_proposal": "ValueError: proposal must belong to this project and be applied",
+  "same_proposal_is_reused": true,
+  "scope_not_a_scope": "TypeError: scope must be a Scope"
+ },
+ "visibility": {
+  "after_expiry": [
+   "again",
+   "only-project",
+   "only-session",
+   "only-user",
+   "same"
+  ],
+  "expired_row_is_deleted_by_the_next_write": 0,
+  "forget_from_another_session": true,
+  "forget_from_another_user": false,
+  "forget_own": false,
+  "forgotten_is_gone": [],
+  "other_project": [
+   [
+    "only-user",
+    "user only"
+   ],
+   [
+    "same",
+    "user text"
+   ]
+  ],
+  "other_session": [
+   [
+    "again",
+    "v2"
+   ],
+   [
+    "only-project",
+    "project only"
+   ],
+   [
+    "only-user",
+    "user only"
+   ],
+   [
+    "same",
+    "project text"
+   ],
+   [
+    "short",
+    "short lived"
+   ]
+  ],
+  "other_user": [],
+  "row_keys": [
+   "confidence",
+   "id",
+   "key",
+   "kind",
+   "source",
+   "text",
+   "updated_at"
+  ],
+  "same": [
+   [
+    "again",
+    "v2"
+   ],
+   [
+    "only-project",
+    "project only"
+   ],
+   [
+    "only-session",
+    "session only"
+   ],
+   [
+    "only-user",
+    "user only"
+   ],
+   [
+    "same",
+    "session text"
+   ],
+   [
+    "short",
+    "short lived"
+   ]
+  ],
+  "upsert_keeps_the_id": true
+ }
+}
