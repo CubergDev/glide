@@ -245,7 +245,10 @@ def _chain(error: BaseException) -> list[dict[str, Any]]:
 
 
 def _runtime() -> dict[str, Any]:
-    """What the run was running on and with: versions and `GLIDE_*` settings, never a credential or another variable."""
+    """What the run was running on and with: versions and the names (never the values) of the `GLIDE_*` variables set.
+
+    A value cannot be known to be harmless: `glide.toml` lets any capitals-only name hold a provider key.
+    """
     packages = {}
     for name in ("glide", "typesafe-sdk", "httpx", "websocket-client"):
         with contextlib.suppress(importlib.metadata.PackageNotFoundError):
@@ -255,7 +258,7 @@ def _runtime() -> dict[str, Any]:
         "platform": platform.system(),
         "platform_release": platform.release(),
         "entrypoint": Path(sys.argv[0]).name if sys.argv and sys.argv[0] else "",
-        "settings": {k: v for k, v in os.environ.items() if k.startswith("GLIDE_") and not _secret_key.search(k)},
+        "settings": sorted(k for k in os.environ if k.startswith("GLIDE_")),
         "packages": packages,
     }
 
