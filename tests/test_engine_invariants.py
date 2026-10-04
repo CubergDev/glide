@@ -44,6 +44,53 @@ def test_a_write_that_only_changed_an_unrelated_control_is_not_repeated(monkeypa
     assert report["uncertain"] is True and report["steps_taken"] == 1
 
 
+# -- audit 2: uncertainty survives every way a run can end after an unverified click -----------------------------------
+
+
+def never_reached():
+    return Milestone("never", "Reach a state the click cannot produce", "element_present", target="Confirmed")
+
+
+def test_a_stop_after_a_click_that_only_redrew_a_control_stays_uncertain(monkeypatch, tmp_path):
+    """Audit 2 #1: generic evidence (a redraw) never shows the click did what it was for, so a stop keeps uncertainty."""
+    computer, control = Computer(), RunControl("stop")
+
+    def redraw_then_stop(machine, action):
+        changes_an_unrelated_control(machine, action)
+        control.cancel()
+        return ""
+
+    computer.on_execute = redraw_then_stop
+    state = drive(monkeypatch, tmp_path, computer, Reasoner([response(never_reached())]), Jev("plan"), steps=20, control=control)
+    assert [a.kind for a in computer.actions] == ["click"]
+    assert state.outcome == "aborted" and state.uncertain is True and control.in_flight is True
+    assert state.readback.endswith("completion unknown")
+    from glide.assistant.tasks import TaskResult
+    from glide.webhooks.worker import desktop_outcome
+
+    result = TaskResult("g", True, state.outcome, stopped=True, uncertain=state.uncertain)
+    assert desktop_outcome(result)["outcome"] == "uncertain"
+
+
+def test_a_run_that_ends_on_its_step_limit_after_an_unverified_click_is_uncertain(monkeypatch, tmp_path):
+    """Audit 2 #2: the budget ending is not proof that the click never fired."""
+    computer = Computer()
+    computer.on_execute = changes_an_unrelated_control
+    state = drive(monkeypatch, tmp_path, computer, Reasoner([response(never_reached())]), Jev("plan"), steps=1)
+    assert [a.kind for a in computer.actions] == ["click"]
+    assert state.outcome == "step limit" and state.uncertain is True
+    assert "completion unknown" in state.readback
+
+
+def test_an_unverified_stop_leaves_the_write_in_flight_for_the_pet_protocol(monkeypatch, tmp_path):
+    """Audit 2 #3: the bridge reads `control.in_flight` to say `reconcile_required`."""
+    computer, control = Computer(), RunControl("unverified")
+    computer.on_execute = changes_an_unrelated_control
+    state = drive(monkeypatch, tmp_path, computer, Reasoner([response(never_reached())]), Jev("plan"), steps=20, handoffs=5, control=control)
+    assert state.outcome == "blocked" and state.uncertain is True
+    assert control.in_flight is True
+
+
 # -- finding 4: URL scrubbing does not depend on the scheme ----------------------------------------------------------
 
 
