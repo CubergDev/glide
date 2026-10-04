@@ -29,14 +29,52 @@ from dataclasses import dataclass, fields
 from ..assistant.router import normalize
 from ..providers.config import ConfigError
 from .echo import ECHO_CHOICES
+from .vad import MAX_SILENCE_MS, MIN_SILENCE_MS
 
 VAD_CHOICES = ("auto", "silero", "energy")
-MIN_SILENCE_MS, MAX_SILENCE_MS = 200, 2000
 OUTPUT_RATES = (16000, 22050, 24000, 44100, 48000)
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _whole(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _text(v) -> bool:
+    return isinstance(v, str)
+
+
+# What each field's annotation allows, and the words for a value that is not one. A bool is not a number here.
+_KINDS = {
+    "bool": (lambda v: isinstance(v, bool), "must be true or false"),
+    "int": (_whole, "must be a whole number"),
+    "float": (_number, "must be a number"),
+    "str": (_text, "must be text"),
+    "str | None": (_text, "must be text"),
+    "int | str | None": (lambda v: _whole(v) or _text(v), "must be a device number or name"),
+    "tuple[str, ...]": (lambda v: isinstance(v, (list, tuple)) and all(map(_text, v)), "must be a list of text"),
+}
+# (key, lowest, highest or None for "no upper limit", what follows the range in the message), checked in this order
+_RANGES = (
+    ("silence_ms", MIN_SILENCE_MS, MAX_SILENCE_MS, ""),
+    ("merge_window_s", 0, 5, " seconds"),
+    ("idle_s", 0, None, ""),
+    ("echo_tail_s", 0, 2, " seconds"),
+    ("barge_min_voiced_ms", 96, 1000, ""),
+    ("barge_margin_db", 3, 30, ""),
+    ("barge_min_erle_db", 0, 30, ""),
+)
+_CHOICES = (("output_rate", OUTPUT_RATES), ("vad", VAD_CHOICES), ("echo_canceller", ECHO_CHOICES))
 
 
 @dataclass(frozen=True)
 class SpeechSettings:
+    """Every `[speech]` key with its default. These defaults are the only ones: the loop, the gate and the device take
+    theirs from here, so a number has one home."""
+
     headset: bool = False
     silence_ms: int = 600
     merge_window_s: float = 0.0
@@ -57,28 +95,16 @@ class SpeechSettings:
     stop_phrases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not MIN_SILENCE_MS <= self.silence_ms <= MAX_SILENCE_MS:
-            raise ConfigError(f"[speech] silence_ms must be {MIN_SILENCE_MS}-{MAX_SILENCE_MS}, not {self.silence_ms}")
-        if not 0 <= self.merge_window_s <= 5:
-            raise ConfigError(f"[speech] merge_window_s must be 0-5 seconds, not {self.merge_window_s}")
-        if self.idle_s < 0:
-            raise ConfigError(f"[speech] idle_s must not be negative, not {self.idle_s}")
-        if not 0 <= self.echo_tail_s <= 2:
-            raise ConfigError(f"[speech] echo_tail_s must be 0-2 seconds, not {self.echo_tail_s}")
-        if self.output_rate not in OUTPUT_RATES:
-            raise ConfigError(f"[speech] output_rate must be one of {', '.join(map(str, OUTPUT_RATES))}, not {self.output_rate}")
-        if self.vad not in VAD_CHOICES:
-            raise ConfigError(f"[speech] vad must be one of {', '.join(VAD_CHOICES)}, not {self.vad!r}")
+        for name, low, high, unit in _RANGES:
+            value = getattr(self, name)
+            if value < low or (high is not None and value > high):
+                wanted = "not be negative" if high is None else f"be {low}-{high}{unit}"
+                raise ConfigError(f"[speech] {name} must {wanted}, not {value}")
+        for name, options in _CHOICES:
+            if getattr(self, name) not in options:
+                raise ConfigError(f"[speech] {name} must be one of {', '.join(map(str, options))}, not {getattr(self, name)!r}")
         if self.vad == "silero" and not self.silero_configured:
             raise ConfigError("[speech] vad = 'silero' needs vad_model_path and vad_model_sha256")
-        if self.echo_canceller not in ECHO_CHOICES:
-            raise ConfigError(f"[speech] echo_canceller must be one of {', '.join(ECHO_CHOICES)}, not {self.echo_canceller!r}")
-        if not 96 <= self.barge_min_voiced_ms <= 1000:
-            raise ConfigError(f"[speech] barge_min_voiced_ms must be 96-1000, not {self.barge_min_voiced_ms}")
-        if not 3 <= self.barge_margin_db <= 30:
-            raise ConfigError(f"[speech] barge_margin_db must be 3-30, not {self.barge_margin_db}")
-        if not 0 <= self.barge_min_erle_db <= 30:
-            raise ConfigError(f"[speech] barge_min_erle_db must be 0-30, not {self.barge_min_erle_db}")
         if not all(isinstance(p, str) and normalize(p) for p in self.stop_phrases):
             raise ConfigError("[speech] stop_phrases must be a list of non-empty phrases")
         if self.vad_model_url and not self.vad_model_url.startswith("https://"):
@@ -98,18 +124,8 @@ class SpeechSettings:
             raise ConfigError(f"[speech] has unknown keys: {', '.join(unknown)} (known: {', '.join(sorted(known))})")
         values = {}
         for name, value in table.items():
-            kind = known[name]
-            if kind == "bool" and not isinstance(value, bool):
-                raise ConfigError(f"[speech] {name} must be true or false")
-            if kind == "int" and (isinstance(value, bool) or not isinstance(value, int)):
-                raise ConfigError(f"[speech] {name} must be a whole number")
-            if kind == "float" and (isinstance(value, bool) or not isinstance(value, (int, float))):
-                raise ConfigError(f"[speech] {name} must be a number")
-            if kind == "str" and not isinstance(value, str):
-                raise ConfigError(f"[speech] {name} must be text")
-            if kind.startswith("tuple"):
-                if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
-                    raise ConfigError(f"[speech] {name} must be a list of text")
-                value = tuple(value)
-            values[name] = float(value) if kind == "float" else value
+            accepts, words = _KINDS[known[name]]
+            if not accepts(value):
+                raise ConfigError(f"[speech] {name} {words}")
+            values[name] = float(value) if known[name] == "float" else tuple(value) if known[name].startswith("tuple") else value
         return cls(**values)

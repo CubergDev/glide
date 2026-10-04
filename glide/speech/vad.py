@@ -31,6 +31,7 @@ START_PROBABILITY = 0.5  # a frame at least this likely to be speech starts a tu
 STOP_PROBABILITY = 0.35  # a frame below this counts as silence; between the two it neither starts nor ends anything
 PRE_ROLL_FRAMES = 8  # what was heard just before a turn started is kept, so the first syllable is not clipped
 MAX_UTTERANCE_S = 60.0
+MIN_SILENCE_MS, MAX_SILENCE_MS = 200, 2000  # how long a pause may be asked to end a turn
 
 Probability = Callable[[bytes], float]
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -163,8 +164,8 @@ class TurnDetector:
     """
 
     def __init__(self, silence_ms: int = 600, *, max_utterance_s: float = MAX_UTTERANCE_S) -> None:
-        if not 200 <= silence_ms <= 2000:
-            raise ValueError("Silence threshold must be 200-2000 ms.")
+        if not MIN_SILENCE_MS <= silence_ms <= MAX_SILENCE_MS:
+            raise ValueError(f"Silence threshold must be {MIN_SILENCE_MS}-{MAX_SILENCE_MS} ms.")
         self.silence_frames = math.ceil(silence_ms * SAMPLE_RATE / 1000 / FRAME_SAMPLES)
         self.max_frames = int(max_utterance_s * SAMPLE_RATE / FRAME_SAMPLES)
         self.pre_roll: deque[bytes] = deque(maxlen=PRE_ROLL_FRAMES)

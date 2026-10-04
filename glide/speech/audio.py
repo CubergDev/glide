@@ -56,6 +56,7 @@ from typing import Protocol
 
 from ..assistant.audio_io import AudioUnavailable, _sounddevice
 from .echo import FAR_ACTIVE_RMS, EchoCanceller, EchoError, EchoStats
+from .settings import SpeechSettings
 from .vad import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE
 
 SAMPLE_BYTES = 2
@@ -160,9 +161,9 @@ class FullDuplexDevice:
     def __init__(
         self,
         *,
-        output_rate: int = 24000,
-        headset: bool = False,
-        echo_tail_s: float = 0.3,
+        output_rate: int = SpeechSettings.output_rate,
+        headset: bool = SpeechSettings.headset,
+        echo_tail_s: float = SpeechSettings.echo_tail_s,
         clock: Callable[[], float] = time.monotonic,
         input_factory: InputFactory | None = None,
         output_factory: OutputFactory | None = None,

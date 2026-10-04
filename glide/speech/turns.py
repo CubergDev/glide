@@ -55,14 +55,13 @@ from dataclasses import dataclass
 from ..assistant.audio_io import rms
 from .audio import DeviceFault
 from .echo import EchoStats
+from .settings import SpeechSettings
 from .vad import FRAME_S, START_PROBABILITY, Probability, TurnDetector, UtteranceTooLong
 
 POLL_S = 0.05
 
-# Barge-in policy. The three the person can change are `[speech]` keys; the rest are the shape of the policy.
-BARGE_MIN_VOICED_MS = 190  # how long a voice must hold over Glide's before it is the person: 6 frames
-BARGE_MARGIN_DB = 8.0  # how far above the echo expected in the frame the cleaned level must be
-BARGE_MIN_ERLE_DB = 6.0  # the canceller must be removing at least this much before voice can interrupt
+# Barge-in policy. The three the person can change are `[speech]` keys (their defaults are in `SpeechSettings`); the rest
+# are the shape of the policy.
 PROBE_FRAMES = 3  # frames of weaker evidence that open a stop-only probe (96 ms)
 PROBE_MARGIN_LESS_DB = 3.0  # the probe's margin is the policy's minus this (not below 3 dB)
 PROBE_COOLDOWN_S = 1.0  # between one probe ending and the next opening
@@ -133,9 +132,9 @@ class BargeInGate:
     def __init__(
         self,
         *,
-        min_voiced_ms: int = BARGE_MIN_VOICED_MS,
-        margin_db: float = BARGE_MARGIN_DB,
-        min_erle_db: float = BARGE_MIN_ERLE_DB,
+        min_voiced_ms: int = SpeechSettings.barge_min_voiced_ms,
+        margin_db: float = SpeechSettings.barge_margin_db,
+        min_erle_db: float = SpeechSettings.barge_min_erle_db,
         probe_frames: int = PROBE_FRAMES,
     ) -> None:
         self.min_voiced_frames = max(1, math.ceil(min_voiced_ms / 1000 / FRAME_S))
@@ -268,16 +267,16 @@ class VoiceLoop:
         device,
         vad: Probability,
         *,
-        silence_ms: int = 600,
-        merge_window_s: float = 0.0,
-        idle_s: float = 0.0,
+        silence_ms: int = SpeechSettings.silence_ms,
+        merge_window_s: float = SpeechSettings.merge_window_s,
+        idle_s: float = SpeechSettings.idle_s,
         language: str | None = None,
         act: bool = False,
         on_idle: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
-        barge_min_voiced_ms: int = BARGE_MIN_VOICED_MS,
-        barge_margin_db: float = BARGE_MARGIN_DB,
-        barge_min_erle_db: float = BARGE_MIN_ERLE_DB,
+        barge_min_voiced_ms: int = SpeechSettings.barge_min_voiced_ms,
+        barge_margin_db: float = SpeechSettings.barge_margin_db,
+        barge_min_erle_db: float = SpeechSettings.barge_min_erle_db,
     ) -> None:
         self._assistant = assistant
         self._device = device
