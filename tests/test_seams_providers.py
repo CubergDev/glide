@@ -49,3 +49,17 @@ def test_the_classifier_reads_one_object_and_not_one_a_sentence_quotes():
     assert _json_object('{"a": 1}') == {"a": 1}
     assert _json_object('```json\n{"a": 1}\n```') == {"a": 1}
     assert _json_object('  ```\n{"a": 1}\n```  ') == {"a": 1}
+
+
+def test_glide_status_lists_the_planner_and_research_chains_the_doctor_lists(capsys):
+    # finding 12: print_status walked ROLES and left out a configured llm.planner
+    from glide import cli
+
+    toml = "[llm.fast]\nchain = ['openai:m']\n[llm.planner]\nchain = ['openai:p']\n[llm.research]\nchain = ['openai:r']\n"
+    config = GlideConfig.from_toml(toml, env={"OPENAI_API_KEY": "sk-test-0123456789abcdef"})
+    cli.print_status(config)
+    out = capsys.readouterr().out
+    assert "llm.planner\n" in out and "llm.research\n" in out and "openai:p" in out
+    plain = GlideConfig.from_toml("", env={})
+    cli.print_status(plain)
+    assert "llm.planner" not in capsys.readouterr().out

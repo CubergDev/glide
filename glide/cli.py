@@ -573,7 +573,7 @@ def print_status(config) -> None:
     from .providers.config import ROLES, ConfigError
 
     print(f"config: {config.source}")
-    for role in ROLES:
+    for role in getattr(config, "active_roles", ROLES):  # as `glide doctor` does: llm.planner and llm.research too
         print(role)
         try:
             chain = config.chain(role)
