@@ -161,3 +161,15 @@ def test_the_doctor_says_memory_is_not_read_by_the_assistant_while_that_is_true(
         "memory"
     ]
     assert line.startswith("on,") and "the assistant does not use it yet" in line
+
+
+def test_the_folder_glide_inspect_writes_a_screenshot_and_screen_text_to_is_not_committable():
+    # finding 15: ./inspections/<time>/raw.png and state.txt held screen content and were not in .gitignore
+    from pathlib import Path
+
+    from glide.computer import cli as computer_cli
+
+    source = Path(computer_cli.__file__).read_text(encoding="utf-8")
+    assert 'Path("inspections")' in source  # the default of --out
+    ignored = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "inspections/" in ignored
