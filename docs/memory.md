@@ -31,6 +31,9 @@ rejects recognizable keys (it is not a complete scanner).
 
 `glide memory status` shows whether memory is on and where it lives without creating anything.
 `glide memory --help` lists remember, recall, forget, events, propose, apply, rollback and plan.
+`glide memory plan GOAL --catalog DIR --plugin ID --model LABEL --window N` previews what a turn would get from a
+catalog of skill and plugin files (nothing is sent anywhere). `glide/memory/catalog_examples/` holds working examples
+of such a catalog; a test loads them, so they stay valid.
 
 ## Memory written over MCP
 
