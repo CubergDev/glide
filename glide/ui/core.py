@@ -42,10 +42,17 @@ ANSWER_CHARS = 4096  # the answer card
 LABEL_CHARS = 1024
 POINT_IDLE = "Choose Point & ask, then press Ask: the point you aim at stays pinned for follow-up questions."
 PROVIDER_ROLES = ("llm.fast", "llm.smart", "stt", "tts", "classifier")
-# Outcomes of a task that could not run or did not finish for want of something outside the task (assistant/tasks.py).
-FAILED_OUTCOMES = frozenset(
-    {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
-)
+
+
+def task_phase(result) -> str:
+    """How a finished task looks to the person. Only a run that said "done" (or a dry run, which is meant to end so)
+    and was not found wanting is `completed`: every other outcome, those not yet invented included, is `failed`, and
+    a write whose effect was never seen is `uncertain`, never a success."""
+    if result.stopped:
+        return "stopped"
+    if result.uncertain:
+        return "uncertain"
+    return "completed" if result.outcome in ("done", "dry run") and result.achieved is not False else "failed"
 
 
 @dataclass(frozen=True)
@@ -54,7 +61,7 @@ class PetEvent:
 
     - `state`: `assistant` is `idle`, `listening`, `thinking`, `acting`, `speaking` or `error`.
     - `transcript`: `role` (`user` or `assistant`), `text`, `partial`. For display only; never stored.
-    - `task`: `phase` (`started`, `completed`, `failed`, `stopped`), `outcome`, `act`.
+    - `task`: `phase` (`started`, `completed`, `failed`, `stopped`, `uncertain`), `outcome`, `act`.
     - `switch`: `role`, `from_slot`, `to_slot`, `kind`, `reason`. One per provider fallback; none is silent.
     - `mic`: `open`, and `detail` (a short machine reason, never user content).
     - `recording`: `on`. Whether the core keeps content (D3).
@@ -118,8 +125,7 @@ class PetAssistant(Assistant):
         task.wait()
         result = task.result
         if result is not None:
-            phase = "stopped" if result.stopped else "failed" if result.outcome in FAILED_OUTCOMES else "completed"
-            self._report(PetEvent("task", {"phase": phase, "outcome": result.outcome, "act": result.act}))
+            self._report(PetEvent("task", {"phase": task_phase(result), "outcome": result.outcome, "act": result.act}))
         self._settle()
 
     def _settle(self) -> None:
@@ -482,8 +488,10 @@ class PetView:
             self.lines.append("task started" + ("" if act else " (dry run: nothing will be clicked)"))
             return
         self.lines.append(f"task {phase}" + (f": {outcome}" if outcome else ""))
-        mood = {"completed": "happy", "failed": "sad"}.get(phase, "idle")
-        status = f"Result · {outcome or phase}" if phase != "stopped" else "Stopped"
+        mood = {"completed": "happy", "failed": "sad", "uncertain": "question"}.get(phase, "idle")
+        status = {"stopped": "Stopped", "uncertain": "Check the screen · nothing will be repeated"}.get(
+            phase, f"Result · {outcome or phase}"
+        )
         self._result = (mood, status)
         self.mood, self.status = self._result
 

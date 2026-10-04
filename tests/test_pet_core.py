@@ -14,6 +14,7 @@ import pytest
 from test_assistant_fakes import WAIT, FakeConfig, FakeLLM, FakePlayer, FakeSTT, FakeTTS, route_json, wait_until
 
 from glide.assistant.audio_io import chunked
+from glide.assistant.tasks import OUTCOME_PHRASES, TaskResult
 from glide.computer import runner
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
@@ -123,6 +124,45 @@ def test_a_failed_task_is_reported_as_failed_and_a_stopped_one_as_stopped(tmp_pa
     seen = events_until(core, lambda es: any(e.type == "task" and e.data["phase"] == "stopped" for e in es))
     assert [e.data["phase"] for e in seen if e.type == "task"] == ["started", "failed", "started", "stopped"]
     core.close()
+
+
+class _EndedTask:
+    """A computer task that has already ended with `result`."""
+
+    act = True
+
+    def __init__(self, result) -> None:
+        self.result = result
+
+    def wait(self, timeout=None) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("result", "phase"),
+    [
+        (TaskResult("g", True, "done", achieved=True), "completed"),
+        (TaskResult("g", False, "dry run"), "completed"),
+        (TaskResult("g", True, "done", stopped=True), "stopped"),
+        (TaskResult("g", True, "done", uncertain=True), "uncertain"),  # a write whose effect was never seen
+        (TaskResult("g", True, "nothing helps", achieved=False), "failed"),
+        (TaskResult("g", True, "done", achieved=False), "failed"),
+        *[(TaskResult("g", True, outcome), "failed") for outcome in OUTCOME_PHRASES if outcome != "done"],
+        (TaskResult("g", True, "aborted (something new)"), "failed"),  # an outcome nobody listed is not a success
+    ],
+)
+def test_only_a_done_and_achieved_task_is_reported_as_completed(result, phase):
+    """PR15-4175491842: stalled, stuck, step limit, low confidence, nothing helps and an unverified write were all 'completed'."""
+    events = []
+    assistant = PetAssistant(PetConfig(llm=FakeLLM()), report=events.append)
+    assistant._await_task(_EndedTask(result))
+    task = next(e for e in events if e.type == "task")
+    assert task.data["phase"] == phase
+    view = PetView()
+    view.apply(task)
+    assert (view.mood == "happy") == (phase == "completed")
+    if phase == "uncertain":
+        assert view.mood == "question" and "nothing will be repeated" in view.status
 
 
 def test_stop_returns_at_once_while_a_task_is_running_and_the_task_ends_stopped(tmp_path, monkeypatch):
