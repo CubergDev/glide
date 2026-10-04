@@ -236,7 +236,15 @@ def drive(task, control: RunControl) -> dict:
     leaves this function, a KeyboardInterrupt included, stops the task first too: nothing is left driving the
     machine without an owner.
     """
-    task.start()
+    from ..assistant.tasks import _ACTIVE  # the process-wide abort hook allows one task at a time, whoever started it
+
+    if not _ACTIVE.acquire(blocking=False):
+        return _blocked("Another desktop task is already running in this process; nothing was done.")
+    try:
+        task.start(release=_ACTIVE.release)  # the task thread gives the lock back when it ends
+    except BaseException:
+        _ACTIVE.release()
+        raise
     try:
         while not task.wait(0.1):
             control.check(wait=False)
