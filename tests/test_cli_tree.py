@@ -370,6 +370,21 @@ def test_voice_reports_a_detector_that_cannot_be_built(monkeypatch, capsys):
     assert cli.main(["voice"]) == 2
 
 
+def test_voice_reports_a_sound_card_that_will_not_open_in_one_line_and_exits_two(monkeypatch, capsys):
+    # PR13-4175444473: sounddevice's PortAudioError is not an AudioUnavailable, a VadError or a DeviceFault
+    class PortAudioError(Exception):
+        pass
+
+    def boom(config, io, act):
+        raise PortAudioError("Error opening InputStream: Invalid number of channels [PaErrorCode -9998]")
+
+    monkeypatch.setattr(cli, "_load", lambda path: FakeConfig())
+    monkeypatch.setattr(cli, "_voice_loop", boom)
+    assert cli.main(["voice"]) == 2
+    err = capsys.readouterr().err
+    assert "could not be opened (PortAudioError: Error opening InputStream" in err and "Traceback" not in err
+
+
 def test_the_speech_table_of_a_real_file_is_what_build_voice_is_given(monkeypatch):
     config = GlideConfig.from_toml('[speech]\nsilence_ms = 800\nmerge_window_s = 1.0\nidle_s = 5.0\nvad = "energy"\n', env={})
     device = FakePlayer()

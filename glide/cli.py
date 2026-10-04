@@ -466,6 +466,12 @@ def cmd_voice(args: argparse.Namespace, config) -> int:
             file=sys.stderr,
         )
         return 2
+    except Exception as exc:  # a sound card that will not open: sounddevice's PortAudioError is none of the kinds above
+        print(
+            f"glide voice: the audio device could not be opened ({type(exc).__name__}: {clean(str(exc), config)})",
+            file=sys.stderr,
+        )
+        return 2
     print('glide voice: listening. Just talk; say "stop" to stop a task, press Ctrl-C to leave.')
     if args.act:
         print(ACT_BANNER, file=sys.stderr)
