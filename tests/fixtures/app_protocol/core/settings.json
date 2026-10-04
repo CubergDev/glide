@@ -3,7 +3,12 @@
     "revision": 3,
     "settings": {
       "computer": {
-        "act_enabled": false
+        "act_enabled": false,
+        "engine": "legacy",
+        "engines": [
+          "legacy",
+          "structured"
+        ]
       },
       "privacy": {
         "record_content": false

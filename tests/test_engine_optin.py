@@ -177,3 +177,16 @@ def test_the_computer_run_header_names_the_engine(monkeypatch, capsys):
     monkeypatch.setenv("GLIDE_ENGINE", "structured")
     assert computer_cli.main(["g", "--out", "x"], config) == 0 and seen[-1].engine == "structured"
     assert computer_cli.main(["g", "--out", "x", "--engine", "turbo"], config) == 2
+
+
+def test_a_structured_run_records_its_engine_in_run_json_without_content(monkeypatch, tmp_path):
+    import json
+
+    from execution_world import Computer, Jev, Reasoner, drive, response
+
+    from glide.computer.execution.contracts import Milestone
+
+    step = Milestone("name", "Set the name", "field_value", target="Name", value="Quarterly report")
+    drive(monkeypatch, tmp_path, Computer(), Reasoner([response(step)]), Jev("plan"), act=False)
+    text = (tmp_path / "run.json").read_text()
+    assert json.loads(text)["engine"] == "structured" and "Quarterly report" not in text

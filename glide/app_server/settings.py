@@ -5,7 +5,7 @@ What the app sees is built from the loaded configuration on every read: every ro
 nothing else about the key. No setting and no message can carry a key.
 
 What the app may change is a closed set (`voice.hands_free`, `voice.headset`, `voice.silence_ms`, `voice.language`,
-`privacy.record_content`, `computer.act_enabled`, `roles.pin`). Changes are held in this process only: `glide.toml` is never
+`privacy.record_content`, `computer.act_enabled`, `computer.engine`, `roles.pin`). Changes are held in this process only: `glide.toml` is never
 written, so a restart returns to the file, and recording content, which is opt-in, always starts off unless the command line
 asked for it. Every change is checked before any is applied, and a change that cannot be applied leaves the others unapplied:
 `ok: false` means nothing happened.
@@ -19,6 +19,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .. import features
+from ..computer import config as computer_config
 from ..providers.config import EXTRA_LLM_ROLES, ROLES, ConfigError
 from ..speech.settings import MAX_SILENCE_MS, MIN_SILENCE_MS, SpeechSettings
 from . import wire
@@ -40,12 +42,23 @@ class SettingsState:
     language: str | None = None
     record_content: bool = False
     act_enabled: bool = False
+    engine: str = computer_config.DEFAULT_ENGINE
 
     @classmethod
     def from_config(cls, config: object, *, record_content: bool = False) -> SettingsState:
         voice = getattr(config, "voice", None)
         voice = voice if isinstance(voice, SpeechSettings) else SpeechSettings()
-        return cls(headset=voice.headset, silence_ms=voice.silence_ms, language=voice.language, record_content=record_content)
+        try:
+            engine = features.engine_for(config)  # glide.toml and GLIDE_ENGINE: the app shows what a task would use
+        except ValueError:  # a bad setting is reported by `glide doctor` and by the task; the app starts on the default
+            engine = computer_config.DEFAULT_ENGINE
+        return cls(
+            headset=voice.headset,
+            silence_ms=voice.silence_ms,
+            language=voice.language,
+            record_content=record_content,
+            engine=engine,
+        )
 
 
 class SettingsPanel:
@@ -92,7 +105,7 @@ class SettingsPanel:
                 "silence_ms_range": [MIN_SILENCE_MS, MAX_SILENCE_MS],
             },
             "privacy": {"record_content": state.record_content},
-            "computer": {"act_enabled": state.act_enabled},
+            "computer": {"act_enabled": state.act_enabled, "engine": state.engine, "engines": list(computer_config.ENGINES)},
             "roles": [self._role(role) for role in self._roles()],
         }
 
@@ -170,6 +183,8 @@ class SettingsPanel:
                     self._config.unpin(role)
                 else:
                     self._config.pin(role, slot)
+            if new.engine != old.engine:
+                self._config.engine_choice = new.engine  # where every task reads it (`features.engine_for`)
             self._state = new
             self._revision += 1
             return True, self._revision, []
@@ -194,6 +209,11 @@ class SettingsPanel:
                     values["silence_ms"] = value
                 else:
                     errors.append((key, f"must be a whole number from {MIN_SILENCE_MS} to {MAX_SILENCE_MS}"))
+            elif key == "computer.engine":
+                if isinstance(value, str) and value in computer_config.ENGINES:
+                    values["engine"] = value
+                else:
+                    errors.append((key, f"must be one of: {', '.join(computer_config.ENGINES)}"))
             elif key == "voice.language":
                 if isinstance(value, str) and (value == "" or _LANGUAGE.fullmatch(value)):
                     values["language"] = value or None

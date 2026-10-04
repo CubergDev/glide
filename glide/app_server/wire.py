@@ -49,6 +49,7 @@ SETTING_KEYS = (
     "voice.language",
     "privacy.record_content",
     "computer.act_enabled",
+    "computer.engine",
     "roles.pin",
 )
 
