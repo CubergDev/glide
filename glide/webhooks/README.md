@@ -20,14 +20,27 @@ models, handler names) selects any of this.
 ### Per-run desktop approval
 
 `worker.process_call` hands an `agent.task.requested` call to the gate (`_desktop`). The gate runs, in order:
-the worker flag, then `Approver.approve(call)` for this run, then a lease check, then the executor. A missing
-approver, a refusal, an approver that raises, or a lease lost while waiting means nothing touches the machine.
-Approval is never cached. `glide webhooks work --allow-desktop` uses `TerminalApprover` (an explicit `y` on the
-terminal that started the worker; no terminal means no). Tests use a fake approver and a fake executor.
+the worker flag, then `Approver.approve(call, act=...)` for this run, then a lease check, then a check that the run
+is still the one that was shown, then the executor. A missing approver, a refusal, an approver that raises, a lease
+lost while waiting, or a run whose goal, context or source changed after it was shown means nothing touches the
+machine. Approval is never cached. `glide webhooks work --allow-desktop` uses `TerminalApprover` (an explicit `y` on
+the terminal that started the worker; no terminal means no). It shows the run id, the source, the whole goal,
+whether input will be sent, the size of the sender's context with a short excerpt, and an approval digest; control,
+escape and direction characters are removed from everything the sender wrote. An unanswered prompt waits for as long
+as the terminal does (the lease keeps renewing); it is never a yes. Tests use a fake approver and a fake executor.
+
+The desktop loop is given the authenticated goal and nothing else. The sender's request context is untrusted and the
+loop has no separate channel for evidence, so the context is not passed to it (it is still stored, and shown to the
+approver).
 
 An interrupted run that had been dispatched is `uncertain`: it blocks further claims for that agent and is never
 replayed. An operator reconciles it through `POST /v1/agents/{agent}/messages/{id}/resolve` (scope
-`agent:resolve`).
+`agent:resolve`). A run that only looked (`dry run`) is reported `blocked`, never `completed`. The worker retries
+only the final completion request, with a short bounded backoff, on a transport failure or a busy server.
+
+Each leased run has one `RunControl` (`glide/computer/control.py`), fenced by the lease deadline. It is the current
+control while the run is processed, so a lost or expired lease cancels the model call made for it, and a
+KeyboardInterrupt stops the desktop task and ends the lease before it propagates.
 
 ## What the queue stores (D3)
 
@@ -35,7 +48,8 @@ Default: for GitHub, repository, number, action, commit ids and comment id. For 
 times. No titles, bodies, comments, senders, mailbox addresses, sender source URIs or URLs of any kind.
 A finished task has its goal and context replaced by a placeholder; worker summaries are replaced by the worker's
 content-free `note`; event text is dropped; `secure_delete` plus a WAL truncate remove the bytes from the files.
-An `uncertain` task keeps its call until an operator resolves it. With `record_content` on, excerpts, summaries
+An `uncertain` task keeps its call (goal and context included) until an operator resolves it; the operator needs it to
+review what ran. With `record_content` on, excerpts, summaries
 and event text are kept (still never a URL). The consequence: GitHub reports run on metadata only unless you opt
 in, and they say so.
 
@@ -81,7 +95,7 @@ process and one worker per agent: a small-team queue, not a broker.
 `contracts.py` messages; `settings.py` configuration; `secret_sources.py` secrets; `trust_anchors.py` the
 exception above; `auth.py` signatures and agent JWTs (PyJWT and `cryptography` imported lazily); `translation.py`
 and `mail.py` event-to-call mapping; `store.py` the queue; `app.py` the ASGI service; `cli.py` the launcher;
-`worker.py` the consumer, the approval gate and the executor seam.
+`worker.py` the consumer, the lease, the approval gate and the executor seam.
 
 Not done: mailbox retrieval and OAuth onboarding (mail stays `blocked` until a trusted handler is supplied),
 MCP event subscription, subscription renewal.

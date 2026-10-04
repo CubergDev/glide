@@ -14,30 +14,24 @@ import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import Field, ValidationError
+from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from .auth import AgentVerifier, GoogleVerifier, bearer, delivery_id, header, verify_github, verify_standard, webhook_keys
-from .contracts import AgentEvent, AuthError, Completion, LeaseMessage, Message, TranslationError, strict_json
+from .contracts import AgentEvent, AuthError, Completion, LeaseMessage, ResolveMessage, TranslationError, strict_json
 from .mail import translate_gmail, translate_outlook, validate_outlook_token
 from .settings import ServerSettings, Source
 from .store import DeliveryConflict, LeaseConflict, QueueFull, QueueStore
 from .translation import translate_github, translate_standard
 
 JSON_TYPES = {"application/json", "application/cloudevents+json"}
-WORKER_SCOPES = {"claim": "agent:claim", "heartbeat": "agent:report", "complete": "agent:report", "events": "agent:report"}
-
-
-class ResolveMessage(Message):
-    outcome: Literal["completed", "failed", "cancelled"]
-    summary: str = Field(default="", max_length=4096)
+# The service's own permission names: what a worker token needs to claim a message and to report on one.
+WORKER_SCOPES = {"claim": "agent:claim", "report": "agent:report"}
 
 
 class Limiter:
@@ -54,10 +48,6 @@ class Limiter:
             if len(self.recent) >= self.limit:
                 raise HTTPException(429, "Request rate exceeded.", headers={"Retry-After": "60"})
             self.recent.append(now)
-
-
-def _expired(source: Source) -> bool:
-    return datetime.now(UTC) >= datetime.fromisoformat(source.subscription_expires_at.replace("Z", "+00:00"))
 
 
 async def read_body(request: Request, limit: int) -> bytes:
@@ -77,6 +67,94 @@ async def read_body(request: Request, limit: int) -> bytes:
                 raise HTTPException(413, "Request body exceeds the limit.")
             parts.append(chunk)
     return b"".join(parts)
+
+
+# What each failure is answered with: the same fixed words every time, never anything from the request.
+_ERROR_ANSWERS = (
+    (AuthError, 401, "Invalid callback or bearer authentication.", {"WWW-Authenticate": "Bearer"}),
+    (PermissionError, 403, "Insufficient agent scope.", {}),
+    (TranslationError, 400, "Invalid callback payload.", {}),
+    (TimeoutError, 408, "Request body timed out.", {}),
+    (DeliveryConflict, 409, "Delivery identity conflicts with stored content.", {}),
+    (LeaseConflict, 409, "Message lease is unavailable.", {}),
+    (QueueFull, 503, "Callback queue is full.", {"Retry-After": "5"}),
+    (sqlite3.Error, 503, "Callback storage is unavailable.", {"Retry-After": "5"}),
+)
+
+
+def _delivery(source: Source, event_id: str, digest: str, call, **extra) -> dict:
+    return {"source": source.id, "event_id": event_id, "digest": digest, "call": call.model_dump(), **extra}
+
+
+def _github(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+    verify_github(raw, header(request.headers, "x-hub-signature-256"), keys)
+    delivery_id(header(request.headers, "x-github-delivery"))
+    # GitHub signs only the body, not its delivery or event headers, so identity comes from the signed bytes.
+    digest = hashlib.sha256(raw).hexdigest()
+    call = translate_github(
+        strict_json(raw),
+        header(request.headers, "x-github-event"),
+        source_id=source.id,
+        agent_id=source.agent_id,
+        event_id=digest,
+        repositories=source.repositories,
+        allowed_senders=source.allowed_senders,
+        record_content=settings.record_content,
+    )
+    if call is None:  # an unsigned event label must not poison receipts for a real delivery of the same body
+        return []
+    return [_delivery(source, digest, digest, call, dedupe_body=True)]
+
+
+def _standard(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+    event_id = verify_standard(raw, request.headers, keys, settings.timestamp_tolerance)
+    call = translate_standard(
+        strict_json(raw),
+        source_id=source.id,
+        agent_id=source.agent_id,
+        event_id=event_id,
+        allow_actions=source.allow_actions,
+        record_content=settings.record_content,
+    )
+    return [_delivery(source, event_id, hashlib.sha256(raw).hexdigest(), call)]
+
+
+def _gmail(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+    payload = strict_json(raw)
+    message = payload.get("message")
+    event_id = message.get("messageId") if isinstance(message, dict) else None
+    call = translate_gmail(
+        payload,
+        source_id=source.id,
+        agent_id=source.agent_id,
+        event_id=event_id,
+        mailbox=source.mailbox,
+        subscription=source.subscription,
+        max_age_s=source.gmail_max_age_seconds,
+        record_content=settings.record_content,
+    )
+    return [_delivery(source, event_id, hashlib.sha256(raw).hexdigest(), call)]
+
+
+def _outlook(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+    if source.expired():
+        raise AuthError("Subscription expired.")
+    calls = translate_outlook(
+        strict_json(raw),
+        source_id=source.id,
+        agent_id=source.agent_id,
+        subscription_id=source.subscription_id,
+        mailbox_id=source.mailbox_id,
+        tenant_id=source.tenant_id,
+        client_states=keys,
+        record_content=settings.record_content,
+    )
+    return [_delivery(source, c.event_id, hashlib.sha256(c.event_id.encode()).hexdigest(), c) for c in calls]
+
+
+# Verify, then translate, per provider. A provider with no entry (an enabled `mcp` source: its receiver is not
+# built) has nothing to verify with, so a body for it is refused and nothing is queued.
+_TRANSLATORS = {"github": _github, "standard": _standard, "gmail": _gmail, "outlook": _outlook}
 
 
 def create_app(settings: ServerSettings, *, store=None, google_verifier=None, secrets=None, check_only=False) -> FastAPI:
@@ -133,19 +211,10 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         )
         return response
 
-    def answer(detail: str, status: int, **headers):
-        return lambda request, error: JSONResponse({"detail": detail}, status, headers=headers or None)
-
-    app.add_exception_handler(
-        AuthError, answer("Invalid callback or bearer authentication.", 401, **{"WWW-Authenticate": "Bearer"})
-    )
-    app.add_exception_handler(PermissionError, answer("Insufficient agent scope.", 403))
-    app.add_exception_handler(TranslationError, answer("Invalid callback payload.", 400))
-    app.add_exception_handler(TimeoutError, answer("Request body timed out.", 408))
-    app.add_exception_handler(DeliveryConflict, answer("Delivery identity conflicts with stored content.", 409))
-    app.add_exception_handler(LeaseConflict, answer("Message lease is unavailable.", 409))
-    app.add_exception_handler(QueueFull, answer("Callback queue is full.", 503, **{"Retry-After": "5"}))
-    app.add_exception_handler(sqlite3.Error, answer("Callback storage is unavailable.", 503, **{"Retry-After": "5"}))
+    for error, status, detail, headers in _ERROR_ANSWERS:
+        app.add_exception_handler(
+            error, lambda request, exc, d=detail, s=status, h=headers: JSONResponse({"detail": d}, s, headers=h or None)
+        )
 
     @app.get("/healthz")
     def health():
@@ -163,7 +232,7 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             tokens = request.query_params.getlist("validationToken")
             if len(tokens) != 1:
                 raise TranslationError("Invalid validation token.")
-            if _expired(source):
+            if source.expired():
                 raise AuthError("Subscription expired.")
             return PlainTextResponse(validate_outlook_token(tokens[0]))
         if source.provider == "gmail":
@@ -174,91 +243,28 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         if request.headers.get("content-type", "").split(";")[0].casefold() not in JSON_TYPES:
             raise HTTPException(415, "Callbacks require JSON.")
         try:
-            deliveries = translate(source, request, raw)
+            translator = _TRANSLATORS.get(source.provider)
+            if translator is None:
+                raise TranslationError("This source has no receiver.")
+            deliveries = translator(source, request, raw, keys.get(source.id), settings)
         except (ValueError, KeyError, TypeError, RecursionError) as error:
             if isinstance(error, AuthError | TranslationError):
                 raise
             raise TranslationError("Invalid callback payload.") from None
         return {"deliveries": await run_in_threadpool(request.app.state.queue.enqueue_many, deliveries)}
 
-    def translate(source: Source, request: Request, raw: bytes) -> list[dict]:
-        """Verify, then translate. Returns delivery records; [] for a valid event that is ignored."""
-        digest = hashlib.sha256(raw).hexdigest()
-        who = {"source_id": source.id, "agent_id": source.agent_id}
-        record = settings.record_content
-        if source.provider == "github":
-            verify_github(raw, header(request.headers, "x-hub-signature-256"), keys[source.id])
-            delivery_id(header(request.headers, "x-github-delivery"))
-            # GitHub signs only the body, not its delivery or event headers, so identity comes from the signed bytes.
-            call = translate_github(
-                strict_json(raw),
-                header(request.headers, "x-github-event"),
-                event_id=digest,
-                repositories=source.repositories,
-                allowed_senders=source.allowed_senders,
-                record_content=record,
-                **who,
-            )
-            event_id, dedupe = digest, True
-            if call is None:  # an unsigned event label must not poison receipts for a real delivery of the same body
-                return []
-        elif source.provider == "standard":
-            event_id = verify_standard(raw, request.headers, keys[source.id], settings.timestamp_tolerance)
-            call = translate_standard(
-                strict_json(raw), event_id=event_id, allow_actions=source.allow_actions, record_content=record, **who
-            )
-            dedupe = False
-        elif source.provider == "gmail":
-            payload = strict_json(raw)
-            message = payload.get("message")
-            event_id = message.get("messageId") if isinstance(message, dict) else None
-            call = translate_gmail(
-                payload,
-                event_id=event_id,
-                mailbox=source.mailbox,
-                subscription=source.subscription,
-                max_age_s=source.gmail_max_age_seconds,
-                record_content=record,
-                **who,
-            )
-            dedupe = False
-        else:  # outlook
-            if _expired(source):
-                raise AuthError("Subscription expired.")
-            calls = translate_outlook(
-                strict_json(raw),
-                event_id=digest,
-                subscription_id=source.subscription_id,
-                mailbox_id=source.mailbox_id,
-                tenant_id=source.tenant_id,
-                client_states=keys[source.id],
-                record_content=record,
-                **who,
-            )
-            return [
-                {
-                    "source": source.id,
-                    "event_id": c.event_id,
-                    "digest": hashlib.sha256(c.event_id.encode()).hexdigest(),
-                    "call": c.model_dump(),
-                }
-                for c in calls
-            ]
-        return [{"source": source.id, "event_id": event_id, "digest": digest, "call": call.model_dump(), "dedupe_body": dedupe}]
-
     # -- the agent queue API ------------------------------------------------------------------------------------
 
-    def agent(scope: str | None = None):
+    def agent(scope: str):
         """Authenticate before anything else is read: the bearer, its issuer, audience, agent id and scope."""
 
         def check(request: Request, agent_id: str):
-            action = request.url.path.rsplit("/", 1)[-1]
-            needed = scope or ("agent:read" if request.method == "GET" else WORKER_SCOPES.get(action, "agent:read"))
-            return verifier.verify(bearer(request.headers), agent_id, needed)
+            return verifier.verify(bearer(request.headers), agent_id, scope)
 
         return Depends(check)
 
-    WORKER, OPERATOR = agent(), agent("agent:resolve")
+    READER, OPERATOR = agent("agent:read"), agent("agent:resolve")
+    CLAIMER, REPORTER = agent(WORKER_SCOPES["claim"]), agent(WORKER_SCOPES["report"])
 
     async def message_of(request: Request, model):
         try:
@@ -270,22 +276,22 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         return request.app.state.queue
 
     @app.post("/v1/agents/{agent_id}/claim")
-    def claim(request: Request, agent_id: str, principal=WORKER):
+    def claim(request: Request, agent_id: str, principal=CLAIMER):
         return queue(request).claim(agent_id, principal.subject, settings.lease_seconds)
 
     @app.get("/v1/agents/{agent_id}/messages")
-    def messages(request: Request, agent_id: str, principal=WORKER):
+    def messages(request: Request, agent_id: str, principal=READER):
         return queue(request).messages(agent_id)
 
     @app.get("/v1/agents/{agent_id}/messages/{message_id}")
-    def one_message(request: Request, agent_id: str, message_id: str, principal=WORKER):
+    def one_message(request: Request, agent_id: str, message_id: str, principal=READER):
         item = queue(request).get(agent_id, message_id)
         if item is None:
             raise HTTPException(404, "Message not found.")
         return item
 
     @app.post("/v1/agents/{agent_id}/messages/{message_id}/heartbeat")
-    async def heartbeat(request: Request, agent_id: str, message_id: str, principal=WORKER):
+    async def heartbeat(request: Request, agent_id: str, message_id: str, principal=REPORTER):
         body = await message_of(request, LeaseMessage)
         return await run_in_threadpool(
             queue(request).heartbeat,
@@ -294,11 +300,10 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             message_id,
             body.lease_token,
             settings.lease_seconds,
-            include_server_time=True,
         )
 
     @app.post("/v1/agents/{agent_id}/messages/{message_id}/complete")
-    async def complete(request: Request, agent_id: str, message_id: str, principal=WORKER):
+    async def complete(request: Request, agent_id: str, message_id: str, principal=REPORTER):
         body = await message_of(request, Completion)
         return await run_in_threadpool(
             queue(request).finish,
@@ -312,7 +317,7 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         )
 
     @app.post("/v1/agents/{agent_id}/messages/{message_id}/events")
-    async def events(request: Request, agent_id: str, message_id: str, principal=WORKER):
+    async def events(request: Request, agent_id: str, message_id: str, principal=REPORTER):
         body = await message_of(request, AgentEvent)
         return await run_in_threadpool(
             queue(request).publish,

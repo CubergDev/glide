@@ -263,3 +263,177 @@ def test_malformed_google_headers_fail_uniformly_before_key_discovery(header):
     google.keys = SimpleNamespace(get_signing_key_from_jwt=refuse_lookup)
     with pytest.raises(AuthError, match="Invalid push authentication"):
         google.verify(unsigned_header_token(header), audience="glide-push", service_account="push@example.com")
+
+
+# -- characterisation: the finer rules of the Standard Webhooks and agent-token profiles ---------------------------------
+
+
+@pytest.mark.parametrize("timestamp", ["", "abc", "10.5", "-1000", "1" * 13, " 1000"])
+def test_standard_webhooks_timestamp_must_be_a_short_run_of_digits(timestamp):
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = b"original"
+    headers = standard_headers(key, raw, timestamp=timestamp)
+    with pytest.raises(AuthError):
+        verify_standard(raw, headers, webhook_keys((standard_public_key(key),)), now=1000)
+
+
+def test_standard_webhooks_accept_at_most_eight_signatures():
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = b"original"
+    good = standard_headers(key, raw)["webhook-signature"]
+    keys = webhook_keys((standard_public_key(key),))
+    filler = "v1a," + base64.b64encode(b"x" * 64).decode()
+    eight = Headers(dict(standard_headers(key, raw)) | {"webhook-signature": " ".join([filler] * 7 + [good])})
+    nine = Headers(dict(standard_headers(key, raw)) | {"webhook-signature": " ".join([filler] * 8 + [good])})
+    assert verify_standard(raw, eight, keys, now=1000) == "event_1"
+    with pytest.raises(AuthError):
+        verify_standard(raw, nine, keys, now=1000)
+
+
+def test_malformed_and_other_version_signature_entries_are_skipped_not_trusted():
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = b"original"
+    good = standard_headers(key, raw)["webhook-signature"]
+    keys = webhook_keys((standard_public_key(key),))
+    for junk in ("nocomma", "v1a,not*base64", "v2," + good.split(",", 1)[1], "v1," + good.split(",", 1)[1]):
+        mixed = Headers(dict(standard_headers(key, raw)) | {"webhook-signature": junk + " " + good})
+        assert verify_standard(raw, mixed, keys, now=1000) == "event_1"
+        alone = Headers(dict(standard_headers(key, raw)) | {"webhook-signature": junk})
+        with pytest.raises(AuthError):
+            verify_standard(raw, alone, keys, now=1000)
+
+
+@pytest.mark.parametrize("typ", ["JWT", "at+jwt"])
+def test_agent_tokens_accept_only_the_two_token_types(typ):
+    key = ed25519.Ed25519PrivateKey.generate()
+    signed = jwt.encode(worker_claims(), key, algorithm="EdDSA", headers={"kid": "key", "typ": typ})
+    assert agent_verifier(("key", "EdDSA", key)).verify(signed, "team-agent", "agent:claim").subject == "worker-1"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"kid": "key", "typ": "JOSE"}, {"kid": "k" * 101}, {"kid": "unknown"}],
+)
+def test_agent_token_header_must_name_a_pinned_key_and_a_known_type(headers):
+    key = ed25519.Ed25519PrivateKey.generate()
+    signed = jwt.encode(worker_claims(), key, algorithm="EdDSA", headers=headers)
+    with pytest.raises(AuthError):
+        agent_verifier(("key", "EdDSA", key)).verify(signed, "team-agent", "agent:claim")
+
+
+def test_scope_may_come_from_either_standard_claim_and_must_be_a_short_string():
+    key = ed25519.Ed25519PrivateKey.generate()
+    verifier = agent_verifier(("key", "EdDSA", key))
+
+    def attempt(**changes):
+        return jwt.encode(worker_claims(**changes), key, algorithm="EdDSA", headers={"kid": "key"})
+
+    via_scp = {k: v for k, v in worker_claims().items() if k != "scope"} | {"scp": "agent:claim"}
+    signed = jwt.encode(via_scp, key, algorithm="EdDSA", headers={"kid": "key"})
+    assert verifier.verify(signed, "team-agent", "agent:claim").scopes == frozenset({"agent:claim"})
+    for bad in (["agent:claim"], "a" * 501):
+        with pytest.raises(AuthError):
+            verifier.verify(attempt(scope=bad), "team-agent", "agent:claim")
+    with pytest.raises(AuthError):  # a subject that is empty or not text identifies nobody
+        verifier.verify(attempt(sub=""), "team-agent", "agent:claim")
+    with pytest.raises(AuthError):
+        verifier.verify(attempt(sub=7), "team-agent", "agent:claim")
+    with pytest.raises(AuthError):
+        verifier.verify(attempt(sub="s" * 201), "team-agent", "agent:claim")
+
+
+def test_every_required_claim_is_required():
+    key = ed25519.Ed25519PrivateKey.generate()
+    verifier = agent_verifier(("key", "EdDSA", key))
+    for name in ("exp", "iat", "iss", "aud", "sub", "agent_id"):
+        claims = {k: v for k, v in worker_claims().items() if k != name}
+        signed = jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": "key"})
+        with pytest.raises(AuthError):
+            verifier.verify(signed, "team-agent", "agent:claim")
+
+
+def test_a_token_that_outlives_the_configured_maximum_is_refused():
+    key = ed25519.Ed25519PrivateKey.generate()
+    now = int(time.time())
+    for lifetime, accepted in ((3600, True), (3601, False), (0, False)):
+        signed = jwt.encode(worker_claims(iat=now, exp=now + lifetime), key, algorithm="EdDSA", headers={"kid": "key"})
+        if accepted:
+            assert agent_verifier(("key", "EdDSA", key)).verify(signed, "team-agent", "agent:claim")
+        else:
+            with pytest.raises(AuthError):
+                agent_verifier(("key", "EdDSA", key)).verify(signed, "team-agent", "agent:claim")
+
+
+def test_a_weak_rsa_key_cannot_be_configured_for_agents():
+    weak = rsa.generate_private_key(public_exponent=65537, key_size=1024)  # test-only key, below the minimum on purpose
+    with pytest.raises(ValueError, match="configured algorithm"):
+        agent_verifier(("key", "RS256", weak))
+
+
+def test_a_malformed_pem_cannot_be_configured_for_agents():
+    with pytest.raises(ValueError, match="Invalid agent verification key"):
+        AgentVerifier(
+            AgentAuth(
+                issuer="urn:fixture:issuer",
+                audience="glide-workers",
+                keys=(
+                    VerificationKey(
+                        kid="key",
+                        algorithm="EdDSA",
+                        public_key="-----BEGIN PUBLIC KEY-----\n" + "A" * 64 + "\n-----END PUBLIC KEY-----",
+                    ),
+                ),
+            )
+        )
+
+
+def google_token(private, **changes):
+    now = int(time.time())
+    claims = {
+        "iss": "https://accounts.google.com",
+        "aud": "glide-push",
+        "sub": "1",
+        "iat": now,
+        "exp": now + 600,
+        "email": "push@example.com",
+        "email_verified": True,
+    } | changes
+    return jwt.encode(claims, private, algorithm="RS256", headers={"kid": "google"})
+
+
+def google_with(private):
+    google = GoogleVerifier()
+    google.keys = SimpleNamespace(get_signing_key_from_jwt=lambda token: SimpleNamespace(key=private.public_key()))
+    return google
+
+
+@pytest.mark.filterwarnings("ignore:The RSA key is")
+def test_google_push_tokens_check_issuer_audience_identity_and_key_strength():
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    google = google_with(private)
+    claims = google.verify(google_token(private), audience="glide-push", service_account="push@example.com")
+    assert claims["email"] == "push@example.com"
+    google.verify(google_token(private, iss="accounts.google.com"), audience="glide-push", service_account="push@example.com")
+    for change in ({"iss": "https://evil.example"}, {"aud": "other"}, {"email": "other@example.com"}, {"email_verified": "true"}):
+        with pytest.raises(AuthError, match="Invalid push authentication"):
+            google.verify(google_token(private, **change), audience="glide-push", service_account="push@example.com")
+    weak = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    with pytest.raises(AuthError, match="Invalid push authentication"):
+        google_with(weak).verify(google_token(weak), audience="glide-push", service_account="push@example.com")
+    with pytest.raises(AuthError, match="Invalid push authentication"):
+        google_with(ed25519.Ed25519PrivateKey.generate()).verify(
+            google_token(private), audience="glide-push", service_account="push@example.com"
+        )
+
+
+def test_a_failed_google_key_fetch_is_an_authentication_failure_not_a_crash():
+    google = GoogleVerifier()
+
+    def offline(token):
+        raise OSError("offline fixture")
+
+    google.keys = SimpleNamespace(get_signing_key_from_jwt=offline)
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    with pytest.raises(AuthError, match="Invalid push authentication") as error:
+        google.verify(google_token(private), audience="glide-push", service_account="push@example.com")
+    assert "offline fixture" not in str(error.value)

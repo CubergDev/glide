@@ -6,13 +6,13 @@ Everything is off until switched on (D5): the file needs `"enabled": true` and e
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from .contracts import SLUG, Message, strict_json
+from .contracts import ENV_NAME, SLUG, Message, strict_json
 from .secret_sources import EnvSecrets, SecretSource
 
 
@@ -57,7 +57,7 @@ class Source(Message):
     @field_validator("key_envs")
     @classmethod
     def secret_references(cls, values):
-        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", value) for value in values):
+        if any(not re.fullmatch(ENV_NAME, value) for value in values):
             raise ValueError("Invalid secret environment name.")
         return values
 
@@ -72,12 +72,18 @@ class Source(Message):
         if self.provider == "outlook":
             if not all((self.mailbox_id, self.tenant_id, self.subscription_id, self.subscription_expires_at)):
                 raise ValueError("Outlook requires mailbox, tenant, subscription and expiration bindings.")
-            expiry = datetime.fromisoformat(self.subscription_expires_at.replace("Z", "+00:00"))
-            if expiry.tzinfo is None:
+            if self.subscription_expires().tzinfo is None:
                 raise ValueError("Subscription expiration must include its timezone.")
         if self.provider != "standard" and self.allow_actions:
             raise ValueError("Only explicit standard task requests can allow computer actions.")
         return self
+
+    def subscription_expires(self) -> datetime:
+        return datetime.fromisoformat(self.subscription_expires_at.replace("Z", "+00:00"))
+
+    def expired(self) -> bool:
+        """Whether this Outlook subscription has lapsed (callbacks for it are then refused)."""
+        return datetime.now(UTC) >= self.subscription_expires()
 
     def secrets(self, source: SecretSource | None = None) -> tuple[str, ...]:
         source = source or EnvSecrets()
@@ -108,6 +114,10 @@ class ServerSettings(Message):
     def unique_sources(self):
         if len({source.id for source in self.sources}) != len(self.sources):
             raise ValueError("Duplicate webhook source identifiers.")
+        return self
+
+    @model_validator(mode="after")
+    def explicit_hosts(self):
         if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}", host) for host in self.allowed_hosts):
             raise ValueError("Configure explicit callback hosts.")
         return self
@@ -115,9 +125,8 @@ class ServerSettings(Message):
 
 def load_settings(path: Path) -> ServerSettings:
     try:
-        # JSON validation preserves strict tuple/type semantics at this boundary.
         raw = path.read_bytes()
-        strict_json(raw)
+        strict_json(raw)  # refuses duplicate keys, which pydantic would let silently override each other
         return ServerSettings.model_validate_json(raw)
     except (OSError, ValueError):
         raise ValueError("Invalid webhook configuration. See glide/webhooks/README.md.") from None

@@ -72,3 +72,59 @@ def test_importing_the_package_starts_nothing():
 
     source = Path(glide.webhooks.__file__).read_text(encoding="utf-8")
     assert "import uvicorn" not in source and "import fastapi" not in source
+
+
+# -- characterisation: the launcher's argument rules and its one fixed failure message ------------------------------------
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "-1"])
+def test_the_port_must_be_a_real_port(config, port):
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--config", str(config()), "--port", port, "--check-config"])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("host", ["example.com", "0.0.0.0", "192.0.2.1", "::", "not a host"])
+def test_any_non_loopback_host_needs_the_proxy_flag(config, host):
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--config", str(config()), "--host", host, "--check-config"])
+    assert error.value.code == 2
+    assert cli.main(["--config", str(config()), "--host", "127.0.0.1", "--check-config"]) == 0
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.9.9.9", "::1"])
+def test_loopback_hosts_are_local_without_the_flag(config, host, capsys):
+    assert cli.main(["--config", str(config()), "--host", host, "--check-config"]) == 0
+
+
+def test_a_public_bind_with_the_proxy_flag_reaches_the_listener_which_the_guard_refuses(config):
+    with pytest.raises(RuntimeError, match="real machine"):
+        cli.main(["--config", str(config()), "--host", "0.0.0.0", "--behind-proxy"])
+
+
+def test_the_listener_receives_the_validated_settings_host_and_port(config, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "serve", lambda settings, host, port: seen.append((settings.enabled, host, port)))
+    assert cli.main(["--config", str(config()), "--port", "9123"]) == 0
+    assert seen == [(True, "127.0.0.1", 9123)]
+
+
+def test_a_failing_listener_or_a_missing_file_is_one_fixed_message(config, monkeypatch, tmp_path, capsys):
+    def busy(*args):
+        raise OSError("address in use marker-private-text")
+
+    monkeypatch.setattr(cli, "serve", busy)
+    for argv in (["--config", str(config())], ["--config", str(tmp_path / "absent.json")]):
+        with pytest.raises(SystemExit) as error:
+            cli.main(argv)
+        assert error.value.code == 2
+    err = capsys.readouterr().err
+    assert "Could not configure the webhook service" in err and "marker-private-text" not in err
+
+
+def test_the_default_file_comes_from_the_environment(config, monkeypatch):
+    monkeypatch.setenv("GLIDE_WEBHOOK_CONFIG", str(config()))
+    assert cli.main(["--check-config"]) == 0
+    monkeypatch.setenv("GLIDE_WEBHOOK_CONFIG", str(config(enabled=False)))
+    with pytest.raises(SystemExit):
+        cli.main(["--check-config"])

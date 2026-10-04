@@ -27,6 +27,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from .contracts import clip_bytes
+
 TERMINAL = frozenset({"completed", "blocked", "cancelled", "failed", "uncertain"})
 MAX_CALL_BYTES = 65536
 MAX_EVENT_BYTES = 8192
@@ -78,8 +80,12 @@ def _secret_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _lease_duration(value: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= 3600:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or not 0 < value <= 3600:
         raise ValueError("The lease duration must be positive and at most one hour.")
     return float(value)
 
@@ -96,9 +102,9 @@ class QueueStore:
         clock: Callable[[], float] = time.time,
         record_content: bool = False,
     ):
-        if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending < 1:
+        if not _is_int(max_pending) or max_pending < 1:
             raise ValueError("The pending-message limit must be positive.")
-        if isinstance(max_events, bool) or not isinstance(max_events, int) or max_events < 1:
+        if not _is_int(max_events) or max_events < 1:
             raise ValueError("The delivery limit must be positive.")
         self.path = Path(path).absolute()
         self.max_pending = max_pending
@@ -150,8 +156,7 @@ class QueueStore:
                 CREATE INDEX IF NOT EXISTS task_events_message ON task_events(message_id, id);
                 """
             )
-            # Existing queues retain their receipts and leases when operator
-            # reconciliation support is added. Serialize the small migration.
+            # A queue made before operator reconciliation existed keeps its receipts and leases; add the column.
             with self._transaction() as db:
                 columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
                 if "resolved_at" not in columns:
@@ -372,16 +377,9 @@ class QueueStore:
             return None
         return row if hmac.compare_digest(row["token_hash"], digest) else None
 
-    def heartbeat(
-        self,
-        agent_id: str,
-        subject: str,
-        message_id: str,
-        token: str,
-        lease_seconds: float = 60,
-        *,
-        include_server_time: bool = False,
-    ) -> float | dict:
+    def heartbeat(self, agent_id: str, subject: str, message_id: str, token: str, lease_seconds: float = 60) -> dict:
+        """Extend the lease this subject owns. The server's own clock is returned with the new deadline: the worker
+        measures the lifetime from it and never trusts a wall-clock comparison."""
         duration = _lease_duration(lease_seconds)
         expires_at = None
         with self._transaction() as db:
@@ -392,7 +390,7 @@ class QueueStore:
                 db.execute("UPDATE messages SET expires_at=?,updated_at=? WHERE id=?", (expires_at, now, message_id))
         if expires_at is None:
             raise LeaseConflict("The agent lease is unavailable.")
-        return {"expires_at": expires_at, "server_time": now} if include_server_time else expires_at
+        return {"expires_at": expires_at, "server_time": now}
 
     def finish(
         self,
@@ -408,8 +406,7 @@ class QueueStore:
         if outcome not in TERMINAL or not isinstance(summary, str) or not isinstance(note, str):
             raise ValueError("The task outcome is invalid.")
         # `summary` may carry task content; `note` is a content-free status phrase from the worker.
-        kept = summary if self.record_content else note
-        summary = kept.encode("utf-8")[:MAX_SUMMARY_BYTES].decode("utf-8", errors="ignore")
+        summary = clip_bytes(summary if self.record_content else note, MAX_SUMMARY_BYTES)
         result = None
         redacted = False
         with self._transaction() as db:
@@ -468,11 +465,7 @@ class QueueStore:
         """
         if outcome not in {"completed", "failed", "cancelled"} or not isinstance(summary, str):
             raise ValueError("The reconciliation outcome is invalid.")
-        summary = (
-            (summary if self.record_content else RESOLVED_NOTE)
-            .encode("utf-8")[:MAX_SUMMARY_BYTES]
-            .decode("utf-8", errors="ignore")
-        )
+        summary = clip_bytes(summary if self.record_content else RESOLVED_NOTE, MAX_SUMMARY_BYTES)
         result = None
         redacted = False
         with self._transaction() as db:
@@ -517,7 +510,7 @@ class QueueStore:
             return self._metadata(db, row) if row is not None else None
 
     def messages(self, agent_id: str, *, limit: int = 50, status: str | None = None) -> list[dict]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        if not _is_int(limit) or not 1 <= limit <= 100:
             raise ValueError("The message listing limit must be between one and one hundred.")
         if status is not None and status not in TERMINAL | {"pending", "leased"}:
             raise ValueError("The task status is invalid.")
