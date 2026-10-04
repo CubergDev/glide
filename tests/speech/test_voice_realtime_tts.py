@@ -64,7 +64,7 @@ class SimpleNamespaceHub:
         self.calls, self._hub = calls, hub
 
     def serve(self, item):
-        self._hub["next"] = item
+        self._hub["next"] = self.last_socket = item
 
 
 def client(**kw):
@@ -159,3 +159,35 @@ def test_bad_settings_fail_at_build_time():
         RealtimeElevenLabsTTS("rt", "m", KEY, base_url="https://tts.example", sample_rate=12345)
     with pytest.raises(ValueError, match="base_url"):
         RealtimeElevenLabsTTS("rt", "m", KEY, base_url="")
+
+
+@pytest.mark.parametrize(
+    ("language", "voice_used"),
+    [
+        ("zh-HK", "hk"),
+        ("ZH_hk", "hk"),
+        ("zh-TW", "zh"),
+        ("zh", "zh"),
+        ("yue", "yue"),
+        ("de", "default"),
+        (None, "default"),
+        ("", "default"),
+    ],
+)
+def test_a_language_finds_its_voice_by_the_full_code_then_the_part_before_the_dash(connect, language, voice_used):
+    connect.serve(Socket([audio(b"\x00\x00"), {"is_final": True}]))
+    adapter = client(voice="default", voices={"ZH-hk": "hk", "zh": "zh", "yue": "yue"})
+    list(adapter.stream(TEXT, language=language))
+    sent = connect.last_socket.sent
+    assert sent[0] == {"voices": [voice_used]}
+
+
+@pytest.mark.parametrize(
+    ("language", "code"), [("zh-HK", "yue-code"), ("zh_TW", "zh-code"), ("yue", None), (None, None), ("en-GB", "en-code")]
+)
+def test_a_language_code_goes_in_the_url_only_when_one_is_mapped(connect, language, code):
+    connect.serve(Socket([audio(b"\x00\x00"), {"is_final": True}]))
+    adapter = client(language_codes={"zh-HK": "yue-code", "zh": "zh-code", "en": "en-code"})
+    list(adapter.stream(TEXT, language=language))
+    url = connect.calls[-1]["url"]
+    assert (f"language_code={code}" in url) if code else ("language_code" not in url)
