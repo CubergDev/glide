@@ -614,7 +614,7 @@ REFUSALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Vision", ("VNImageRequestHandler", "VNRecognizeTextRequest", "VNSequenceRequestHandler")),
     ("ocrmac.ocrmac", ("OCR", "text_from_image", "livetext_from_image")),
     # --- Windows APIs called directly (a stand-in module refuses everything already and is skipped)
-    ("win32api", ("GetCursorPos",)),
+    ("win32api", ("GetCursorPos", "GetSystemMetrics")),
     (
         "win32gui",
         (
@@ -628,9 +628,12 @@ REFUSALS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "GetWindowRect",
             "GetWindowText",
             "IsWindowVisible",
+            "CreateDC",
+            "DeleteDC",
+            "DeleteObject",
         ),
     ),
-    ("uiautomation", ("GetFocusedControl", "GetRootControl", "ControlFromHandle")),
+    ("uiautomation", ("GetFocusedControl", "GetRootControl", "ControlFromHandle", "ControlFromPoint")),
     ("winocr", ("recognize_pil_sync",)),
     # --- screen capture and input libraries a port might reach for
     ("PIL.ImageGrab", ("grab", "grabclipboard")),
@@ -710,16 +713,13 @@ REFUSALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("keyring.backends.macOS", ("Keyring.get_password", "Keyring.set_password", "Keyring.delete_password")),
     ("glide:credentials", ("_native_key",)),
     # --- the pet: processes and native windows
-    (
-        "glide:pet",
-        ("launch_voice", "launch_text", "launch_point", "open_window", "show_point_marker", "dismiss_point_marker"),
-    ),
+    ("glide:pet", ("open_window", "show_point_marker", "dismiss_point_marker")),
     ("glide:pet_overlay", ("configure_overlay", "configure_panel")),
 )
 
 # `glide:` rows for modules that are not in this tree yet. A row for any other `glide` module that matches nothing is a
 # dead row (`test_guard_table` fails it); an entry here that starts matching must be removed, so the row is enforced.
-UNPORTED = ("credentials", "pet", "pet_overlay")
+UNPORTED = ("credentials",)
 
 # os functions that start, replace or signal a process. `subprocess.Popen` is refused by name in the fixture, which also
 # covers subprocess.run, asyncio's subprocess functions and os.popen, because they all end in it.
