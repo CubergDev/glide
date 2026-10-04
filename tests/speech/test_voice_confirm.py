@@ -10,6 +10,7 @@ loop in glide/computer is replaced by a recorder of the `act` it was given.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from types import SimpleNamespace
 
@@ -309,10 +310,8 @@ def test_two_threads_starting_turns_at_once_both_stay_in_the_list():
         """A live earlier turn whose liveness check is where the two callers overlap."""
 
         def is_alive(self):
-            try:
+            with contextlib.suppress(threading.BrokenBarrierError):  # serialised by a lock: the other caller is not here
                 barrier.wait(0.3)
-            except threading.BrokenBarrierError:
-                pass  # serialised by a lock: the other caller cannot be here at the same time
             return True
 
     earlier = SimpleNamespace(thread=Slow())
