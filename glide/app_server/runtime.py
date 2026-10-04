@@ -102,12 +102,16 @@ class Runtime:
             loop = None
             try:
                 loop = self._voice_factory(self.config, settings, self._make_io(), state.act_enabled)
+                if (
+                    getattr(loop.assistant.io, "approve", None) is None
+                ):  # a voice stack that dropped the approver would act unasked
+                    raise VoiceUnavailable("the voice stack does not ask for approval")
                 loop.start()
             except Exception as exc:  # no speech extra, no microphone, a model that is not there: the person is told why
                 if loop is not None:
                     with contextlib.suppress(Exception):
                         loop.assistant.close()
-                raise VoiceUnavailable(self._reason(exc)) from None
+                raise VoiceUnavailable(exc.args[0] if isinstance(exc, VoiceUnavailable) else self._reason(exc)) from None
             if self._muted:
                 loop.pause()
             self._loop = loop

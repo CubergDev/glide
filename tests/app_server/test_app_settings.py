@@ -347,3 +347,20 @@ def test_closing_the_bridge_closes_the_voice_loop(make):
     rig.settings(("voice.hands_free", True))
     rig.bridge.close()
     assert factory.loops[0].events[-2:] == ["loop stopped", "close"]
+
+
+def test_a_voice_stack_whose_assistant_has_no_approver_is_refused_not_started(make):
+    """Hands-free tasks are gated because the voice stack is given the bridge's IO. If that ever stops being true, fail closed."""
+
+    class NoApprover(VoiceFactory):
+        def __call__(self, config, settings, io, act):
+            loop = super().__call__(config, settings, io, act)
+            loop.assistant.io = SimpleNamespace(approve=None)
+            return loop
+
+    factory = NoApprover()
+    rig = make(voice_factory=factory)
+    result = rig.settings(("voice.hands_free", True))
+    assert result["ok"] is False and "approval" in result["errors"][0]["message"]
+    assert factory.loops[0].events == ["close"]  # it was never started, and it was closed
+    assert read(rig)[1]["voice"]["hands_free"] is False
