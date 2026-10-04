@@ -14,6 +14,7 @@ import inspect
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -188,6 +189,16 @@ def tool_descriptor(raw):
     return wire_json(descriptor, 1048576)
 
 
+MAX_DESCRIPTION_CHARS = 300
+
+
+def clean_description(raw: object) -> str:
+    """Text a remote server wrote about its own tool, made fit to show a model: control and format characters
+    (newlines, escapes, bidi overrides) become spaces, runs of whitespace collapse, and it is cut to a short bound."""
+    text = "".join(" " if unicodedata.category(char)[0] == "C" else char for char in str(raw))
+    return " ".join(text.split())[:MAX_DESCRIPTION_CHARS].strip()
+
+
 def read_tools_page(response: Any, inventory: list, seen: set) -> str | None:
     """Append one `tools/list` page to `inventory`; return the next cursor, or None on the last page."""
     page = wire_json(_mapping(response), 1048576)
@@ -262,7 +273,7 @@ def bind_mcp(
         result.append(
             Tool(
                 id=f"mcp:{server}/{name}",
-                description=str(descriptor.get("description", name))[:2000],
+                description=clean_description(descriptor.get("description", name)) or name,
                 keywords=keywords[name],
                 permissions=permissions[name],
                 schema=wire_json(schema),

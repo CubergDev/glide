@@ -48,7 +48,7 @@ def _bundle_size(context: str, tools: Iterable[Tool]) -> int:
     envelope = {}
     if context:
         envelope["context"] = context
-    definitions = [{"id": item.id, "description": item.description, "inputSchema": item.schema} for item in tools]
+    definitions = [item.definition() for item in tools]
     if definitions:
         envelope["tools"] = definitions
     return len(_json(envelope).encode("utf-8")) if envelope else 0

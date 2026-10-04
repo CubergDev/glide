@@ -32,6 +32,7 @@ from glide.providers.errors import ProviderError, from_exception
 from .bridge import (
     OUTCOME_UNKNOWN_NOTE,
     MCPProtocolError,
+    clean_description,
     normalize_mcp_result,
     read_tools_page,
     refused_before_running,
@@ -151,7 +152,7 @@ class SessionClient:
                 tools.append(
                     RemoteTool(
                         descriptor["name"],
-                        str(descriptor.get("description", ""))[:2000],
+                        clean_description(descriptor.get("description", "")),
                         descriptor["inputSchema"],
                         descriptor.get("outputSchema"),
                     )
