@@ -109,7 +109,7 @@ class ClientBackedLLM:
         self.usage = usage or Usage(100, 20)
         self.calls: list[dict] = []
 
-    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, logprobs=False, timeout=None):
+    def chat(self, messages, *, max_tokens=512, temperature=0.0, schema=None, logprobs=False, timeout=None, exact_json=False):
         assert schema is not None, "the adapter always sends its schema"
         self.calls.append({"messages": list(messages), "schema": schema, "max_tokens": max_tokens})
         prompt = next(m["content"] for m in messages if m["role"] == "user")  # a retry appends a user turn after it
