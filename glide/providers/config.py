@@ -127,9 +127,9 @@ PRESET_HOSTS = frozenset(_host(spec.base_url) for spec in PRESETS.values() if sp
 POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "hedge_after_s", "latency_alpha")
 SPEECH_KEYS = ("language", "silence_ms", "headset", "vad_model_path", "vad_model_url", "vad_model_sha256")
 # Tables another module reads for itself (`glide.memory.settings`, `glide.mcp.config`, `glide.webhooks.cli`, `glide.computer.browser_settings`,
-# `glide.computer.config`): known
+# `glide.computer.config`, `glide.routing.settings`): known
 # here so the file does not warn about them, and not parsed here, so the one reader of each stays the only one.
-OWN_TABLES = ("memory", "mcp", "webhooks", "browser", "research")
+OWN_TABLES = ("memory", "mcp", "webhooks", "browser", "research", "routing")
 KNOWN_TABLES = ("providers", "llm", "stt", "tts", "classifier", "speech", *OWN_TABLES)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 

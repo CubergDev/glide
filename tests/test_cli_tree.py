@@ -27,6 +27,7 @@ from glide.computer.control import RunControl
 from glide.mcp.config import McpSettings
 from glide.memory.settings import MemorySettings, SettingsError
 from glide.providers.config import ConfigError, GlideConfig
+from glide.routing import RoutingSettings
 from glide.speech.session import build_voice
 from glide.speech.settings import SpeechSettings
 
@@ -550,6 +551,13 @@ def test_the_commented_speech_example_is_valid_for_both_readers():
     config = GlideConfig.from_toml(text, env={})
     assert config.warnings == [] and config.voice.silence_ms == 700 and config.voice.vad == "auto"
     assert config.speech.vad_model()[2] == "ab" * 32
+
+
+def test_the_commented_routing_example_is_valid_for_routing_and_known_to_the_loader():
+    text = example_block("routing")
+    settings = RoutingSettings.from_table(tomllib.loads(text)["routing"])
+    assert settings == RoutingSettings()  # every number in the example is the default it says it is
+    assert GlideConfig.from_toml(text, env={}).warnings == []  # a known table: no "ignoring the unknown table [routing]"
 
 
 def test_the_commented_memory_example_is_valid_for_memory(isolated):
