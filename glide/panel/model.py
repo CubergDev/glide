@@ -39,11 +39,7 @@ POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "hedg
 
 # feature name -> (table, key). `webhooks` is special: on means `[webhooks] config = "webhooks.json"`.
 FEATURES: dict[str, tuple[str, str]] = {
-    "voice": ("panel", "voice"),
-    "computer": ("panel", "computer"),
-    "files": ("panel", "files"),
-    "point_ask": ("panel", "point_ask"),
-    "record_content": ("panel", "record_content"),
+    **{name: ("panel", name) for name in ("voice", "computer", "files", "point_ask", "record_content")},
     "retention_days": ("panel", "retention_days"),
     "confirm_acting": ("routing", "confirm_acting"),
     "confirm_tasks": ("speech", "confirm_tasks"),
