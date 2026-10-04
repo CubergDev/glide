@@ -652,6 +652,10 @@ class Execution:
         state.uncertain = control.in_flight
         if not (self.operation and self.backend and self.step and self.action and self.before):
             return
+        if not getattr(self.backend, "passive_inspection", False):
+            # Reading back through a provider that may open or recreate a tab to inspect could itself be a write.
+            state.readback = "not observed: this provider cannot inspect passively; completion unknown"
+            return
         try:
             with controlled(None):  # cancellation is off for this one observation only
                 after = self.phases("reconciliation", observe, self.backend, self.step, self.action)

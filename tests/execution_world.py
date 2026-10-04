@@ -18,6 +18,8 @@ from glide.computer.runner import RunConfig, run
 
 
 class Computer:
+    passive_inspection = True
+
     def __init__(self):
         self.state = Observation(
             "Editor",

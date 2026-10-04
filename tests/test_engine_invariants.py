@@ -241,3 +241,52 @@ def test_a_title_made_only_of_control_characters_is_empty_not_an_error():
 def test_a_reading_that_is_still_invalid_is_still_an_error():
     with pytest.raises(InvalidAction):
         page_record(reading(url="https://shop.example.test/\x1b[2J"))
+
+
+# -- finding 8: after a stop the engine reads back only through a provider that declares passive inspection -------------
+
+
+class Unattended(Computer):
+    """A provider whose inspection is not guaranteed passive (the Playwright CLI can recreate a tab to inspect)."""
+
+    passive_inspection = False
+
+
+@pytest.mark.parametrize(("provider", "reads_after", "uncertain"), [(Computer, True, False), (Unattended, False, True)])
+def test_the_read_back_after_a_stop_needs_a_provider_that_inspects_passively(
+    monkeypatch, tmp_path, provider, reads_after, uncertain
+):
+    computer, control, at_stop = provider(), RunControl("stop"), []
+    execute = computer.execute
+
+    def write_then_stop(c, action):
+        c.on_execute = None
+        result = execute(action, c.state)
+        at_stop.append(c.reads)
+        control.cancel()
+        return result
+
+    computer.on_execute = write_then_stop
+    state = drive(
+        monkeypatch, tmp_path, computer, Reasoner([response(open_url("https://example.net"))]), Jev("plan"), control=control
+    )
+    assert state.outcome == "aborted" and computer.actions[0].kind == "navigate"
+    assert state.uncertain is uncertain and (computer.reads > at_stop[0]) is reads_after
+    if reads_after:
+        assert state.readback == "effect verified"
+    else:
+        assert state.readback == "not observed: this provider cannot inspect passively; completion unknown"
+
+
+def test_each_provider_declares_whether_its_inspection_is_passive():
+    from glide.computer.execution.dom import BrowserBackend
+    from glide.computer.execution.native import NativeBackend
+    from glide.computer.execution.obscura import ObscuraBackend
+    from glide.computer.execution.playwright_cli import PlaywrightBackend
+
+    assert [b.passive_inspection for b in (NativeBackend, BrowserBackend, ObscuraBackend, PlaywrightBackend)] == [
+        True,
+        True,
+        True,
+        False,
+    ]
