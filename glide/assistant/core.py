@@ -63,6 +63,10 @@ class IO:
     time as it is decided; `partial` gets the interim transcript while the person is still speaking and
     `heard` the final one, before anything is answered; `warn` gets anything the user should see that is
     not an answer (a provider that failed, speech that is off).
+    `approve(goal, act)` is asked before a computer task starts, a dry run too (it looks at the screen), and the task
+    starts only if it returns exactly True; anything else, an exception included, is a refusal and nothing is started.
+    It runs on the request's thread, so it may wait for the person. None leaves the decision to the caller's own
+    `act` choice, as the terminal commands do (`--act` is their approval).
     The assistant owns the player once it is given: `Assistant.close()` closes it.
     """
 
@@ -71,6 +75,7 @@ class IO:
     partial: Callable[[str], None] = _ignore
     heard: Callable[[str], None] = _ignore
     warn: Callable[[str], None] = _ignore
+    approve: Callable[[str, bool], bool] | None = None
 
 
 @dataclass
@@ -457,6 +462,11 @@ class Assistant:
         goal = route.goal or text
         language = language or detect_language(text)
         reply.language = language
+        if not self._approved(goal, act):
+            reply.error = "the task was not approved: nothing was done"
+            if not turn.cancelled:  # a stop that ended the question is silent, like every cancel
+                self.io.warn(reply.error)
+            return
         if route.reply:
             self._emit(turn, route.reply, language, reply, started)
             reply.text = " ".join(turn.parts)
@@ -480,6 +490,16 @@ class Assistant:
         self._remember(text, route.reply or f"(started a computer task: {goal})")
         if wait:
             task.wait()
+
+    def _approved(self, goal: str, act: bool) -> bool:
+        """Whether the person said yes to this task (see `IO.approve`). Without an approver the caller's choice stands."""
+        approve = self.io.approve
+        if approve is None:
+            return True
+        try:
+            return approve(goal, act) is True
+        except Exception:  # an approver that breaks is a refusal, never a yes
+            return False
 
     def _ask_user(self, task: ComputerTask, question: str, language: str | None) -> None:
         """A task has a question for the user, on the task's thread: show it and say it. The task waits for `answer_pending`."""
