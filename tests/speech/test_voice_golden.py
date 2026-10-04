@@ -10,6 +10,7 @@ against the version that passed. A deliberate change to the policy changes the h
 from __future__ import annotations
 
 import hashlib
+import re
 import queue
 import random
 from array import array
@@ -111,6 +112,11 @@ class Scaler(EchoCanceller):
     def _reset_state(self): ...
 
 
+def rounded(text: str) -> str:
+    """Floats to 6 decimals: libm's last digits differ between macOS and Linux, the policy's decisions do not."""
+    return re.sub(r"-?\d+\.\d+(?:e-?\d+)?", lambda m: f"{float(m.group()):.6f}", text)
+
+
 def stats_trace(seed: int, frames: int = 700) -> list:
     rng = random.Random(seed)
     canceller = Scaler()
@@ -128,15 +134,15 @@ def stats_trace(seed: int, frames: int = 700) -> list:
             if rng.random() < 0.004:
                 canceller.reset()
             canceller.process(tone(near_amp), tone(far))
-            trace.append((repr(canceller.stats), canceller.hold))
+            trace.append((rounded(repr(canceller.stats)), canceller.hold))
     return trace
 
 
 STATS_GOLDEN = {
-    0: "ff1285e2c451fd74",
-    1: "26ebcb99361f5184",
-    2: "d328583aaa67ce4c",
-    3: "41dc2734f2ff1cd7",
+    0: "7d2793b1090de629",
+    1: "bd314a746d2bf743",
+    2: "7385918cc2a3d1b1",
+    3: "5b96a79bdd084a82",
 }
 
 

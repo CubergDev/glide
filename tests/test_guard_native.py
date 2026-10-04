@@ -114,6 +114,8 @@ def covered_names(module_name: str) -> set[str]:
 
 
 def test_a_framework_call_added_to_macos_py_must_be_refused_or_listed_pure():
+    if sys.platform != "darwin":
+        pytest.skip("the refusals cover the macOS frameworks only where they are the real ones")
     pytest.importorskip("Quartz")
     pytest.importorskip("ApplicationServices")
     aliases = {**MACOS_ALIASES, "AppKit": "AppKit"}
