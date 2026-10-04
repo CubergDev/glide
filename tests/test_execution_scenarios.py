@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import replace
 
 import pytest
-from execution_world import SCENARIOS, Computer, Jev, Reasoner, drive, response
+from execution_world import SCENARIOS, Computer, Jev, Reasoner, drive, named, response
 
 from glide.computer.control import RunControl
 from glide.computer.execution.contracts import Element, Milestone
@@ -18,7 +18,7 @@ def test_diverse_goals_reach_verified_effects(monkeypatch, tmp_path, goal):
     computer, jev = Computer(), Jev()
     steps = SCENARIOS[goal]
     reasoner = Reasoner([response(*steps)])
-    state = drive(monkeypatch, tmp_path, computer, reasoner, jev, goal=goal)
+    state = drive(monkeypatch, tmp_path, computer, reasoner, jev, goal=named(goal, reasoner))
     assert state.answer and state.answer.achieved and state.outcome == "done"
     assert all(p["verified"] == p["requested"] and p["remaining"] == 0 for p in state.progress)
     assert len(reasoner.requests) == 1 and computer.closed

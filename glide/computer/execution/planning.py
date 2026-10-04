@@ -1,11 +1,49 @@
 """Plan validation and bounded, same-provider reasoning."""
 
+import re
 from dataclasses import asdict, replace
+from urllib.parse import urlsplit
 
 from .. import browser_settings, diagnostics
+from ..config import SITES
 from ..control import checkpoint
 from ..writer import compose_plan
-from .contracts import EFFECTS, MAX_PLAN_STEPS, MAX_REPETITIONS, InvalidAction, Milestone, UnsupportedCapability, safe_url
+from .contracts import (
+    EFFECTS,
+    MAX_PLAN_STEPS,
+    MAX_REPETITIONS,
+    InvalidAction,
+    Milestone,
+    UnsupportedCapability,
+    canonical_url,
+    safe_url,
+)
+from .grounding import extract
+
+NOT_GROUNDED = (
+    "A destination in the plan is not an address the user gave, a link observed on the page, an open tab or the "
+    "configured search address. Use one of those, or return a question asking the user which address to use."
+)
+
+
+def _origin(url):
+    """The canonical host and port of an address, for comparing where two addresses lead."""
+    parts = urlsplit(canonical_url(url))
+    return parts.netloc
+
+
+def grounded_origins(goal, reply, observed, steps, search_url):
+    """The places a plan with no supervisor may send the browser, as canonical hosts: the user's own words (an address,
+    or a host named in them, or a site the code's catalog names that they named), what the page offers (its address,
+    the open tabs, the links and forms on it), the configured search address and what was already registered. Model
+    text and page text are never an address of their own: a page that says "go to ..." adds nothing."""
+    addresses = [url.rstrip(".,;:!?)]}") for url in (*extract(goal).urls, *extract(reply).urls)]
+    words = set(re.findall(r"\w+", f"{goal} {reply}".casefold()))
+    addresses += [url for name, url in SITES.items() if set(name.casefold().split("_")) <= words]
+    addresses += [observed.url, search_url, *observed.tabs.values(), *(e.href for e in observed.elements.values())]
+    addresses += [form.action for form in observed.forms.values()]
+    addresses += [s.value for s in steps if s.effect in {"url", "tab_created"}]
+    return {_origin(a) for a in addresses if a and safe_url(a)}
 
 
 def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", context=None):
@@ -22,13 +60,16 @@ def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", con
         "user_reply": reply,
         **({"task_context": context} if context else {}),
     }
+    grounded = None if context else grounded_origins(goal, reply, observed, steps, packet["configured_search_url"])
     # Only invalid, parsed plans get one correction. No operations are dispatched here;
     # transport failures, cancellation and unsupported capabilities are never replayed.
     for attempt in range(2):
         checkpoint()
         data = compose_plan(writer, packet)
         try:
-            result = validate_plan(data, observed, steps, allowed_effects=context.get("allowed_effects") if context else None)
+            result = validate_plan(
+                data, observed, steps, allowed_effects=context.get("allowed_effects") if context else None, grounded=grounded
+            )
         except UnsupportedCapability:
             raise
         except InvalidAction as error:
@@ -42,8 +83,9 @@ def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", con
             return result
 
 
-def validate_plan(data, observed, steps=(), *, allowed_effects=None):
-    """Validate the entire batch before registering or dispatching any of it."""
+def validate_plan(data, observed, steps=(), *, allowed_effects=None, grounded=None):
+    """Validate the entire batch before registering or dispatching any of it. With `grounded` (a set of canonical hosts),
+    every address the plan would open must lead to one of them; the research supervisor does its own check instead."""
     if not isinstance(data, dict) or set(data) not in ({"question", "steps"}, {"question", "steps", "unsupported"}):
         raise InvalidAction("Planner returned an invalid contract")
     question, raw = data["question"], data["steps"]
@@ -113,6 +155,8 @@ def validate_plan(data, observed, steps=(), *, allowed_effects=None):
                     "Do not append descriptions or use the controlled panel ID. Navigate or scroll and observe "
                     "the controller before planning expansion."
                 )
+        if grounded is not None and milestone.effect in {"url", "tab_created"} and _origin(milestone.value) not in grounded:
+            raise InvalidAction(NOT_GROUNDED)
         if milestone.effect in {"url", "tab_created"}:
             has_page = True
             known_tab_urls.add(milestone.value)

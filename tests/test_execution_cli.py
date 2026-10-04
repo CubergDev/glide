@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from execution_world import Computer, Jev, Reasoner, drive, give_backend, response
+from execution_world import Computer, Jev, Reasoner, drive, give_backend, named, response
 
 from glide.computer import browser_settings, cli
 from glide.computer.execution.contracts import Milestone
@@ -106,7 +106,17 @@ def run_structured(monkeypatch, tmp_path, computer, writer, jev, *flags):
     monkeypatch.setattr(cli, "make_writer", lambda config=None: writer)
     monkeypatch.setattr(cli, "provider", lambda _: "offline fixture")
     give_backend(monkeypatch, computer)
-    argv = ["Open the page", "--engine", "structured", "--act", "--readiness-timeout", "0", "--out", str(tmp_path), *flags]
+    argv = [
+        named("Open the page", writer),
+        "--engine",
+        "structured",
+        "--act",
+        "--readiness-timeout",
+        "0",
+        "--out",
+        str(tmp_path),
+        *flags,
+    ]
     return cli.main(argv, chains(jev))
 
 

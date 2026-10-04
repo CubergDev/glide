@@ -66,7 +66,14 @@ def test_a_browser_fallback_is_said_on_the_runs_channel_and_kept_in_the_report(m
     monkeypatch.setattr(providers, "_build", lambda provider, settings, browser, act: first if provider == "cdp" else second)
     events, kwargs = collect()
     step = Milestone("open", "Open the page", "url", value="https://example.net")
-    cfg = RunConfig("Open the page", tmp_path, act=True, engine="structured", readiness_timeout=0, record_content=record_content)
+    cfg = RunConfig(
+        "Open the page https://example.net",
+        tmp_path,
+        act=True,
+        engine="structured",
+        readiness_timeout=0,
+        record_content=record_content,
+    )
     writer, jev = Reasoner([response(step)]), Jev("plan")
     state = run(
         cfg,

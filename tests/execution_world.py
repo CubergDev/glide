@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -255,6 +256,18 @@ def response(*steps, question="", unsupported=()):
     return {"question": question, "steps": [asdict(s) for s in steps], "unsupported": list(unsupported)}
 
 
+def named(goal, reasoner):
+    """`goal`, and every address the scripted plans open, as a request that names them would. A plan with no
+    supervisor may only open an address its goal, the page or the settings offer, and most tests care about the
+    plan's other properties, not about where it goes."""
+    addresses = dict.fromkeys(re.findall(r"https?://[^\s\"\\]+", json.dumps(getattr(reasoner, "replies", []), default=str)))
+    return " ".join([goal, *addresses])
+
+
+def default_goal(reasoner):
+    return named("Task", reasoner)
+
+
 def give_backend(monkeypatch, computer, calls=None):
     """The engine's one way to a backend is `providers.make_backend`: hand it `computer`. The calls it gets are
     appended to `calls` (a new list when none is given), which is returned."""
@@ -279,7 +292,7 @@ def drive(monkeypatch, tmp_path, computer, reasoner, jev=None, control=None, sup
     ask = kwargs.pop("ask", None)
     readiness = kwargs.pop("readiness_timeout", 0)  # "default" leaves it to RunConfig's own default
     cfg = RunConfig(
-        kwargs.pop("goal", "Task"),
+        kwargs.pop("goal", None) or default_goal(reasoner),
         tmp_path,
         act=kwargs.pop("act", True),
         engine="structured",
