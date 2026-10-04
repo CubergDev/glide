@@ -49,7 +49,9 @@ ACT_BANNER = (
 SECRET_SUFFIXES = ("KEY", "TOKEN", "SECRET")
 MIN_SECRET = 8
 REASON_CHARS = 160
-FAILED_OUTCOMES = frozenset({"provider failure", "crashed", "not permitted", "not configured"})  # a task that could not run
+FAILED_OUTCOMES = frozenset(  # a task that could not run
+    {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
+)
 POLL_S = 0.1  # how often the terminal loop looks up from waiting for a line
 QUIT_WORDS = frozenset({"q", "quit", "exit", "/quit", "/exit"})
 

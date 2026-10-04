@@ -329,6 +329,8 @@ def test_act_mode_prints_a_banner_so_it_is_never_a_surprise(monkeypatch, loop_ca
         ("dry run", 0),
         ("stalled", 0),
         ("provider failure", 1),
+        ("generation unavailable", 1),
+        ("desktop unavailable", 1),
         ("crashed", 1),
         ("not permitted", 1),
         ("not configured", 1),
