@@ -194,7 +194,7 @@ class Execution:
         self.action_source = self.cached = None
         self.failures = self.stale = 0
         self.transitions: set = set()
-        self.unverified: set = set()  # (step id, action identity) of writes whose milestone effect was not observed
+        self.unverified: set = set()  # `_write_key` of writes whose milestone effect was not observed
         self.selection_error = ""
         # How the run failed, for the report.
         self.failure_stage = self.error_type = self.failure_code = ""
@@ -453,7 +453,7 @@ class Execution:
             return False
         self.stale = 0
         action = self.action
-        if (step.id, action.identity) in self.unverified:
+        if self._write_key(step, action, before) in self.unverified:
             # Generic evidence (a focus, a redrawn control) says that something changed, never that this write did what it
             # was for. Sending it again could do it twice, so the run stops here and says that the outcome is unknown.
             raise UnverifiedWrite(UNVERIFIED_WRITE)
@@ -617,7 +617,7 @@ class Execution:
         if not verified and not intermediate and action.kind in {"click", "type", "key", "tab_create", "tab_close"}:
             raise InvalidAction("Write outcome was not verified; review the effect before retrying")
         if not verified and action.kind in {"click", "key"}:
-            self.unverified.add((step.id, action.identity))
+            self.unverified.add(self._write_key(step, action, before))
         previous = ledger.count(step.id)
         ledger.finish(self.operation, step, verified, elapsed, intermediate)
         self.operation = None
@@ -642,12 +642,26 @@ class Execution:
         self.cached = (step.id, action, after.owner) if advanced and action.kind in {"tab_create", "scroll"} else None
         self.action = None
 
+    @staticmethod
+    def _write_key(step, action, observed) -> tuple:
+        """What an unverified write was, for the repeat guard: the milestone, the kind, what it pressed (its label and role,
+        which survive a re-render that renumbers the handle) and its value. Never a handle."""
+        target = observed.elements.get(action.target)
+        return (
+            step.id,
+            action.kind,
+            target.label if target else action.target,
+            target.role if target else "",
+            action.value,
+            action.modifiers,
+        )
+
     def _write_unresolved(self) -> bool:
         """An unverified click or key whose milestone is still open (or was replanned away): it may have fired, so the
         run is uncertain however it ends, until a verified effect for that milestone shows otherwise."""
         by_id = {s.id: s for s in self.steps}
         return any(
-            sid not in by_id or self.ledger.count(sid) < by_id[sid].quantity for sid in {sid for sid, _ in self.unverified}
+            sid not in by_id or self.ledger.count(sid) < by_id[sid].quantity for sid in {key[0] for key in self.unverified}
         )
 
     @staticmethod
@@ -684,7 +698,7 @@ class Execution:
             if verified or intermediate:
                 self.ledger.finish(self.operation, self.step, verified, time.perf_counter() - self.op_started, intermediate)
                 if generic:
-                    self.unverified.add((self.step.id, self.action.identity))
+                    self.unverified.add(self._write_key(self.step, self.action, self.before))
                 else:
                     state.uncertain = control.in_flight = self._write_unresolved()
             state.readback = (
