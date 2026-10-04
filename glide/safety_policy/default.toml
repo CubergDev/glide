@@ -1,0 +1,86 @@
+# Default word lists for the safety policy. Matching is by whole words after normalisation (case, accents,
+# look-alike letters, camelCase and punctuation are folded away), so a phrase is a run of words and "sendero" is
+# not "send". Every language table below applies at once, because the page's language is not known.
+# Add a language by adding a [lang.<code>] table with any of the same keys. A missing key adds nothing.
+
+[matching]
+# Classes whose words also match with a trailing "s" or "es" (passwords, PINs). Only secrets: a plural of a
+# verb on a button ("Posts" tab) is a different control.
+plural = ["secret"]
+
+[roles]
+# Roles are compared after dropping an "AX" prefix, case and punctuation, so AXTextField, textfield and
+# text_field are one role. The lists are what callers pass today: macOS accessibility, web ARIA, Windows UIA.
+input = [
+  "textfield", "textarea", "searchfield", "combobox", "textbox", "searchbox", "edit", "document",
+  "securetextfield", "passwordfield", "passwordbox",
+]
+secret = ["securetextfield", "passwordfield", "passwordbox"]
+known = [
+  "button", "menubutton", "popupbutton", "radiobutton", "radio", "checkbox", "link", "hyperlink", "tab", "tabitem",
+  "menu", "menubaritem", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "listitem", "switch", "slider",
+  "cell", "row", "image", "statictext", "text", "heading", "group", "disclosuretriangle", "splitbutton", "togglebutton",
+]
+
+[field_types]
+# HTML input types that are a secret on their own.
+secret = ["password"]
+
+[kinds]
+# What the proposed action does. Anything not listed here is asked about: an action the policy has never seen is not safe.
+click = ["click", "double_click", "right_click", "press", "select", "toggle", "tap"]
+type = ["type", "type_text", "fill", "paste"]
+key = ["key", "press_key", "hotkey"]
+passive = ["scroll", "hover", "wait", "inspect", "screenshot", "focus", "move"]
+
+[keys]
+# Key names that submit (compared after case and punctuation are folded; modifiers are ignored).
+submit = ["return", "enter", "numpadenter", "keypadenter"]
+# Keys that cannot put a character in a secret field.
+neutral = ["escape", "tab"]
+
+[lang.en]
+secret = [
+  "password", "passwd", "passcode", "passphrase", "pin", "pin code", "cvv", "cvv2", "cvc", "cvc2", "csc", "card number",
+  "card no", "credit card", "debit card", "cc number", "cc csc", "cc cvc", "cc exp", "security code", "expiry",
+  "expiration", "expiry date", "expiration date", "exp date", "ssn", "social security", "social security number",
+  "passport", "passport number", "national id", "government id", "tax id", "driver license number", "one time",
+  "one time code", "one time password", "otp", "2fa", "mfa", "verification code", "auth code", "authenticator code",
+  "recovery code", "backup code", "seed phrase", "private key", "api key", "secret", "token",
+]
+destructive = [
+  "delete", "remove", "erase", "wipe", "discard", "destroy", "permanently", "empty trash", "format", "uninstall",
+  "cancel subscription", "cancel account", "cancel order", "close account", "deactivate", "terminate", "revoke",
+  "reset", "clear all", "clear history", "factory reset",
+]
+spending = [
+  "buy", "buy now", "purchase", "pay", "pay now", "place order", "checkout", "check out", "order now", "complete order",
+  "confirm order", "confirm payment", "subscribe", "donate", "add funds", "top up", "upgrade", "book now", "tip",
+]
+communication = [
+  "send", "send message", "post", "publish", "reply", "reply all", "forward", "share", "invite", "tweet", "submit",
+  "comment",
+]
+overwrite = ["overwrite", "replace", "replace all", "save changes", "save as", "update", "apply changes", "restore"]
+consent = [
+  "accept", "accept all", "agree", "i agree", "i accept", "accept terms", "accept and continue", "agree and continue",
+  "consent", "authorize", "grant access", "allow all", "sign terms",
+]
+personal = [
+  "name", "first name", "last name", "full name", "given name", "family name", "middle name", "surname", "username",
+  "user name", "email", "e mail", "email address", "phone", "phone number", "mobile", "mobile number", "telephone",
+  "address", "street", "street address", "city", "zip", "zip code", "postal code", "postcode", "date of birth",
+  "birth date", "birthday", "dob", "gender", "tel",
+]
+# A field that matches one of these is not personal even though it contains a personal word.
+personal_except = [
+  "file name", "filename", "folder name", "document name", "tab name", "list name", "group name", "project name",
+  "web address", "url address", "address bar",
+]
+# A field whose text is a question or a filter: typing in it is not entering personal details.
+search = ["search", "find", "filter", "query", "address bar", "url"]
+# A field that sends what is typed into it when Return is pressed.
+message = [
+  "message", "chat", "comment", "reply", "compose", "write", "tweet", "post", "caption", "prompt", "say something",
+  "type a message", "ask",
+]
