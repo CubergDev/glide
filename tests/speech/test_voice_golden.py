@@ -10,9 +10,9 @@ against the version that passed. A deliberate change to the policy changes the h
 from __future__ import annotations
 
 import hashlib
-import re
 import queue
 import random
+import re
 from array import array
 from types import SimpleNamespace
 from typing import ClassVar
