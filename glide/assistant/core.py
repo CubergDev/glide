@@ -28,6 +28,12 @@ A stop that the person SAID or that the router detected is for what was in progr
 ticket, in order, when it is made; a stop inside request N cancels the requests with a ticket up to N, the task they
 started, and the speech they queued, and leaves a later request alone (a new utterance that began right after the stop
 word is answered). The public `stop()` has no request of its own and takes everything made so far.
+
+A front end that answers by some other means than the router (point-to-ask, glide/assistant/point_voice.py) passes
+`responder(text, language)`: a request that is not a stop is handed to it instead of being routed, with the same
+tickets, cancellation, stop phrases (the configured extra ones too) and speech as every other request. `on_stop()` is
+called when a stop phrase was heard, and when a request was cancelled while the responder had it, so whatever the
+responder started ends too. `say_aloud` and `cut_voice` are the public way to use the voice without a request.
 """
 
 from __future__ import annotations
@@ -165,8 +171,12 @@ class Assistant:
         clarify: bool = False,
         extra_stop_phrases: Iterable[str] = (),
         close_wait_s: float = CLOSE_WAIT_S,
+        responder: Callable[[str, str | None], Reply] | None = None,
+        on_stop: Callable[[], None] | None = None,
     ) -> None:
         self._config = config
+        self._responder = responder
+        self._on_stop = on_stop
         self._close_wait_s = close_wait_s
         self._stops = stop_phrases(extra_stop_phrases)
         self.io = io or IO()
@@ -211,6 +221,8 @@ class Assistant:
             return Reply("none")
         if fast_path(text, self._stops) is not None:  # before any model is built or asked: stopping must never wait
             self._stop(turn.seq if turn is not None else ticket)
+            if self._on_stop is not None:
+                self._on_stop()
             return Reply("stop", timings={"total_s": self._clock() - started})
 
         own = turn is None
@@ -220,10 +232,26 @@ class Assistant:
             if turn is None or not self._begin(turn):  # a stop or a barge-in came for this request after it was made
                 return Reply("none")
             with controlled(turn.control):
+                if self._responder is not None:
+                    return self._delegate(turn, text, hint_language, started)
                 return self._respond(turn, text, act, wait, hint_language, started)
         finally:
             if own and turn is not None:
                 self._leave(turn)
+
+    def _delegate(self, turn: _Turn, text: str, hint_language: str | None, started: float) -> Reply:
+        """Hand a request that is not a stop to the `responder`. Nothing is routed, asked of a model, remembered or started.
+
+        A stop or a barge-in that came for the request while it was being handed over has the responder's work ended
+        (`on_stop`) and the request dropped, so what it started is never answered after a stop that was for it.
+        """
+        reply = self._responder(text, hint_language)
+        if turn.cancelled:
+            if self._on_stop is not None:
+                self._on_stop()
+            return Reply("none")
+        reply.timings["total_s"] = self._clock() - started
+        return reply
 
     def _respond(self, turn: _Turn, text: str, act: bool, wait: bool, hint_language: str | None, started: float) -> Reply:
         speaker = self._speaker_or_none()
@@ -405,6 +433,31 @@ class Assistant:
         with self._lock:
             self._cancel_turns(STOPPED, upto=turn.seq, hearing=False)
             self._cut_speech(turn.seq)
+
+    def cut_voice(self) -> None:
+        """Silence the voice now: the sentence being said and the ones queued. Nothing else is touched: no request is
+        cancelled (one still being heard or answered goes on) and the stop and barge-in counts do not change.
+
+        Safe from any thread, and a no-op when nothing is being said or there is no player."""
+        with self._lock:
+            self._cut_speech(self._seq)
+
+    def say_aloud(self, text: str, *, language: str | None = None) -> bool:
+        """Read `text` aloud, a sentence at a time, the way an answer is spoken. False when nothing was queued.
+
+        Without a player this does nothing, and no TTS is built (the same rule as every answer). The sentences are
+        queued together under the lock a stop takes, so a stop or `cut_voice` sees all of them or none. They are not
+        tied to a request: a later stop, barge-in or `cut_voice` silences them; the caller decides whether an answer
+        is still wanted before it calls this (an answer that arrived after a stop must not be passed here).
+        """
+        speaker = self._speaker_or_none()
+        if speaker is None:
+            return False
+        queued = False
+        with self._lock:
+            for sentence in split_sentences(text):
+                queued = speaker.say(sentence, language=language or detect_language(sentence)) or queued
+        return queued
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Block until everything said so far has been played. False if `timeout` ran out first."""

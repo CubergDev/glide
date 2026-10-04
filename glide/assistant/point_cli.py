@@ -205,7 +205,7 @@ def _voice(args, config, writer, selection, voice_factory, emit, finished, outco
             act=False,
             assistant_factory=lambda cfg, io=None, **options: PointAssistant(cfg, io=io, **options),
         )
-        session = PointSession(selection, writer, emit, speak=loop.assistant.say, cancel_speech=loop.assistant.cut_voice)
+        session = PointSession(selection, writer, emit, speak=loop.assistant.say_aloud, cancel_speech=loop.assistant.cut_voice)
         loop.assistant.bind(session)
         _say("Ask about this point, then ask follow-up questions. Say Stop to interrupt an answer. Ctrl-C ends.")
         loop.start()

@@ -193,7 +193,9 @@ class PointMode:
         made: list[PointSession] = []
 
         def bind(assistant: PointAssistant) -> None:
-            session = PointSession(selection, writer, self._session_event, speak=assistant.say, cancel_speech=assistant.cut_voice)
+            session = PointSession(
+                selection, writer, self._session_event, speak=assistant.say_aloud, cancel_speech=assistant.cut_voice
+            )
             assistant.bind(session)
             made.append(session)
 
