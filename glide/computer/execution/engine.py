@@ -770,7 +770,11 @@ class Execution:
             "seconds": time.perf_counter() - self.started,
             "first_action_s": self.first_action,
             "steps_taken": len(state.history),
-            "progress": state.progress,
+            "progress": state.progress
+            if cfg.record_content
+            else [
+                {**p, "id": self.ledger.keys.get(p["id"], p["id"])} for p in state.progress
+            ],  # the planner's ids can echo the goal
             "plan_revisions": self.revision,
             "recoveries": self.recoveries,
             "calls": state.calls.summary(),

@@ -84,7 +84,8 @@ def test_progress_is_durable_and_privacy_preserving(monkeypatch, tmp_path):
         Reasoner([response(Milestone("field", "Private text", "field_value", target="Name", value=secret))]),
     )
     ledger = Ledger(tmp_path / "progress.sqlite3", "offline")
-    assert ledger.summary() == state.progress and not ledger.unresolved()
+    # The journal holds opaque milestone keys, not the planner's ids (PR10-4175413687).
+    assert ledger.summary() == [{**p, "id": "m1"} for p in state.progress] and not ledger.unresolved()
     ledger.close()
     assert secret not in (tmp_path / "run.json").read_text()
     with sqlite3.connect(tmp_path / "progress.sqlite3") as db:
