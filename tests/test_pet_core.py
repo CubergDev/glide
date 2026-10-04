@@ -36,7 +36,7 @@ def tone(level: int, seconds: float) -> bytes:
 class PetConfig(FakeConfig):
     """FakeConfig plus what the pet reads from a real GlideConfig: the speech settings and the slots."""
 
-    speech = SpeechSettings()
+    voice = SpeechSettings()  # what a real GlideConfig holds for the voice stack (`config.speech` is the providers' view)
 
     def slots(self, role):
         return [SimpleNamespace(name=f"{role}-a", state="ready"), SimpleNamespace(name=f"{role}-b", state="skipped")]
@@ -308,6 +308,27 @@ def test_voice_builds_once_then_pauses_and_resumes_the_same_loop(tmp_path):
     assert len(built) == 1 and one.loop.calls == ["start", "pause", "resume"]
     core.close()
     assert one.loop.calls[-1] == "stop"
+
+
+def test_a_real_config_gives_the_voice_stack_its_own_settings_not_the_providers_view(tmp_path):
+    """PR15-4175491833: the pet read `config.speech` (the providers' table, silence_ms None by default) where the voice stack
+    takes `config.voice`; the fake config here had `speech` shaped like the voice settings and hid it."""
+    from glide.providers.config import GlideConfig
+
+    config = GlideConfig.from_toml('[speech]\nsilence_ms = 800\nvad = "energy"\n', env={})
+    built = []
+
+    def factory(config, settings, *, io, act, assistant_factory):
+        built.append(settings)
+        return FakeLoop(assistant_factory(config, io=io))
+
+    core = PetCore(config, runs_dir=tmp_path / "runs", voice_factory=factory)
+    assert core.silence_ms == 800
+    core.headset = True
+    core.start_voice()
+    events_until(core, lambda es: ("mic", "") in types(es))
+    assert isinstance(built[0], SpeechSettings) and (built[0].headset, built[0].silence_ms, built[0].vad) == (True, 800, "energy")
+    core.close()
 
 
 def test_a_voice_stack_that_cannot_start_says_what_is_missing_and_never_the_key(tmp_path):

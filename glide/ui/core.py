@@ -171,7 +171,7 @@ class PetCore:
         self._closed = False
         self.act = False  # computer tasks are dry runs until the person turns this on
         self.headset = False
-        self.silence_ms = config.speech.silence_ms
+        self.silence_ms = config.voice.silence_ms
         config.record_content = bool(record_content)  # D3: off unless asked for, whatever the config object held
         self._unsubscribe = config.on_switch(self._on_switch)
         self.point = PointMode(
@@ -270,7 +270,7 @@ class PetCore:
         try:
             if self._abandoned(epoch):
                 return False
-            settings = dataclasses.replace(self._config.speech, headset=self.headset, silence_ms=self.silence_ms)
+            settings = dataclasses.replace(self._config.voice, headset=self.headset, silence_ms=self.silence_ms)
             loop = self._voice_factory(self._config, settings, io=self._new_io(), act=act, assistant_factory=assistant_factory)
             if bind is not None:
                 bind(loop.assistant)
