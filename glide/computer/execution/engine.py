@@ -194,7 +194,7 @@ class Execution:
         self.action_source = self.cached = None
         self.failures = self.stale = 0
         self.transitions: set = set()
-        self.unverified: set = set()  # (step id, action identity) of writes whose milestone effect was not observed
+        self.unverified: set = set()  # `_write_key` of writes whose milestone effect was not observed
         self.selection_error = ""
         # How the run failed, for the report.
         self.failure_stage = self.error_type = self.failure_code = ""
@@ -219,7 +219,11 @@ class Execution:
             return self._blocked_early("Invalid execution budget or readiness deadline; no action was issued.")
         try:
             cfg.out.mkdir(parents=True, exist_ok=True)
-            self.ledger = Ledger(cfg.out / "progress.sqlite3", self.control.task_id)
+            if cfg.journal:
+                cfg.journal.mkdir(parents=True, exist_ok=True)
+            self.ledger = Ledger(
+                cfg.out / "progress.sqlite3", self.control.task_id, cfg.journal / "unresolved-write" if cfg.journal else None
+            )
         except (OSError, sqlite3.Error):
             return self._blocked_early("The task journal is unavailable; no action was issued.")
         try:
@@ -248,6 +252,8 @@ class Execution:
         cfg, state, phases = self.cfg, self.state, self.phases
         if self.ledger.unresolved():
             raise InvalidAction("An unresolved operation exists for this task; review its result before restarting")
+        if cfg.act and self.ledger.marked():
+            raise InvalidAction(self.ledger.marked())
         with self.classifier_factory() as classifier:
             ctx = metered(self.ctx_factory(classifier, state.history), state.calls)
             scope = self._scope(ctx)
@@ -369,6 +375,9 @@ class Execution:
         else:
             state.outcome = "step limit"
             state.failure = "The execution budget ended before all requested effects were verified."
+            state.uncertain = self.control.in_flight
+            if state.uncertain:
+                state.readback = "completion unknown; review before a fresh task"
         # Completing the final effect on the last allowed step is still completion.
         checkpoint()
         if not supervisor and self.steps and all(ledger.count(s.id) >= s.quantity for s in self.steps):
@@ -448,7 +457,7 @@ class Execution:
             return False
         self.stale = 0
         action = self.action
-        if (step.id, action.identity) in self.unverified:
+        if self._write_key(step, action, before) in self.unverified:
             # Generic evidence (a focus, a redrawn control) says that something changed, never that this write did what it
             # was for. Sending it again could do it twice, so the run stops here and says that the outcome is unknown.
             raise UnverifiedWrite(UNVERIFIED_WRITE)
@@ -612,11 +621,11 @@ class Execution:
         if not verified and not intermediate and action.kind in {"click", "type", "key", "tab_create", "tab_close"}:
             raise InvalidAction("Write outcome was not verified; review the effect before retrying")
         if not verified and action.kind in {"click", "key"}:
-            self.unverified.add((step.id, action.identity))
+            self.unverified.add(self._write_key(step, action, before))
         previous = ledger.count(step.id)
         ledger.finish(self.operation, step, verified, elapsed, intermediate)
         self.operation = None
-        self.control.in_flight = False
+        self.control.in_flight = self._write_unresolved()
         advanced = ledger.count(step.id) > previous
         transition = (step.id, action.identity, intermediate)
         novel = bool(intermediate) and transition not in self.transitions
@@ -636,6 +645,28 @@ class Execution:
         )
         self.cached = (step.id, action, after.owner) if advanced and action.kind in {"tab_create", "scroll"} else None
         self.action = None
+
+    @staticmethod
+    def _write_key(step, action, observed) -> tuple:
+        """What an unverified write was, for the repeat guard: the milestone, the kind, what it pressed (its label and role,
+        which survive a re-render that renumbers the handle) and its value. Never a handle."""
+        target = observed.elements.get(action.target)
+        return (
+            step.id,
+            action.kind,
+            target.label if target else action.target,
+            target.role if target else "",
+            action.value,
+            action.modifiers,
+        )
+
+    def _write_unresolved(self) -> bool:
+        """An unverified click or key whose milestone is still open (or was replanned away): it may have fired, so the
+        run is uncertain however it ends, until a verified effect for that milestone shows otherwise."""
+        by_id = {s.id: s for s in self.steps}
+        return any(
+            sid not in by_id or self.ledger.count(sid) < by_id[sid].quantity for sid in {key[0] for key in self.unverified}
+        )
 
     @staticmethod
     def _would_do(action, observed) -> str:
@@ -665,12 +696,20 @@ class Execution:
                 after = self.phases("reconciliation", observe, self.backend, self.step, self.action)
             verified = effect(self.verification_step or self.step, self.action, self.before, after, self.receipt)
             intermediate = primitive_effect(self.action, self.before, after, self.receipt)
+            # A redraw or a focus change after a click or key says something changed, never that the write did what it was
+            # for (see `_dispatch`): only that proof, or a specific one such as typed text, clears the uncertainty.
+            generic = bool(intermediate) and not verified and self.action.kind in {"click", "key"}
             if verified or intermediate:
                 self.ledger.finish(self.operation, self.step, verified, time.perf_counter() - self.op_started, intermediate)
-                state.uncertain = control.in_flight = False
+                if generic:
+                    self.unverified.add(self._write_key(self.step, self.action, self.before))
+                else:
+                    state.uncertain = control.in_flight = self._write_unresolved()
             state.readback = (
                 "effect verified"
                 if verified
+                else "observed a change; completion unknown"
+                if generic
                 else "intermediate operation verified; task incomplete"
                 if intermediate
                 else "observed; completion unknown"
@@ -692,6 +731,7 @@ class Execution:
         diagnostics.exception(error, stage=self.phases.stage)
         self.failure_stage, self.error_type, self.failure_code = self.phases.stage, type(error).__name__, "unverified_write"
         state.outcome, state.failure = "blocked", UNVERIFIED_WRITE
+        self.control.in_flight = True
         state.uncertain, state.readback = True, "the last observation did not show the effect; completion unknown"
 
     def _failed(self, error):

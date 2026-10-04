@@ -16,10 +16,13 @@ from __future__ import annotations
 import os
 import sys
 import tomllib
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from ..trust import notice, strip_table
 
 CONFIG_NAME = "glide.toml"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -59,29 +62,39 @@ def default_data_dir(environ: Mapping[str, str], home: Path | None = None) -> Pa
     return (Path(share) if share else base / ".local" / "share") / "glide"
 
 
-def find_config(
+def locate_config(
     environ: Mapping[str, str], *, path: str | os.PathLike[str] | None = None, cwd: Path | None = None, home: Path | None = None
-) -> Path | None:
-    """The glide.toml `load_config` would pick: `path`, $GLIDE_CONFIG, ./glide.toml, ~/.config/glide/glide.toml."""
+) -> tuple[Path | None, bool]:
+    """The glide.toml `load_config` would pick, and whether it is somebody else's: a ./glide.toml of the current
+    directory (not `path`, not $GLIDE_CONFIG, not the user's own), which may not lower a safety setting (glide/trust.py)."""
     if path is not None:
         chosen = Path(path).expanduser()
         if not chosen.is_file():
             raise SettingsError(f"the config file {chosen} does not exist")
-        return chosen
+        return chosen, False
     if named := (environ.get("GLIDE_CONFIG") or "").strip():
         chosen = Path(named).expanduser()
         if not chosen.is_file():
             raise SettingsError(f"GLIDE_CONFIG names {chosen}, which does not exist")
-        return chosen
+        return chosen, False
     base = home if home is not None else (Path(h) if (h := environ.get("HOME")) else None)
-    for candidate in ((cwd or Path.cwd()) / CONFIG_NAME, base / ".config" / "glide" / CONFIG_NAME if base else None):
+    here = (cwd or Path.cwd()) / CONFIG_NAME
+    for candidate in (here, base / ".config" / "glide" / CONFIG_NAME if base else None):
         if candidate is not None and candidate.is_file():
-            return candidate
-    return None
+            return candidate, candidate is here
+    return None, False
 
 
-def read_table(name: str, config: Path | None) -> Mapping[str, Any]:
-    """One top-level table of glide.toml ({} when there is no file or no such table)."""
+def find_config(
+    environ: Mapping[str, str], *, path: str | os.PathLike[str] | None = None, cwd: Path | None = None, home: Path | None = None
+) -> Path | None:
+    """The glide.toml `load_config` would pick: `path`, $GLIDE_CONFIG, ./glide.toml, ~/.config/glide/glide.toml."""
+    return locate_config(environ, path=path, cwd=cwd, home=home)[0]
+
+
+def read_table(name: str, config: Path | None, *, foreign: bool = False) -> Mapping[str, Any]:
+    """One top-level table of glide.toml ({} when there is no file or no such table). With `foreign` (the file is a
+    project's, not the user's) the settings glide/trust.py refuses are left out, and said so as a warning on stderr."""
     if config is None:
         return {}
     try:
@@ -93,6 +106,10 @@ def read_table(name: str, config: Path | None) -> Mapping[str, Any]:
     table = data.get(name, {})
     if not isinstance(table, dict):
         raise SettingsError(f"[{name}] must be a table")
+    if foreign:
+        table, left = strip_table(name, table)
+        if left:
+            warnings.warn(notice(str(config), left), stacklevel=2)
     return table
 
 
@@ -131,7 +148,8 @@ class MemorySettings:
         home: Path | None = None,
     ) -> MemorySettings:
         env = os.environ if environ is None else environ
-        return cls.from_mapping(read_table("memory", find_config(env, path=config, cwd=cwd, home=home)), env)
+        found, foreign = locate_config(env, path=config, cwd=cwd, home=home)
+        return cls.from_mapping(read_table("memory", found, foreign=foreign), env)
 
     def memory_dir(self, environ: Mapping[str, str] | None = None, home: Path | None = None) -> Path:
         """Where memory lives: <data dir>/memory. Computing it creates nothing."""

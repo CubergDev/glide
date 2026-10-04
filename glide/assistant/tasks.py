@@ -310,6 +310,7 @@ class ComputerTask:
                 record_content=bool(getattr(self._config, "record_content", False)),
                 **engine_fields,
                 route=self.route,
+                journal=self.folder.parent,  # one journal for every run folder under the runs directory
             )
 
             def ctx_factory(typesafe, history):

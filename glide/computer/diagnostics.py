@@ -57,9 +57,15 @@ _secret_key = re.compile(
     r"(?:^|[-_ ])(?:authorization|api[-_ ]?key|access[-_ ]?key|secrets?|token|passwords?|passwd|cookies?|credentials?)(?:$|[-_ ])",
     re.I,
 )
+# A name that ends in KEY or APIKEY is a credential in an environment variable (never as a bare dict key: "key" is a key press).
+_secret_env = re.compile(_secret_key.pattern + r"|(?:^|[-_])(?:api)?key$", re.I)
+_declared_envs: set[str] = set()  # the variable names a loaded configuration says hold provider keys
+# A credential word, with or without a prefix (OPENAI_API_KEY, client_secret, Proxy-Authorization), then its value.
 _credential_assignment = re.compile(
-    r"(?i)(\b(?:authorization|api[-_ ]?key|access[-_ ]?key|secret|token|password|passwd|cookie)\b[\"']?\s*[=:]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|(?:bearer\s+)?[^\s,;}]+)"
+    r"(?i)((?<![A-Za-z0-9])(?:(?:[A-Za-z0-9_-]{0,40}[-_])?"
+    r"(?:authorization|api[-_ ]?key|access[-_ ]?key|secret|token|password|passwd|cookie)|[A-Za-z0-9_-]{0,40}[-_]key)"
+    r"\b[\"']?\s*[=:]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|(?:(?:bearer|basic|token|digest)\s+)?[^\s,;}]+)"
 )
 _cookie = re.compile(r"(?i)(\bcookie[\"']?\s*[=:]\s*)[^\r\n]+")
 _bearer = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
@@ -106,6 +112,11 @@ _content_keys = {
     "instructions",
     "schema",
     "configuration",
+    "reason",  # a validation or decision error's text can quote the goal or a page
+    "observation",
+    "message",
+    "error",
+    "field",
 }
 
 
@@ -115,7 +126,14 @@ def _now() -> str:
 
 def _secrets() -> list[str]:
     """Values of credential-named environment variables, read only to remove them."""
-    return sorted({v for k, v in os.environ.items() if _secret_key.search(k) and len(v) >= 6}, key=len, reverse=True)
+    named = {v for k, v in os.environ.items() if (_secret_env.search(k) or k in _declared_envs) and len(v) >= 6}
+    return sorted(named, key=len, reverse=True)
+
+
+def register_secret_env(name: str) -> None:
+    """Remember that the environment variable `name` holds a provider key, whatever it is called."""
+    if name:
+        _declared_envs.add(name)
 
 
 def _host_only(match: re.Match[str]) -> str:

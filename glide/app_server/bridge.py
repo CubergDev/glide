@@ -36,6 +36,7 @@ from ..assistant.core import IO, Assistant
 from ..assistant.tasks import DEFAULT_RUNS_DIR
 from ..computer.control import TaskEvent
 from . import wire
+from .logs import failed
 from .runtime import Runtime, VoiceFactory
 from .server import AppServer, Session
 from .settings import SettingsPanel, SettingsState, VoiceUnavailable
@@ -209,7 +210,7 @@ class AppBridge:
             self._say_user(text)
             assistant.handle_text(text, act=self.panel.state.act_enabled, wait=False)
         except Exception as exc:  # the type only: what was asked is not repeated
-            log.exception("a typed request failed")
+            failed(log, "a typed request failed", error=exc)
             self._emit(wire.error("request_failed", f"the request failed ({type(exc).__name__})", reply_to=request_id))
         finally:
             with self._lock:
@@ -304,6 +305,9 @@ class AppBridge:
         with self._lock:
             self._thinking_until = 0.0
         command = (GOAL_PREFIX_ACT if act else GOAL_PREFIX_LOOK) + goal
+        if len(command) > wire.MAX_COMMAND_CHARS:  # the person approves what they can read: never a cut-off of what runs
+            self._warn("That request is too long to approve in full, so it was not run. Say it shorter.")
+            return False
         return server.approvals.ask("input" if act else "screen", command)
 
     # -- reading the assistant ----------------------------------------------------------------------
@@ -315,7 +319,7 @@ class AppBridge:
                 self._poll_speech()
                 self._publish_state()
             except Exception:
-                log.exception("reading the assistant's state failed")
+                failed(log, "reading the assistant's state failed")
 
     def _poll_tasks(self) -> None:
         for assistant in self.runtime.assistants():

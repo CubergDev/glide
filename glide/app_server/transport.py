@@ -23,6 +23,7 @@ import socket
 import stat
 import struct
 import sys
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -106,11 +107,15 @@ def prepare(path: Path, *, uid: int | None = None) -> Path:
     return path
 
 
+ACCEPT_BACKOFF_S = 0.1
+
+
 class Listener:
     """The listening socket. `open()` binds it, `accept()` waits for one connection, `close()` unlinks what `open()` made."""
 
-    def __init__(self, path: Path, *, uid: int | None = None) -> None:
+    def __init__(self, path: Path, *, uid: int | None = None, pause: Callable[[float], None] = time.sleep) -> None:
         self.path = Path(path)
+        self._pause = pause  # injected in tests
         self._uid = os.getuid() if uid is None else uid
         self._sock: socket.socket | None = None
         self._identity: tuple[int, int] | None = None
@@ -141,7 +146,11 @@ class Listener:
             return None
         try:
             conn, _ = sock.accept()
-        except (TimeoutError, OSError):
+        except TimeoutError:
+            return None
+        except OSError:
+            if self._sock is sock:  # not closed: out of descriptors or an aborted connection. Do not let the caller spin.
+                self._pause(ACCEPT_BACKOFF_S)
             return None
         return conn
 

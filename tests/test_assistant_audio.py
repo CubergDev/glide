@@ -349,7 +349,7 @@ def test_a_missing_package_is_a_clear_error_not_an_import_error(monkeypatch, bac
     monkeypatch.setitem(sys.modules, "sounddevice", None)  # makes `import sounddevice` raise ImportError
     with pytest.raises(AudioUnavailable) as caught:
         backend()
-    assert "sounddevice" in str(caught.value) and "uv add" in str(caught.value)
+    assert "sounddevice" in str(caught.value) and "uv sync --extra speech" in str(caught.value)
 
 
 def test_a_missing_portaudio_library_is_the_same_clear_error(monkeypatch):
@@ -405,3 +405,29 @@ def test_the_default_player_and_microphone_need_the_package(monkeypatch):
         Player()
     with pytest.raises(AudioUnavailable):
         Microphone()
+
+
+def test_wait_idle_zero_is_a_poll_that_is_true_when_idle_and_leaves_nothing_queued():
+    """audit2 finding 2: wait_idle(0) queued a marker and so never returned True, and left a marker behind each call."""
+    out = FakeOutput()
+    player = Player(out, block_ms=50)
+    player.play(bytes(2 * 120), RATE)
+    assert player.wait_idle(timeout=3)
+    flushes = out.flushes
+    assert player.wait_idle(0) is True and player.wait_idle(0) is True
+    assert player._items.qsize() == 0 and player.busy is False
+    player.close()
+    assert out.flushes == flushes  # no marker was ever queued by the polls
+
+
+def test_wait_idle_after_close_returns_instead_of_waiting_for_a_marker_nobody_consumes():
+    out = FakeOutput()
+    player = Player(out, block_ms=50)
+    player.play(bytes(2 * 10), RATE)
+    assert player.wait_idle(timeout=3)
+    player.close()
+    result: list[bool] = []
+    thread = threading.Thread(target=lambda: result.append(player.wait_idle(None)), daemon=True)
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive() and result == [True]

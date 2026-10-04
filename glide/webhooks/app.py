@@ -9,6 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
+import os
+import secrets as secrets_mod
 import sqlite3
 import threading
 import time
@@ -95,31 +98,57 @@ _ERROR_ANSWERS = (
 )
 
 
+def _queue_key(database: Path) -> bytes:
+    """The secret that keys this queue's delivery digests, kept beside the database at 0600 and made on first use.
+
+    A bare hash of a body can be confirmed by guessing the body, even after the stored call was redacted."""
+    keyfile = database.with_name(database.name + ".key")
+    for _ in range(2):
+        try:
+            key = keyfile.read_bytes()
+            if len(key) == 32:
+                return key
+        except FileNotFoundError:
+            pass
+        keyfile.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            descriptor = os.open(keyfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue  # another process made it a moment ago: read theirs
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(secrets_mod.token_bytes(32))
+    raise OSError("the queue key file could not be created")
+
+
+def _keyed_digest(key: bytes):
+    return lambda data: hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
 def _delivery(source: Source, event_id: str, digest: str, call, **extra) -> dict:
     return {"source": source.id, "event_id": event_id, "digest": digest, "call": call.model_dump(), **extra}
 
 
-def _github(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+def _github(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings, digest) -> list[dict]:
     verify_github(raw, header(request.headers, "x-hub-signature-256"), keys)
     delivery_id(header(request.headers, "x-github-delivery"))
     # GitHub signs only the body, not its delivery or event headers, so identity comes from the signed bytes.
-    digest = hashlib.sha256(raw).hexdigest()
+    event_id = digest(raw)
     call = translate_github(
         strict_json(raw),
         header(request.headers, "x-github-event"),
         source_id=source.id,
         agent_id=source.agent_id,
-        event_id=digest,
+        event_id=event_id,
         repositories=source.repositories,
         allowed_senders=source.allowed_senders,
         record_content=settings.record_content,
     )
     if call is None:  # an unsigned event label must not poison receipts for a real delivery of the same body
         return []
-    return [_delivery(source, digest, digest, call, dedupe_body=True)]
+    return [_delivery(source, event_id, event_id, call, dedupe_body=True)]
 
 
-def _standard(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+def _standard(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings, digest) -> list[dict]:
     event_id = verify_standard(raw, request.headers, keys, settings.timestamp_tolerance)
     call = translate_standard(
         strict_json(raw),
@@ -129,10 +158,10 @@ def _standard(source: Source, request: Request, raw: bytes, keys, settings: Serv
         allow_actions=source.allow_actions,
         record_content=settings.record_content,
     )
-    return [_delivery(source, event_id, hashlib.sha256(raw).hexdigest(), call)]
+    return [_delivery(source, event_id, digest(raw), call)]
 
 
-def _gmail(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+def _gmail(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings, digest) -> list[dict]:
     payload = strict_json(raw)
     message = payload.get("message")
     event_id = message.get("messageId") if isinstance(message, dict) else None
@@ -146,10 +175,10 @@ def _gmail(source: Source, request: Request, raw: bytes, keys, settings: ServerS
         max_age_s=source.gmail_max_age_seconds,
         record_content=settings.record_content,
     )
-    return [_delivery(source, event_id, hashlib.sha256(raw).hexdigest(), call)]
+    return [_delivery(source, event_id, digest(raw), call)]
 
 
-def _outlook(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings) -> list[dict]:
+def _outlook(source: Source, request: Request, raw: bytes, keys, settings: ServerSettings, digest) -> list[dict]:
     if source.expired():
         raise AuthError("Subscription expired.")
     calls = translate_outlook(
@@ -162,7 +191,7 @@ def _outlook(source: Source, request: Request, raw: bytes, keys, settings: Serve
         client_states=keys,
         record_content=settings.record_content,
     )
-    return [_delivery(source, c.event_id, hashlib.sha256(c.event_id.encode()).hexdigest(), c) for c in calls]
+    return [_delivery(source, c.event_id, digest(c.event_id.encode()), c) for c in calls]
 
 
 # Verify, then translate, per provider. A provider with no entry (an enabled `mcp` source: its receiver is not
@@ -199,6 +228,7 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             return
         path = Path(settings.database)
         owned = store is None
+        app.state.digest = _keyed_digest(_queue_key(path) if owned else secrets_mod.token_bytes(32))
         app.state.queue = store or QueueStore(
             path,
             settings.max_pending,
@@ -273,7 +303,7 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             translator = _TRANSLATORS.get(source.provider)
             if translator is None:
                 raise TranslationError("This source has no receiver.")
-            deliveries = translator(source, request, raw, keys.get(source.id), settings)
+            deliveries = translator(source, request, raw, keys.get(source.id), settings, request.app.state.digest)
         except (ValueError, KeyError, TypeError, RecursionError) as error:
             if isinstance(error, AuthError | TranslationError):
                 raise

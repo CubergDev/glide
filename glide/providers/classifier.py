@@ -47,7 +47,6 @@ for one because the error kind is `unsupported`.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import re
@@ -77,7 +76,7 @@ from glide.computer.control import checkpoint
 
 from .base import ChatFacade, ChatResult, ProviderSpec, Usage
 from .chain import Chain, ChainPolicy, Slot, SwitchEvent
-from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, redact, snippet, status_error
+from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, safe_text, snippet, status_error
 
 TOP_N = 3  # options each Choice is asked to rank
 ROLE = "classifier"
@@ -257,20 +256,20 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _json_object(text: str) -> dict:
-    """The JSON object in a reply, tolerating a code fence or a sentence around it."""
+    """The reply as the one JSON object it must be, a code fence round it allowed and nothing else. The prompt carries
+    text read off a screen, so "the first object found in a reply" would be whichever object that text got in."""
     if not isinstance(text, str) or not text.strip():
         raise _Invalid("the reply was empty")
-    candidates = [text.strip()]
-    if (fenced := _FENCE.search(text)) is not None:
-        candidates.insert(0, fenced.group(1).strip())
-    if (start := text.find("{")) != -1 and (end := text.rfind("}")) > start:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
-        with contextlib.suppress(ValueError):
-            value = json.loads(candidate)
-            if isinstance(value, dict):
-                return value
-    raise _Invalid("the reply was not a JSON object")
+    body = text.strip()
+    if fenced := _FENCE.fullmatch(body):
+        body = fenced.group(1).strip()
+    try:
+        value = json.loads(body)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        raise _Invalid("the reply was not one JSON object and nothing else")
+    return value
 
 
 def _number(value: Any) -> float | None:
@@ -415,7 +414,9 @@ class LLMClassifier:
                 ]
                 if result is not None and result.finish_reason == "length":
                     budget *= 2  # it ran out of room, so the same room would run out again
-            result = self._llm.chat(sent, max_tokens=budget, temperature=self._temperature, schema=schema, timeout=self._timeout)
+            result = self._llm.chat(
+                sent, max_tokens=budget, temperature=self._temperature, schema=schema, timeout=self._timeout, exact_json=True
+            )
             _add(usage, result.usage)
             try:
                 parsed = _answers(result.text, asked)
@@ -489,7 +490,9 @@ def typesafe_error(
             error.retry_after = exc.retry_after_ms / 1000
         return error
     return ProviderError(
-        f"{name} refused the request: {snippet(redact(str(exc), secrets))}", kind="bad_request", provider=provider
+        f"{name} refused the request: {snippet(safe_text(str(exc), secrets, request_texts))}",
+        kind="bad_request",
+        provider=provider,
     )
 
 
@@ -570,7 +573,7 @@ def build_client(
         )
     except TypeSafeError as e:
         raise ProviderError(
-            f"{name} could not be set up: {snippet(redact(str(e), [api_key]))}", kind="bad_request", provider=name
+            f"{name} could not be set up: {snippet(safe_text(str(e), [api_key]))}", kind="bad_request", provider=name
         ) from None
     return TypeSafeClassifier(client, name=name, model=model or constants.DEFAULT_MODEL, secrets=[api_key, api_key.strip()])
 

@@ -64,7 +64,18 @@ from ..routing import (
     resolve,
     stop_phrases,
 )
-from ..routing.decision import CLARIFY, REASON, STOP, WHY_INJECTION, WHY_TIERS_FAILED, WHY_UNCERTAIN, WHY_UNCONFIRMED
+from ..routing.decision import (
+    CLARIFY,
+    EXECUTE,
+    OWNER,
+    REASON,
+    STOP,
+    WHY_CLASSIFIER,
+    WHY_INJECTION,
+    WHY_TIERS_FAILED,
+    WHY_UNCERTAIN,
+    WHY_UNCONFIRMED,
+)
 from .answer import DATA_CHARS, DEEP_NOTE, NOT_DONE_NOTE, answer_messages, screen_data
 from .audio_io import SAMPLE_RATE, Player, rms
 from .clarifier import DEFAULT_WAIT_S, PendingQuestion
@@ -211,6 +222,8 @@ class Assistant:
         self._on_stop = on_stop
         self._close_wait_s = close_wait_s
         self._extra_stops = tuple(extra_stop_phrases)
+        configured = getattr(getattr(config, "voice", None), "stop_phrases", ())  # [speech] stop_phrases, for every front end
+        self._extra_stops = (*self._extra_stops, *configured)
         self._stops = stop_phrases(self._extra_stops)
         self._routing = dict(routing) if routing is not None else routing_table(config)
         RoutingSettings.from_table(self._routing)  # a bad [routing] table is refused here, not on the first request
@@ -231,6 +244,7 @@ class Assistant:
         self._speaker: Speaker | None = None
         self._voice: _Voice | None = None
         self._speech_off = False
+        self._closed = False  # set by `close`, under the lock: no task is started after it
         self._clarify = clarify  # whether the router or a computer task may put a question to the user (see `answer_pending`)
 
     def __repr__(self) -> str:
@@ -238,8 +252,13 @@ class Assistant:
 
     # -- requests -------------------------------------------------------------------------------
 
-    def handle_text(self, text: str, *, act: bool = False, wait: bool = True, hint_language: str | None = None) -> Reply:
+    def handle_text(
+        self, text: str, *, act: bool = False, wait: bool = True, hint_language: str | None = None, goal: str | None = None
+    ) -> Reply:
         """Answer, or do, what `text` asks. A computer task is a dry run unless `act=True`.
+
+        `goal` is a task the person already saw previewed and confirmed: it runs exactly that and `text` is not routed
+        again, so what runs cannot differ from what was confirmed.
 
         With `wait=True` a computer task has ended when this returns; with `wait=False` it runs on, and its
         result is shown and spoken when it ends. Speech of an answer is always asynchronous: this returns
@@ -248,10 +267,17 @@ class Assistant:
         A request that is cancelled (a stop, or a newer request) while it is being answered returns
         `Reply("none")` and says nothing, not even that something failed.
         """
-        return self._handle(text, act, wait, hint_language, self._ticket())
+        return self._handle(text, act, wait, hint_language, self._ticket(), goal=goal)
 
     def _handle(
-        self, text: str, act: bool, wait: bool, hint_language: str | None, ticket: int, turn: _Turn | None = None
+        self,
+        text: str,
+        act: bool,
+        wait: bool,
+        hint_language: str | None,
+        ticket: int,
+        turn: _Turn | None = None,
+        goal: str | None = None,
     ) -> Reply:
         started = self._clock()
         text = " ".join(text.split())
@@ -273,7 +299,7 @@ class Assistant:
                 if self._responder is not None:
                     reply = self._delegate(turn, text, hint_language, started)
                 else:
-                    reply = self._respond(turn, text, act, wait, hint_language, started)
+                    reply = self._respond(turn, text, act, wait, hint_language, started, goal)
             if turn.cancelled and reply.route == "answer":  # a stop or a newer request took it: not a completed answer
                 reply.route = "none"  # (the text is what was already said before the cut)
             return reply
@@ -295,11 +321,18 @@ class Assistant:
         reply.timings["total_s"] = self._clock() - started
         return reply
 
-    def _respond(self, turn: _Turn, text: str, act: bool, wait: bool, hint_language: str | None, started: float) -> Reply:
+    def _respond(
+        self, turn: _Turn, text: str, act: bool, wait: bool, hint_language: str | None, started: float, goal: str | None = None
+    ) -> Reply:
         speaker = self._speaker_or_none()
         if speaker is not None:
             speaker.mark()
         reply = Reply("answer")
+        if goal:  # a task the person already saw previewed and confirmed: it runs exactly that, nothing is routed
+            decision = Decision(EXECUTE, OWNER[EXECUTE], 1.0, WHY_CLASSIFIER, "previewed", goal=goal, language=hint_language)
+            reply.route = "computer"
+            self._computer(turn, text, decision, act, wait, reply, started, hint_language)
+            return reply
         try:
             router = self._router()
         except ConfigError as exc:  # a [routing] calibration_file that cannot be read: nothing is routed, so nothing acts
@@ -579,9 +612,11 @@ class Assistant:
         is said through `io.warn` and False is returned: the last action may still be in flight.
         """
         deadline = self._clock() + self._close_wait_s
-        task = self._tasks.current
+        with self._lock:  # closed and stopped together: no request can start a task after this, and any started before is seen
+            self._closed = True
+            self._stop(self._seq)
+            task = self._tasks.current
         waiting = task is not None and task.running
-        self.stop()
         unwound = not waiting or self._wait_for(task, deadline)
         if not unwound:
             self.io.warn(
@@ -723,7 +758,7 @@ class Assistant:
             reply.text = " ".join(turn.parts)
         try:
             with self._lock:  # checked and started under the lock `stop` takes, so a stop cannot fall between the two
-                if turn.cancelled:
+                if turn.cancelled or self._closed:
                     reply.route = "stop"
                     return
                 self._task_seq = turn.seq

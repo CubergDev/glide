@@ -35,8 +35,17 @@ SITES: dict[str, str] = {
 }
 
 
+def _chooses_configuration(name: str) -> bool:
+    return name == "GLIDE_CONFIG" or name.startswith("GLIDE_PIN_")
+
+
 def load_dotenv(path: Path) -> None:
-    """Set KEY=VALUE lines from a .env file into the environment unless already set."""
+    """Set KEY=VALUE lines from a .env file into the environment unless already set.
+
+    A .env sits in the project directory, so it is not the user's say about WHICH configuration is used: it cannot set
+    GLIDE_CONFIG (a file named there would count as the user's own and skip the trusted-hosts rule of a project-local
+    glide.toml) or GLIDE_PIN_* (which slot gets a key). Those come from the real environment or a flag.
+    """
     if not path.is_file():
         return
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -44,6 +53,8 @@ def load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
+        if _chooses_configuration(key.strip()):
+            continue
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 

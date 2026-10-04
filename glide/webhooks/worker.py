@@ -236,7 +236,15 @@ def drive(task, control: RunControl) -> dict:
     leaves this function, a KeyboardInterrupt included, stops the task first too: nothing is left driving the
     machine without an owner.
     """
-    task.start()
+    from ..assistant.tasks import _ACTIVE  # the process-wide abort hook allows one task at a time, whoever started it
+
+    if not _ACTIVE.acquire(blocking=False):
+        return _blocked("Another desktop task is already running in this process; nothing was done.")
+    try:
+        task.start(release=_ACTIVE.release)  # the task thread gives the lock back when it ends
+    except BaseException:
+        _ACTIVE.release()
+        raise
     try:
         while not task.wait(0.1):
             control.check(wait=False)
@@ -469,6 +477,17 @@ class _Lease:
                 pause(delay)
 
 
+def _outcome_unknown(error: BaseException | None) -> bool:
+    """A handler's write the server may have run anyway (`MCPCallError`, `ToolOutcomeUnknown`), on the error or its cause."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if getattr(error, "outcome_unknown", False) is True:
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def _processed(call: AgentCall, control: RunControl, options: dict) -> dict:
     """The outcome of one run. An interruption or crash is a fixed phrase, never the exception's text."""
     try:
@@ -477,9 +496,9 @@ def _processed(call: AgentCall, control: RunControl, options: dict) -> dict:
         return result
     except Abort:
         return _ended("uncertain" if control.in_flight else "cancelled", NOTE_INTERRUPTED)
-    except Exception:
+    except Exception as error:
         control.cancel()
-        return _ended("uncertain" if control.in_flight else "failed", NOTE_FAILED)
+        return _ended("uncertain" if control.in_flight or _outcome_unknown(error) else "failed", NOTE_FAILED)
 
 
 def run_one(transport, *, stop: threading.Event | None = None, pause: Callable[[float], None] = time.sleep, **options) -> bool:

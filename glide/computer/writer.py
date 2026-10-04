@@ -740,12 +740,41 @@ ANSWER_SYSTEM = (
 FOCUS_MAX_CHARS = 400  # "one short imperative sentence": a longer one is a payload
 _SCHEME_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s'\"<>]+", re.IGNORECASE)
 _OPAQUE_URL = re.compile(r"\b(?:javascript|data|vbscript|file|blob|about):", re.IGNORECASE)
-_BARE_SITE = re.compile(  # a site written without a scheme: a name under a common top-level domain, an address, localhost
-    r"(?<![\w@./:-])(?:localhost|(?:\d{1,3}\.){3}\d{1,3}"
-    r"|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|io|ai|co|dev|app|edu|gov|info|xyz|me|tv|uk|de|fr|ru|cn|jp|in|us|ca|au))"
+_BARE_SITE = re.compile(  # a site written without a scheme: localhost, an address (dotted, hex or one number) or a dotted name
+    r"(?<![\w@./:-])(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|0x[0-9a-f]+|\d{8,10}"
+    r"|(?:[\w](?:[\w-]*\w)?\.)+[^\W\d_]{2,})"
     r"(?![\w-])",
     re.IGNORECASE,
 )
+# A dotted name ending in one of these is a file the screen shows, not a site. Any other ending is read as a top-level
+# domain: a list of known ones goes stale and a false alarm costs a stop, a false pass sends the agent elsewhere.
+_FILE_ENDINGS = frozenset(
+    [
+        "txt",
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "csv",
+        "json",
+        "md",
+        "py",
+        "js",
+        "html",
+        "htm",
+        "exe",
+        "dmg",
+        "pkg",
+    ]
+)
+_SPACED_DOT = re.compile(r"\s+\.\s+|\s*[\u3002\uff0e\uff61]\s*")  # "evil . com", and the ideographic and full-width stops
 
 
 def _sites(text: str) -> list[str] | None:
@@ -759,7 +788,12 @@ def _sites(text: str) -> list[str] | None:
         if not host:
             return None
         found.append(host.lower().removeprefix("www."))
-    found += [m.group().lower().removeprefix("www.") for m in _BARE_SITE.finditer(_SCHEME_URL.sub(" ", text))]
+    bare = _SPACED_DOT.sub(".", _SCHEME_URL.sub(" ", text))
+    found += [
+        m.group().lower().removeprefix("www.")
+        for m in _BARE_SITE.finditer(bare)
+        if m.group().rpartition(".")[2].lower() not in _FILE_ENDINGS
+    ]
     return found
 
 

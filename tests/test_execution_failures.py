@@ -249,3 +249,25 @@ def test_a_step_limit_names_what_remains(monkeypatch, tmp_path):
     state = drive(monkeypatch, tmp_path, computer, Reasoner([response(*steps)]), Jev("plan"), steps=2)
     assert state.outcome == "step limit" and len(computer.actions) == 2
     assert "budget ended" in state.failure and "Verified 2 effect(s); 1 remain." in state.failure
+
+
+def test_a_write_left_pending_by_one_run_blocks_the_next_run_in_a_new_folder(monkeypatch, tmp_path):
+    """Audit 2 #4: every entry point mints a fresh run folder, so the journal that guards against replay is shared."""
+    journal = tmp_path / "journal"
+    first = Computer()
+
+    def failed_write(c, action):
+        raise OSError("process died after the write")
+
+    first.on_execute = failed_write
+    scenario = SCENARIOS["open ten Google tabs"]
+    one = drive(monkeypatch, tmp_path / "run-1", first, Reasoner([response(*scenario)]), journal=journal)
+    assert one.uncertain
+    second = Computer()
+    two = drive(monkeypatch, tmp_path / "run-2", second, Reasoner([response(*scenario)]), journal=journal)
+    assert second.actions == [] and two.outcome == "blocked" and "never reported" in two.failure
+    (journal / "unresolved-write").unlink()  # the operator's acknowledgement
+    third = Computer()
+    drive(monkeypatch, tmp_path / "run-3", third, Reasoner([response(*scenario)]), journal=journal)
+    assert third.actions
+    assert not (journal / "unresolved-write").exists()  # a verified write releases its own marker
