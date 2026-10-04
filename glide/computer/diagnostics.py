@@ -131,7 +131,9 @@ def _redact_url(match: re.Match[str]) -> str:
     try:
         parts = urlsplit(match.group(0))
         netloc = f"{REDACTED}@{parts.netloc.rsplit('@', 1)[-1]}" if "@" in parts.netloc else parts.netloc
-        query = urlencode([(k, REDACTED if _secret_key.search(k) else v) for k, v in parse_qsl(parts.query)])
+        query = urlencode(
+            [(k, REDACTED if _secret_key.search(k) else v) for k, v in parse_qsl(parts.query, keep_blank_values=True)]
+        )
         return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
     except ValueError:
         return REDACTED
@@ -144,6 +146,13 @@ def _hide_credentials(value: str, secrets: list[str]) -> str:
     value = _cookie.sub(lambda m: m.group(1) + REDACTED, value)
     value = _credential_assignment.sub(lambda m: m.group(1) + REDACTED, value)
     return _bearer.sub("Bearer " + REDACTED, value)
+
+
+def redact_address(value: str) -> str:
+    """An address with its user info, credential-named query values and configured secrets removed, the rest intact."""
+    for secret in _secrets():
+        value = value.replace(secret, REDACTED)
+    return _url.sub(_redact_url, value)
 
 
 def scrub_text(value: str, *, urls: bool = True, limit: int = MAX_STRING) -> str:

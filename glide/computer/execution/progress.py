@@ -14,11 +14,15 @@ class Ledger:
     """What each milestone needs and which observed effects have been counted for it, per task, in one SQLite file.
 
     The file is 0600 (created before SQLite opens it, so its WAL files follow). A milestone's contract is fixed once
-    registered: a replan may add milestones but cannot change the meaning of one already counted.
+    registered: a replan may add milestones but cannot change the meaning of one already counted. The planner's
+    milestone ids can echo the request, so the file holds an opaque key per milestone (`m1`, `m2`, ...) and the
+    planner's id stays in memory (D3). A pending operation blocks every task that reuses the journal: the CLI mints a
+    new task id per invocation, so the id cannot identify a restarted run.
     """
 
     def __init__(self, path, task_id):
         self.task_id = task_id
+        self.keys: dict[str, str] = {}  # planner id -> the key stored in the file, for this run only
         os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         self.db = sqlite3.connect(path)
         self.db.executescript("""
@@ -32,17 +36,24 @@ class Ledger:
             CREATE TABLE IF NOT EXISTS revisions(task TEXT, version INTEGER, PRIMARY KEY(task,version));
         """)
 
+    def key(self, milestone):
+        """The opaque key of a milestone id, minted on first sight."""
+        return self.keys.setdefault(milestone, f"m{len(self.keys) + 1}")
+
     def register(self, steps, revision):
         with self.db:
             for s in steps:
-                old = self.db.execute("SELECT contract FROM milestones WHERE task=? AND id=?", (self.task_id, s.id)).fetchone()
+                key = self.key(s.id)
+                old = self.db.execute("SELECT contract FROM milestones WHERE task=? AND id=?", (self.task_id, key)).fetchone()
                 if old and old[0] != s.contract:
                     raise InvalidAction("Replanning changed an existing completion contract")
-                self.db.execute("INSERT OR IGNORE INTO milestones VALUES(?,?,?,?)", (self.task_id, s.id, s.contract, s.quantity))
+                self.db.execute("INSERT OR IGNORE INTO milestones VALUES(?,?,?,?)", (self.task_id, key, s.contract, s.quantity))
             self.db.execute("INSERT OR IGNORE INTO revisions VALUES(?,?)", (self.task_id, revision))
 
     def count(self, milestone):
-        row = self.db.execute("SELECT count(*) FROM effects WHERE task=? AND milestone=?", (self.task_id, milestone)).fetchone()
+        row = self.db.execute(
+            "SELECT count(*) FROM effects WHERE task=? AND milestone=?", (self.task_id, self.key(milestone))
+        ).fetchone()
         return row[0]
 
     def begin(self, step, action):
@@ -50,14 +61,14 @@ class Ledger:
         with self.db:
             self.db.execute(
                 "INSERT INTO operations(id,task,milestone,action_hash,status) VALUES(?,?,?,?,?)",
-                (op, self.task_id, step.id, action.identity, "pending"),
+                (op, self.task_id, self.key(step.id), action.identity, "pending"),
             )
         return op
 
     def finish(self, operation, step, effect_id, elapsed, operation_effect=""):
         with self.db:
             if effect_id:
-                self.db.execute("INSERT OR IGNORE INTO effects VALUES(?,?,?)", (self.task_id, step.id, effect_id))
+                self.db.execute("INSERT OR IGNORE INTO effects VALUES(?,?,?)", (self.task_id, self.key(step.id), effect_id))
             self.db.execute(
                 "UPDATE operations SET status=?, elapsed=? WHERE id=?",
                 ("verified" if effect_id or operation_effect else "no_effect", elapsed, operation),
@@ -65,17 +76,30 @@ class Ledger:
 
     def observe_effect(self, step, effect_id):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO effects VALUES(?,?,?)", (self.task_id, step.id, effect_id))
+            self.db.execute("INSERT OR IGNORE INTO effects VALUES(?,?,?)", (self.task_id, self.key(step.id), effect_id))
 
     def unresolved(self):
-        row = self.db.execute("SELECT 1 FROM operations WHERE task=? AND status='pending' LIMIT 1", (self.task_id,)).fetchone()
+        row = self.db.execute("SELECT 1 FROM operations WHERE status='pending' LIMIT 1").fetchone()
         return bool(row)
 
-    def summary(self):
-        return [
-            {"id": row[0], "requested": row[1], "verified": self.count(row[0]), "remaining": max(0, row[1] - self.count(row[0]))}
-            for row in self.db.execute("SELECT id,requested FROM milestones WHERE task=? ORDER BY rowid", (self.task_id,))
-        ]
+    def summary(self, *, opaque=False):
+        """Counts per milestone, under the planner's ids (the planner needs them) or, for what is stored, the opaque keys."""
+        names = {key: name for name, key in self.keys.items()}
+        rows = self.db.execute("SELECT id,requested FROM milestones WHERE task=? ORDER BY rowid", (self.task_id,)).fetchall()
+        out = []
+        for key, requested in rows:
+            verified = self.db.execute(
+                "SELECT count(*) FROM effects WHERE task=? AND milestone=?", (self.task_id, key)
+            ).fetchone()[0]
+            out.append(
+                {
+                    "id": key if opaque else names.get(key, key),
+                    "requested": requested,
+                    "verified": verified,
+                    "remaining": max(0, requested - verified),
+                }
+            )
+        return out
 
     def close(self):
         self.db.close()
