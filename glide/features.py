@@ -123,7 +123,12 @@ def _webhooks(glide_config, env) -> str:
 def _mcp(glide_config, env) -> str:
     from .mcp.config import McpSettings
 
+    from .memory.settings import MemorySettings
+
     settings = McpSettings.from_mapping(table(glide_config, "mcp"))
+    if settings.server_memory != "off" and not MemorySettings.from_mapping(table(glide_config, "memory"), env).enabled:
+        # `glide mcp serve` refuses this combination (mcp/cli.py), so the doctor must not call it healthy
+        raise ValueError('[mcp] server_memory needs memory on: set [memory] enabled = true, or server_memory = "off"')
     names = ", ".join(spec.name for spec in settings.servers) or "none"
     return f"client servers configured: {names} (none started); server_memory {settings.server_memory}"
 

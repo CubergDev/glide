@@ -494,6 +494,15 @@ def test_doctor_shows_a_wrong_setting_as_an_error_line_and_exits_one(isolated, m
     assert code == 1 and lines[feature].startswith("error:"), out
 
 
+def test_doctor_calls_server_memory_without_memory_an_error_as_mcp_serve_does(isolated, monkeypatch, capsys):
+    # PR13-4175444479: `glide mcp serve` exits 2 for this combination, so the doctor cannot report it healthy
+    code, out, lines = doctor(monkeypatch, real_config(isolated, '[mcp]\nserver_memory = "read"\n'), capsys)
+    assert code == 1 and lines["mcp"].startswith("error:") and "server_memory needs memory on" in lines["mcp"], out
+    on = '[memory]\nenabled = true\ndata_dir = "mem"\n[mcp]\nserver_memory = "write"\n'
+    code, _, lines = doctor(monkeypatch, real_config(isolated, on), capsys)
+    assert code == 0 and "server_memory write" in lines["mcp"]
+
+
 def test_doctor_checks_the_voice_model_from_the_file_and_never_fetches_it(isolated, monkeypatch, capsys):
     import glide.speech.vad as vad
 
