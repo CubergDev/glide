@@ -127,7 +127,7 @@ def _loopback(host: str) -> bool:
 # The hosts a project-local glide.toml may send a key to without the user having named them: the vendors above.
 PRESET_HOSTS = frozenset(_host(spec.base_url) for spec in PRESETS.values() if spec.base_url)
 
-POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "hedge_after_s", "latency_alpha")
+POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "max_rest_s", "hedge_after_s", "latency_alpha")
 SPEECH_KEYS = ("language", "silence_ms", "headset", "vad_model_path", "vad_model_url", "vad_model_sha256")
 # Tables another module reads for itself (`glide.memory.settings`, `glide.mcp.config`, `glide.webhooks.cli`, `glide.computer.browser_settings`,
 # `glide.computer.config`): known
@@ -318,7 +318,7 @@ def _policy(table: Mapping, where: str) -> ChainPolicy:
         out["order"] = order
     if "fail_threshold" in table:
         out["fail_threshold"] = _number(table["fail_threshold"], f"{where} fail_threshold", low=1, integer=True)
-    for key in ("cooldown_s", "auth_cooldown_s"):
+    for key in ("cooldown_s", "auth_cooldown_s", "max_rest_s"):
         if key in table:
             out[key] = float(_number(table[key], f"{where} {key}", low=0))
     if "hedge_after_s" in table:
