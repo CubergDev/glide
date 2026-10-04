@@ -588,3 +588,26 @@ def test_a_new_tab_the_page_never_shows_is_not_progress_and_is_never_repeated(mo
     assert [action.kind for action in computer.actions] == ["tab_create"]
     assert len([r for r in writer.requests if r.role == "research_supervisor"]) == 1
     assert state.progress[0]["verified"] == 0 and state.progress[-1]["remaining"] == 1
+
+
+def test_a_page_title_with_escape_sequences_reaches_neither_the_answer_nor_the_events(monkeypatch, tmp_path):
+    """Audit finding 7: the citation line carries the page's title, and a title can hold terminal escape sequences."""
+    computer, events = ResearchComputer(), []
+    computer.state.url = A
+    read = computer.read_page
+    computer.read_page = lambda: {**read(), "title": "Reviews\x1b[2J\x1b]0;owned\x07 of the place\x9b1;1H"}
+    writer = Reasoner([decision("read"), decision("answer", claims=[claim("Food praised; waits reported.")]), approved()])
+    state = drive(
+        monkeypatch,
+        tmp_path,
+        computer,
+        writer,
+        research_jev(),
+        control=RunControl("escape", emit=events.append),
+        record_content=True,
+    )
+    assert state.answer.achieved
+    final = next(e for e in events if e.kind == "completed")
+    for text in (state.answer.text, final.text, final.spoken_text, (tmp_path / "run.json").read_text()):
+        assert "\x1b" not in text and "\x9b" not in text and "\\u001b" not in text and "owned" not in text
+    assert "Reviews of the place" in state.answer.text

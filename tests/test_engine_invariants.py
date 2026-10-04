@@ -204,3 +204,40 @@ def test_a_new_tab_is_grounded_like_a_navigation(monkeypatch, tmp_path):
     computer, writer = baited_page(), Reasoner([response(step)])
     state = drive(monkeypatch, tmp_path, computer, writer, Jev("plan"), goal="Open a new tab")
     assert state.outcome == "blocked" and not computer.actions
+
+
+# -- finding 7: a page cannot put terminal control sequences into evidence, an answer or the terminal -------------------
+
+from glide.computer.execution.contracts import InvalidAction  # noqa: E402
+from glide.computer.execution.reading import page_record  # noqa: E402
+
+HOSTILE = "Cafe\x1b[2J\x1b[31m red\x1b]0;owned\x07 menu\x9b1;1H‮ txt\x00end"
+
+
+def reading(**changes):
+    return {
+        "url": "https://shop.example.test/p",
+        "title": HOSTILE,
+        "text": f"line one\n{HOSTILE}\n\tindented",
+        "links": [{"url": "https://shop.example.test/q", "title": HOSTILE}],
+        "truncated": False,
+        **changes,
+    }
+
+
+def test_control_characters_and_escape_sequences_never_survive_page_reading():
+    page = page_record(reading())
+    for field in (page["title"], page["text"], *(link["title"] for link in page["links"])):
+        assert not any((ord(c) < 32 and c not in "\n\t") or 0x7F <= ord(c) <= 0x9F or c in "‮" for c in field), repr(field)
+    assert "[2J" not in page["title"] and "owned" not in page["title"] and "[31m" not in page["title"]
+    assert page["title"] == "Cafe red menu txtend" and "\n" not in page["title"]
+    assert page["text"].startswith("line one\n") and "\n\tindented" in page["text"]  # layout of the body survives
+
+
+def test_a_title_made_only_of_control_characters_is_empty_not_an_error():
+    assert page_record(reading(title="\x1b[0m\x07"))["title"] == ""
+
+
+def test_a_reading_that_is_still_invalid_is_still_an_error():
+    with pytest.raises(InvalidAction):
+        page_record(reading(url="https://shop.example.test/\x1b[2J"))
