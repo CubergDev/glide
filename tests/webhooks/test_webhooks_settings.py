@@ -228,3 +228,23 @@ def test_secret_sources_return_empty_for_an_unset_name(monkeypatch):
     assert DictSecrets().get("x") == "" and DictSecrets({"x": "y"}).get("x") == "y"
     with pytest.raises(ValueError):
         KeyringSecrets("")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repositories", ["owner/repo/"]),
+        ("repositories", ["team/.."]),
+        ("repositories", ["noslash"]),
+        ("allowed_senders", ["bad login"]),
+        ("allowed_senders", ["x/y"]),
+    ],
+)
+def test_github_allowlist_entries_that_could_never_match_are_refused(field, value):
+    """PR7-4175624965: a typo here used to pass --check-config and reject every callback at run time."""
+    data = source_data(0)
+    data[field] = value
+    with pytest.raises(ValidationError):
+        parse(data)
+    data[field] = ["team/repo"] if field == "repositories" else ["octocat", "dependabot[bot]"]
+    assert parse(data)

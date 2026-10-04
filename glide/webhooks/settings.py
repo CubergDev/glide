@@ -14,6 +14,7 @@ from pydantic import Field, field_validator, model_validator
 
 from .contracts import ENV_NAME, SLUG, Message, strict_json
 from .secret_sources import EnvSecrets, SecretSource
+from .translation import is_login, is_repository
 
 
 class VerificationKey(Message):
@@ -61,8 +62,24 @@ class Source(Message):
             raise ValueError("Invalid secret environment name.")
         return values
 
+    @field_validator("repositories")
+    @classmethod
+    def repository_names(cls, values):
+        if not all(is_repository(value) for value in values):  # a name that can never match would reject every callback
+            raise ValueError("Repositories must be written owner/name.")
+        return values
+
+    @field_validator("allowed_senders")
+    @classmethod
+    def sender_logins(cls, values):
+        if not all(is_login(value) for value in values):
+            raise ValueError("Allowed senders must be GitHub logins.")
+        return values
+
     @model_validator(mode="after")
     def provider_config(self):
+        if self.provider == "mcp" and self.enabled:
+            raise ValueError("The mcp provider has no receiver yet; leave it disabled.")
         if self.provider in {"github", "standard", "outlook"} and not self.key_envs:
             raise ValueError("A signing/client-state secret must be configured.")
         if self.provider == "github" and not self.repositories:

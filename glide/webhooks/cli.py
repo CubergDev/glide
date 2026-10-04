@@ -40,9 +40,13 @@ def main(argv=None) -> int:
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
     try:
-        local = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
+        address = ipaddress.ip_address(args.host)
     except ValueError:
-        local = False
+        address = None
+    if isinstance(address, ipaddress.IPv6Address):
+        # allowed_hosts cannot name an IPv6 literal, so every request to it would be refused as an untrusted Host
+        parser.error("IPv6 bind addresses are not supported; use 127.0.0.1, localhost or a host name behind the proxy")
+    local = args.host == "localhost" or (address is not None and address.is_loopback)
     if not local and not args.behind_proxy:
         parser.error("public binds require --behind-proxy and a TLS reverse proxy")
     try:

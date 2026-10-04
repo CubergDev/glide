@@ -574,14 +574,14 @@ def test_the_source_must_match_the_provider_in_the_path(environment):
         assert env.client.post(path, content=b"{}", headers={"Content-Type": "application/json"}).status_code == 404
 
 
-def test_an_enabled_mcp_source_has_no_receiver_and_queues_nothing(environment):
+def test_an_enabled_mcp_source_is_refused_when_the_configuration_is_checked(environment):
+    """PR7-4175264713: --check-config must not call a source valid that can only answer 400."""
     env = environment
     sources = [*env.data["sources"], {"id": "events", "enabled": True, "provider": "mcp", "agent_id": "team"}]
-    with app_with(env, None, sources=sources) as client:
-        response = client.post("/webhooks/mcp/events", json={"anything": 1})
-        assert response.status_code == 400 and response.json() == {"detail": "Invalid callback payload."}
-        assert client.post("/webhooks/mcp/events", content=b"x", headers={"Content-Type": "text/plain"}).status_code == 415
-    assert not env.store.messages("team")
+    with pytest.raises(ValueError, match="no receiver"):
+        ServerSettings.model_validate_json(json.dumps({**env.data, "sources": sources}))
+    disabled = [*env.data["sources"], {"id": "events", "enabled": False, "provider": "mcp", "agent_id": "team"}]
+    assert ServerSettings.model_validate_json(json.dumps({**env.data, "sources": disabled}))
 
 
 def test_outlook_validation_handshake_rules(environment):
