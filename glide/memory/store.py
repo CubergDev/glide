@@ -36,6 +36,8 @@ _TARGET = re.compile(r"(?:prompt|skill):[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SECRET = re.compile(
     r"\bsk-(?:proj-|svcacct-|live-|test-)?[A-Za-z0-9_-]{16,}\b"
     r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
+    r"|\bAIza[A-Za-z0-9_-]{30,}"
+    r"|\bgsk_[A-Za-z0-9]{16,}"
     r"|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
     r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"
     r"|\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"
@@ -44,12 +46,21 @@ _SECRET = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNED_SECRET = re.compile(
-    r"\b(?:password|passwd|api[_ -]?key|client[_ -]?secret|access[_ -]?token|"
-    r"refresh[_ -]?token|private[_ -]?key|secret)[\"']?\s*[:=]\s*[\"']?"
+    r"(?<![A-Za-z0-9])(?:password|passwd|api[_ -]?key|client[_ -]?secret|access[_ -]?token|"
+    r"refresh[_ -]?token|private[_ -]?key|secret|token|authorization)[\"']?\s*[:=]\s*[\"']?"
     r"([^\s,;\"'}]+)",
     re.IGNORECASE,
 )
-_URL = re.compile(r"[a-z][a-z0-9+.-]*://\S|\bwww\.[a-z0-9-]+\.", re.IGNORECASE)
+# An address in any spelling: a scheme with "//", the schemes with none (mailto:, file:), "www.", a host with a path,
+# query or port, localhost, an IPv4 address, and an absolute path on this machine.
+_URL = re.compile(
+    r"[a-z][a-z0-9+.-]*://\S|\bwww\.[a-z0-9-]+\."
+    r"|\b(?:about|blob|chrome|data|file|javascript|mailto|sms|tel|view-source):\S"
+    r"|\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?[/?#]|\b(?:[a-z0-9-]+\.)+[a-z]{2,}:\d+\b"
+    r"|\blocalhost\b|\b\d{1,3}(?:\.\d{1,3}){3}\b"
+    r"|(?:^|[\s\"'(])(?:~/|/(?:Users|home|var|etc|tmp|private|Volumes)/|[A-Za-z]:\\)",
+    re.IGNORECASE,
+)
 _PLACEHOLDERS = frozenset(
     {"redacted", "<redacted>", "***", "...", "none", "null", "example", "string", "your_api_key", "your_token"}
 )

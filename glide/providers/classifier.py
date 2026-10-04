@@ -77,7 +77,7 @@ from glide.computer.control import checkpoint
 
 from .base import ChatFacade, ChatResult, ProviderSpec, Usage
 from .chain import Chain, ChainPolicy, Slot, SwitchEvent
-from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, redact, snippet, status_error
+from .errors import CANCELLED, FAILOVER_KINDS, AllProvidersFailed, ProviderError, safe_text, snippet, status_error
 
 TOP_N = 3  # options each Choice is asked to rank
 ROLE = "classifier"
@@ -489,7 +489,9 @@ def typesafe_error(
             error.retry_after = exc.retry_after_ms / 1000
         return error
     return ProviderError(
-        f"{name} refused the request: {snippet(redact(str(exc), secrets))}", kind="bad_request", provider=provider
+        f"{name} refused the request: {snippet(safe_text(str(exc), secrets, request_texts))}",
+        kind="bad_request",
+        provider=provider,
     )
 
 
@@ -570,7 +572,7 @@ def build_client(
         )
     except TypeSafeError as e:
         raise ProviderError(
-            f"{name} could not be set up: {snippet(redact(str(e), [api_key]))}", kind="bad_request", provider=name
+            f"{name} could not be set up: {snippet(safe_text(str(e), [api_key]))}", kind="bad_request", provider=name
         ) from None
     return TypeSafeClassifier(client, name=name, model=model or constants.DEFAULT_MODEL, secrets=[api_key, api_key.strip()])
 

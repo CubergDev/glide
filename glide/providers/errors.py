@@ -19,6 +19,7 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from urllib.parse import quote, quote_plus
 
 import httpx
 
@@ -33,6 +34,8 @@ SNIPPET = 300
 SPENT_WORDS = ("credit_balance_exhausted", "insufficient_quota", "insufficient_credits", "billing_hard_limit_reached")
 SPENT_STATUS = 402
 CANCELLED = "cancelled"
+MIN_RUN = 24  # a run of this many characters shared with a request text is a quote of it, whole or not
+MIN_CASELESS = 8  # a secret at least this long is also cut when its case or URL-encoding was changed in the echo
 MIN_ECHO = 10  # a shorter request text than this is too common a string to cut out of an error reply
 NO_MESSAGE = "(no message in the reply)"
 _LONG_BLOB = re.compile(r"[A-Za-z0-9+/=_-]{80,}")  # base64 of an image, or any other long token a server may echo
@@ -92,10 +95,17 @@ def spent(status: int, body: object = "") -> bool:
 
 def redact(text: str, secrets: Iterable[str], mark: str = "[redacted]", *, min_len: int = 1) -> str:
     """`text` with each secret replaced by `mark`. A secret shorter than `min_len` is left alone: cut out of a message
-    it would mangle ordinary words."""
+    it would mangle ordinary words. A secret of `MIN_CASELESS` characters or more is also cut when a server echoed it
+    URL-encoded, JSON-escaped or in another case."""
     for secret in secrets:
-        if secret and len(secret) >= min_len:
+        if not secret or len(secret) < min_len:
+            continue
+        if len(secret) < MIN_CASELESS:
             text = text.replace(secret, mark)
+            continue
+        forms = {secret, quote(secret, safe=""), quote_plus(secret), json.dumps(secret)[1:-1]}
+        pattern = "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+        text = re.sub(pattern, lambda _: mark, text, flags=re.IGNORECASE)
     return text
 
 
@@ -167,6 +177,41 @@ def echoed(text: str, request_texts: Iterable[str], mark: str = "[redacted]") ->
     return text
 
 
+def cut_excerpts(text: str, request_texts: Iterable[str], mark: str = "[redacted]") -> str:
+    """`text` (on one line, its first `2 * SNIPPET` characters) with every run of `MIN_RUN` characters or more that
+    it shares with a request text replaced by `mark`: a server that quotes part of the request, as validation errors do,
+    does not repeat it. Case and whitespace are ignored."""
+    head = " ".join(text.split())[: 2 * SNIPPET]
+    low = head.lower()
+    places: dict[str, list[int]] = {}
+    for start in range(len(low) - MIN_RUN + 1):
+        places.setdefault(low[start : start + MIN_RUN], []).append(start)
+    if not places:
+        return head
+    covered = [False] * len(head)
+    for piece in request_texts:
+        normal = " ".join(piece.split()).lower()
+        for at in range(len(normal) - MIN_RUN + 1):
+            for start in places.get(normal[at : at + MIN_RUN], ()):
+                covered[start : start + MIN_RUN] = [True] * MIN_RUN
+    out, index = [], 0
+    while index < len(head):
+        if covered[index]:
+            while index < len(head) and covered[index]:
+                index += 1
+            out.append(mark)
+        else:
+            out.append(head[index])
+            index += 1
+    return "".join(out)
+
+
+def safe_text(text: str, secrets: Iterable[str] = (), request_texts: Iterable[str] = (), mark: str = "[redacted]") -> str:
+    """`text` made safe to show in an error: the secrets, long tokens and any quoted part of the request cut out."""
+    request_texts = tuple(request_texts)
+    return cut_excerpts(echoed(scrub(text, secrets, mark), request_texts, mark), request_texts, mark)
+
+
 def status_error(
     status: int,
     body: str,
@@ -184,8 +229,9 @@ def status_error(
     A spent account is judged on the whole reply and comes back as `from_status` makes it: fixed text, none of the
     reply in it.
     """
+    request_texts = tuple(request_texts)
     body = echoed(scrub(body, secrets, mark), request_texts, mark)
-    said = body if spent(status, body) else what_it_said(body)
+    said = body if spent(status, body) else cut_excerpts(what_it_said(body), request_texts, mark)
     return from_status(status, said, provider=provider, retry_after=retry_after(headers or {}))
 
 

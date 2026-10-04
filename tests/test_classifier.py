@@ -748,3 +748,11 @@ def test_the_chain_composes_with_the_metered_client_unchanged():
     classifier = MeteredClassifier(chain_of(LLMClassifier(ScriptedLLM("bad", reply()))), calls)
     classifier.system_one(state=STATE, questions=questions())
     assert calls.usage["m-1"].input_tokens == 200  # the retry's tokens are counted too
+
+
+def test_an_sdk_error_it_does_not_know_does_not_repeat_the_request_or_a_long_token():
+    from glide.providers.classifier import typesafe_error
+
+    request = "the user is asking whether to transfer 500 dollars to Dmitri Volkov tonight"
+    error = typesafe_error(ValueError(f"bad: {request} {'B' * 90}"), "p", ["k"], [request])
+    assert "Volkov" not in str(error) and "B" * 90 not in str(error)

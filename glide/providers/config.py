@@ -53,6 +53,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from glide.computer import diagnostics
+
 from . import classifier as classifier_mod
 from . import llm as llm_mod
 from . import stt as stt_mod
@@ -290,6 +292,8 @@ def _providers(table: Mapping) -> dict[str, ProviderSpec]:
         if env_var and not _ENV_NAME.fullmatch(env_var):
             # Said without the value: someone who pasted a key here must not see it again in a log.
             raise ConfigError(f"{where} api_key_env must be the NAME of an environment variable (capitals, digits, _), not a key")
+        if env_var:
+            diagnostics.register_secret_env(env_var)
         if kind in ("elevenlabs", "typesafe") and not env_var:
             raise ConfigError(f"{where} needs api_key_env: a {kind} provider cannot be used without a key")
         options = _options(entry.get("options", {}), f"{where} options")

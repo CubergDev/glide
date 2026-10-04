@@ -33,6 +33,7 @@ from typing import Protocol
 from ..computer.control import current_control
 from ..computer.models import Abort
 from . import wire
+from .logs import failed
 from .transport import Listener, same_user
 
 log = logging.getLogger("glide.app_server")
@@ -273,7 +274,7 @@ class Session:
         try:
             self.server.backend.handle(self, command)
         except Exception as exc:  # a bug in the backend must not take the connection down; the type is all that is said
-            log.exception("handling %s failed", command.type)
+            failed(log, "handling %s failed", command.type, error=exc)
             self.send(
                 wire.error("internal", f"the core could not handle {command.type} ({type(exc).__name__})", reply_to=command.id)
             )
@@ -477,4 +478,4 @@ class AppServer:
         try:
             self.backend.on_closed(session)
         except Exception:
-            log.exception("closing the backend's side of a connection failed")
+            failed(log, "closing the backend's side of a connection failed")
