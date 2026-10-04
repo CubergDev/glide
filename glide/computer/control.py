@@ -161,6 +161,8 @@ class RunControl:
         the 'progress' event is sent right after a write, and a crash there would skip the check of what the write did."""
         try:
             self.emit(TaskEvent(self.task_id, kind, text, **kwargs))
+        except Abort:  # a stop is the listener's to give: that is not a failure of the listener
+            raise
         except Exception as error:
             from . import diagnostics
 

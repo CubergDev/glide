@@ -126,6 +126,23 @@ def test_an_event_listener_that_fails_never_costs_the_run_its_verification(monke
     assert events[0] == "accepted" and events[-1] == "completed"  # and the listener was still told how it ended
 
 
+def test_an_event_listener_that_stops_the_run_still_stops_it(monkeypatch, tmp_path):
+    def stopping(event):
+        if event.kind == "progress":
+            raise Abort("stopped by the listener")
+
+    world = one_page()
+    world.install(monkeypatch)
+    classifier = FakeTypeSafe(scripted(("scroll_down", None), ("done", None)))
+    state = runner.run(
+        RunConfig("Find", tmp_path, act=True, delay=0),
+        lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
+        control=RunControl("task", stopping),
+    )
+    assert state.outcome.startswith("aborted") and len(state.history) == 1
+
+
 def test_a_stop_during_a_re_decision_after_a_writer_focus_dispatches_nothing_more(monkeypatch, tmp_path):
     control = RunControl("task")
     calls = []

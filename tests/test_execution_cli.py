@@ -82,11 +82,30 @@ def test_every_failed_outcome_exits_nonzero_and_a_stop_exits_130(monkeypatch, tm
     assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == (code or 0)
 
 
-@pytest.mark.parametrize(("achieved", "code"), [(True, 0), (False, 1)])
-def test_a_done_run_exits_by_what_the_writers_answer_says(monkeypatch, tmp_path, offline, achieved, code):
+@pytest.mark.parametrize(
+    ("outcome", "achieved", "code"),
+    [
+        ("done", True, 0),
+        ("done", False, 1),
+        # a stop of the loop is redeemed by the writer's own reading of the screen, and by nothing else
+        ("nothing helps", True, 0),
+        ("stalled", True, 0),
+        ("step limit", True, 0),
+        ("stalled", False, 1),
+        ("low confidence", False, 1),
+    ],
+)
+def test_a_run_that_has_an_answer_exits_by_what_the_writers_answer_says(monkeypatch, tmp_path, offline, outcome, achieved, code):
     monkeypatch.setattr(cli, "make_writer", lambda *a: None)
-    monkeypatch.setattr(cli, "run", lambda *a, **kw: state("done", "", SimpleNamespace(achieved=achieved)))
+    monkeypatch.setattr(cli, "run", lambda *a, **kw: state(outcome, "", SimpleNamespace(achieved=achieved)))
     assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == code
+
+
+@pytest.mark.parametrize("outcome", ["provider failure", "generation unavailable", "desktop unavailable", "crashed", "blocked"])
+def test_no_answer_redeems_a_hard_failure(monkeypatch, tmp_path, offline, outcome):
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", lambda *a, **kw: state(outcome, "", SimpleNamespace(achieved=True)))
+    assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == 1
 
 
 @pytest.mark.parametrize(("move", "shown"), [("click 'Tickets'", "it would click 'Tickets'"), ("", "nothing was done")])
