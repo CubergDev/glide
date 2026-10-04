@@ -130,3 +130,18 @@ def test_the_rule_names_only_tables_that_exist_in_the_config(table):
     from glide.trust import REFUSED
 
     assert table in REFUSED and table in KNOWN_TABLES
+
+
+def test_the_doctor_checks_the_browser_and_research_tables_glide_computer_checks(tmp_path):
+    # finding 13: a bad [browser] or [research] passed `glide doctor` and failed only when `glide computer` ran
+    path = tmp_path / "glide.toml"
+    path.write_text('[browser]\nprovider = "bogus"\n\n[research]\ncalls = 999\n')
+    config = load_config(path, {"HOME": str(tmp_path)}, cwd=tmp_path, home=tmp_path)
+    rows = {name: (ok, line) for name, ok, line in feature_report(config, {"HOME": str(tmp_path)})}
+    assert rows["browser"][0] is False and rows["browser"][1].startswith("error: ")
+    assert rows["research"][0] is False and "research budget" in rows["research"][1]
+    path.write_text('[browser]\nprovider = "native"\n\n[research]\ncalls = 5\n')
+    config = load_config(path, {"HOME": str(tmp_path)}, cwd=tmp_path, home=tmp_path)
+    rows = {name: (ok, line) for name, ok, line in feature_report(config, {"HOME": str(tmp_path)})}
+    assert rows["browser"] == (True, "provider native (from glide.toml)")
+    assert rows["research"] == (True, "5 model calls per research task")

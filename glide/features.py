@@ -50,11 +50,18 @@ def webhooks_file(environ: Mapping[str, str] | None, toml: Path | None, *, forei
 
 
 def feature_report(glide_config, environ: Mapping[str, str] | None = None) -> list[tuple[str, bool, str]]:
-    """(feature, ok, line) for voice, memory, webhooks and mcp. `ok` is False only for a setting that is wrong; a feature
+    """(feature, ok, line) for voice, memory, webhooks, mcp, browser and research. `ok` is False only for a setting that is wrong; a feature
     that is switched off, or an extra that is not installed, is a state to report, not a failure."""
     env = os.environ if environ is None else environ
     rows = []
-    for name, report in (("voice", _voice), ("memory", _memory), ("webhooks", _webhooks), ("mcp", _mcp)):
+    for name, report in (
+        ("voice", _voice),
+        ("memory", _memory),
+        ("webhooks", _webhooks),
+        ("mcp", _mcp),
+        ("browser", _browser),
+        ("research", _research),
+    ):
         try:
             rows.append((name, True, report(glide_config, env)))
         except ValueError as error:  # SettingsError and ConfigError are both ValueErrors, and name the setting, never a value
@@ -130,6 +137,20 @@ def _mcp(glide_config, env) -> str:
         raise ValueError('[mcp] server_memory needs memory on: set [memory] enabled = true, or server_memory = "off"')
     names = ", ".join(spec.name for spec in settings.servers) or "none"
     return f"client servers configured: {names} (none started); server_memory {settings.server_memory}"
+
+
+def _browser(glide_config, env) -> str:
+    from .computer import browser_settings
+
+    settings = browser_settings.resolve(table(glide_config, "browser"), env)  # the check `glide computer` makes at start-up
+    fallback = f", then {', '.join(settings.fallback)}" if settings.fallback else ""
+    return f"provider {settings.provider}{fallback} (from {settings.source})"
+
+
+def _research(glide_config, env) -> str:
+    from .computer import config
+
+    return f"{config.research_budget(table(glide_config, 'research'), env)} model calls per research task"
 
 
 def _source(glide_config) -> Path | None:
