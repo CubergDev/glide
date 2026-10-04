@@ -1170,3 +1170,23 @@ def test_the_whole_speech_table_loads_and_the_voice_settings_come_from_it():
 def test_a_voice_only_key_is_checked_when_the_file_loads(line, match):
     with pytest.raises(ConfigError, match=match):
         make(f"[speech]\n{line}")
+
+
+def test_a_roles_deadline_caps_direct_llm_calls_too_not_only_the_writers():
+    """PR4-4175632219: the router, the answer stream and webhook reports call config.llm(role) with no timeout."""
+    cfg, _ = make(
+        FAST + '[llm.smart]\nchain = ["openai:gpt-big"]\ndeadline_s = 45', env={"OPENAI_API_KEY": KEYS["OPENAI_API_KEY"]}
+    )
+    seen = []
+    client = cfg.slots("llm.smart")[0].client
+    real = client.chat
+    client.chat = lambda messages, **kw: seen.append(kw.get("timeout")) or real(messages, **kw)
+    fast_client = cfg.slots("llm.fast")[0].client
+    fast_real = fast_client.chat
+    fast_client.chat = lambda messages, **kw: seen.append(("fast", kw.get("timeout"))) or fast_real(messages, **kw)
+    smart, fast = cfg.llm("smart"), cfg.llm("fast")
+    smart.chat([{"role": "user", "content": "x"}])  # no timeout: the role's deadline is the limit
+    smart.chat([{"role": "user", "content": "x"}], timeout=20)  # asks for less: keeps its own
+    smart.chat([{"role": "user", "content": "x"}], timeout=300)  # asks for more: cut down
+    fast.chat([{"role": "user", "content": "x"}])  # a role with no deadline passes the call through untouched
+    assert seen == [45, 20, 45, ("fast", None)]

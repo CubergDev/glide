@@ -745,7 +745,8 @@ class GlideConfig:
             slots = [Slot(i.name, _Lent(i.client, i.name) if family == "classifier" else i.client) for i in ready]
             chain = Chain(role, slots, self.roles[role].policy, on_event=self._dispatch)
             self._pin_from_environment(role, chain)
-            facade = {"llm": LLM, "stt": STT, "tts": TTS, "classifier": ChainedClassifier}[family](chain)
+            extra = {"deadline_s": self.roles[role].deadline_s} if family == "llm" else {}
+            facade = {"llm": LLM, "stt": STT, "tts": TTS, "classifier": ChainedClassifier}[family](chain, **extra)
             self._facades[role] = facade
             return facade
 
