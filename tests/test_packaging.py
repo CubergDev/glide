@@ -50,5 +50,24 @@ def test_build_backend_pin_is_not_a_yanked_release():
         )
 
 
+def test_sdist_ships_only_the_source_and_its_metadata():
+    """F3: the sdist used to be the whole repository (tests, handoff notes, a private path, the lock, CI files)."""
+    sdist = PROJECT["tool"]["hatch"]["build"]["targets"]["sdist"]
+    allowed = {"/glide", "/pyproject.toml", "/glide.toml.example", "/README.md"}
+    assert set(sdist["include"]) <= allowed
+    assert {"/glide", "/pyproject.toml"} <= set(sdist["include"])
+    for entry in sdist["include"]:
+        assert (ROOT / entry.lstrip("/")).exists(), f"{entry} is listed for the sdist but missing from the tree"
+    if (ROOT / "README.md").exists():
+        assert "/README.md" in sdist["include"]
+
+
 def test_wheel_still_ships_exactly_the_glide_package():
     assert PROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["glide"]
+
+
+def test_readme_is_declared_once_it_exists():
+    if (ROOT / "README.md").exists():
+        assert PROJECT["project"]["readme"] == "README.md"
+    else:
+        assert "readme" not in PROJECT["project"]

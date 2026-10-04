@@ -84,6 +84,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["glide"]
 
+# The sdist is the source and what builds it, not the repository: no tests, notes, CI files or lock. When README.md
+# lands (it is on the docs branch), add "/README.md" here and `readme = "README.md"` under [project];
+# tests/test_packaging.py fails until both are done.
+[tool.hatch.build.targets.sdist]
+include = ["/glide", "/pyproject.toml", "/glide.toml.example"]
+
 [tool.ruff]
 line-length = 130
 target-version = "py312"
