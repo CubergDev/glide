@@ -89,6 +89,27 @@ def test_a_done_run_exits_by_what_the_writers_answer_says(monkeypatch, tmp_path,
     assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == code
 
 
+@pytest.mark.parametrize(("move", "shown"), [("click 'Tickets'", "it would click 'Tickets'"), ("", "nothing was done")])
+def test_a_dry_run_says_nothing_was_done_and_the_move_it_stopped_at(monkeypatch, tmp_path, offline, capsys, move, shown):
+    # PR4-4175632222: the terminal printed the bare move, or nothing when there was none
+    def fake_run(cfg, ctx_factory, control=None, **kw):
+        control.event("dry_run", move, outcome="dry run")
+        return state("dry run")
+
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", fake_run)
+    assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == 0
+    out = capsys.readouterr().out
+    assert "dry run: nothing was done" in out and shown in out
+
+
+def test_event_text_from_a_screen_or_a_model_reaches_the_terminal_without_control_sequences(capsys):
+    cli.show_event(SimpleNamespace(kind="blocked", text="The page said\x1b]52;c;ZXZpbA==\x07 hello\x1b[2J"))
+    cli.show_event(SimpleNamespace(kind="dry_run", text="click '\x1b[31mTickets'"))
+    out = capsys.readouterr().out
+    assert "The page said hello" in out and "Tickets" in out and "\x1b" not in out and "\x07" not in out
+
+
 def test_the_structured_engine_takes_its_classifier_from_the_provider_chains(monkeypatch, tmp_path, offline):
     seen, loaded = {}, chains()
     monkeypatch.setattr(cli, "make_writer", lambda config=None: seen.setdefault("writer_config", config))

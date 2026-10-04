@@ -18,6 +18,7 @@ from .. import features
 from . import browser_settings, config
 from .actions import Context
 from .control import RunControl
+from .execution.reading import clean as printable
 from .perception import capture, perceive
 from .platform_adapter import desktop
 from .report import annotate, ax_count, render_payload
@@ -54,6 +55,16 @@ FAILED_OUTCOMES = {
 def _fail(message: str, code: int = 2) -> int:
     print(f"glide computer: {message}", file=sys.stderr)
     return code
+
+
+def show_event(event) -> None:
+    """What the terminal shows of one event the run reports. The run prints nothing of its own, and what a screen or a
+    model wrote never reaches the terminal as a control sequence."""
+    if event.kind == "dry_run":  # the default run: it must say that nothing was done, with the move it stopped at
+        move = f"; it would {printable(event.text)}" if event.text else ""
+        print(f"dry run: nothing was done{move}")
+    elif event.text:
+        print(printable(event.text, lines=True))
 
 
 def ask_user(question: str) -> str:
@@ -160,7 +171,7 @@ def main(argv: list[str] | None, glide_config) -> int:
         )
 
     # The run prints nothing of its own; this terminal shows what it reports, and Ctrl-C reaches it as a stop.
-    control = RunControl(str(uuid.uuid4()), lambda event: print(event.text) if event.text else None)
+    control = RunControl(str(uuid.uuid4()), show_event)
     try:
         state = run(cfg, ctx_factory, classifier_factory=glide_config.classifier, control=control)
     except ConfigError as e:  # no classifier slot is usable: the message names the variables to set
