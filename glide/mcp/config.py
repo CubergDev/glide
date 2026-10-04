@@ -41,6 +41,32 @@ class McpServerSpec:
     timeout_s: float = 60.0
 
 
+def _server_spec(entry: Any, seen: set[str]) -> McpServerSpec:
+    """One `[[mcp.servers]]` table, checked key by key. Messages name the setting, never a value read from disk."""
+    if not isinstance(entry, dict):
+        raise SettingsError("each [[mcp.servers]] entry must be a table")
+    for key in entry:
+        if key not in _KNOWN_SERVER:
+            raise SettingsError(f"[[mcp.servers]] has an unknown key {key!r} (known: {', '.join(_KNOWN_SERVER)})")
+    name, command = entry.get("name"), entry.get("command")
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise SettingsError("[[mcp.servers]] name must be letters, digits, . _ - (at most 128)")
+    if name in seen:
+        raise SettingsError(f"[[mcp.servers]] name {name!r} is listed twice")
+    seen.add(name)
+    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+        raise SettingsError(f"[[mcp.servers]] {name}: command must be a nonempty string")
+    args, env = entry.get("args", []), entry.get("env", [])
+    if not isinstance(args, list) or any(not isinstance(a, str) or "\x00" in a for a in args):
+        raise SettingsError(f"[[mcp.servers]] {name}: args must be a list of strings")
+    if not isinstance(env, list) or any(not isinstance(e, str) or not _ENV_NAME.fullmatch(e) for e in env):
+        raise SettingsError(f"[[mcp.servers]] {name}: env must list environment variable NAMES, not values")
+    timeout = entry.get("timeout_s", 60.0)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
+        raise SettingsError(f"[[mcp.servers]] {name}: timeout_s must be between 0 and 3600")
+    return McpServerSpec(name, command, tuple(args), tuple(env), float(timeout))
+
+
 @dataclass(frozen=True)
 class McpSettings:
     server_memory: str = "off"
@@ -58,32 +84,8 @@ class McpSettings:
         raw = table.get("servers", [])
         if not isinstance(raw, list):
             raise SettingsError("[mcp] servers must be an array of tables ([[mcp.servers]])")
-        servers, seen = [], set()
-        for entry in raw:
-            if not isinstance(entry, dict):
-                raise SettingsError("each [[mcp.servers]] entry must be a table")
-            for key in entry:
-                if key not in _KNOWN_SERVER:
-                    raise SettingsError(f"[[mcp.servers]] has an unknown key {key!r} (known: {', '.join(_KNOWN_SERVER)})")
-            name, command = entry.get("name"), entry.get("command")
-            if not isinstance(name, str) or not _NAME.fullmatch(name):
-                raise SettingsError("[[mcp.servers]] name must be letters, digits, . _ - (at most 128)")
-            if name in seen:
-                raise SettingsError(f"[[mcp.servers]] name {name!r} is listed twice")
-            seen.add(name)
-            if not isinstance(command, str) or not command.strip() or "\x00" in command:
-                raise SettingsError(f"[[mcp.servers]] {name}: command must be a nonempty string")
-            args = entry.get("args", [])
-            env = entry.get("env", [])
-            if not isinstance(args, list) or any(not isinstance(a, str) or "\x00" in a for a in args):
-                raise SettingsError(f"[[mcp.servers]] {name}: args must be a list of strings")
-            if not isinstance(env, list) or any(not isinstance(e, str) or not _ENV_NAME.fullmatch(e) for e in env):
-                raise SettingsError(f"[[mcp.servers]] {name}: env must list environment variable NAMES, not values")
-            timeout = entry.get("timeout_s", 60.0)
-            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
-                raise SettingsError(f"[[mcp.servers]] {name}: timeout_s must be between 0 and 3600")
-            servers.append(McpServerSpec(name, command, tuple(args), tuple(env), float(timeout)))
-        return cls(mode, tuple(servers))
+        seen: set[str] = set()
+        return cls(mode, tuple(_server_spec(entry, seen) for entry in raw))
 
     @classmethod
     def load(

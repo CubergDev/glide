@@ -141,10 +141,6 @@ class Catalog:
                 tool_ids.update(plugins[plugin_id]["tools"])
             self._snapshot = (tuple(skills[key] for key in sorted(active)), frozenset(tool_ids), self._snapshot[2] + 1)
 
-    def snapshot(self) -> tuple[list[dict], frozenset[str]]:
-        skills, tool_ids, _ = self.snapshot_with_revision()
-        return skills, tool_ids
-
     @property
     def revision(self) -> int:
         with self._lock:
@@ -160,7 +156,7 @@ class Catalog:
         )
 
     def skills(self) -> list[dict]:
-        return self.snapshot()[0]
+        return self.snapshot_with_revision()[0]
 
     def tool_ids(self) -> frozenset[str]:
         with self._lock:

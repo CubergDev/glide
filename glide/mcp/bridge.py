@@ -14,6 +14,7 @@ import inspect
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from glide.memory._callbacks import _sync, adrive, drive
+from glide.memory._callbacks import adrive, drive, require_sync
 from glide.memory._json import bounded_json
 from glide.memory.contracts import Tool
 from glide.memory.events import EventBus, Invocation, current_invocation
@@ -35,11 +36,43 @@ class MCPStaleCatalogError(RuntimeError):
     """Refresh and replace the harness tools before executing this catalog."""
 
 
-def _protocol_failure(error):
-    # The MCP SDK normally raises an exception whose .error is ErrorData.
+def rpc_code(error: BaseException) -> int | None:
+    """The JSON-RPC error code an MCP SDK exception carries (its `.error` is ErrorData or a dict), else None."""
     detail = getattr(error, "error", None)
     code = detail.get("code") if isinstance(detail, dict) else getattr(detail, "code", None)
-    return isinstance(error, MCPProtocolError) or type(code) is int
+    return code if type(code) is int else None
+
+
+def _protocol_failure(error: BaseException) -> bool:
+    return isinstance(error, MCPProtocolError) or rpc_code(error) is not None
+
+
+# A tool call is a write. Only an explicit refusal made before anything ran leaves its outcome known: a JSON-RPC
+# request, method, params or parse error, or an HTTP status for a request that is malformed, unauthorized, unknown or
+# unacceptable. Every other failure of a call that was sent (any 5xx, 408, 429, -32603, -32000..-32099, a timeout, a
+# dropped connection, an unusable reply, anything unrecognized) may have come after the tool ran.
+REFUSED_RPC_CODES = frozenset({-32600, -32601, -32602, -32700})
+REFUSED_HTTP_STATUSES = frozenset({400, 401, 403, 404, 405, 413, 415, 422})
+OUTCOME_UNKNOWN_NOTE = "the call may or may not have happened; do not repeat it without checking its effect first"
+
+
+def refused_before_running(error: BaseException) -> bool:
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return rpc_code(error) in REFUSED_RPC_CODES or (type(status) is int and status in REFUSED_HTTP_STATUSES)
+
+
+def mark_call_outcome(error: BaseException) -> None:
+    """Say on an exception from a sent call whether it may have run: `outcome_unknown`, and a note when it is True.
+
+    The exception keeps its type and its message; an exception that already carries the flag is left alone.
+    """
+    if hasattr(error, "outcome_unknown"):
+        return
+    unknown = not refused_before_running(error)
+    with suppress(AttributeError, TypeError):  # an exception type that refuses new attributes stays unmarked
+        error.outcome_unknown = unknown
+        if unknown:
+            error.add_note(OUTCOME_UNKNOWN_NOTE)
 
 
 def _response(value, asynchronous):
@@ -58,8 +91,50 @@ def _mapping(value: Any) -> dict:
     return value
 
 
-def _json(value: Any, limit: int = 65536) -> Any:
+def wire_json(value: Any, limit: int = 65536) -> Any:
     return bounded_json(value, limit, MCPProtocolError, "MCP payload")
+
+
+def _check_text(block: dict) -> None:
+    if not isinstance(block.get("text"), str):
+        raise MCPProtocolError("text content requires a string")
+
+
+def _project_media(block: dict) -> None:
+    data = block.pop("data", None)
+    if not isinstance(data, str) or not isinstance(block.get("mimeType"), str):
+        raise MCPProtocolError("media content requires data and mimeType")
+    block.update(data_omitted=True, encoded_bytes=len(data))
+
+
+def _project_resource(block: dict) -> None:
+    resource = copy.copy(_mapping(block.get("resource")))
+    resource.pop("_meta", None)
+    if not isinstance(resource.get("uri"), str):
+        raise MCPProtocolError("embedded resource requires a URI")
+    if "blob" in resource:
+        blob = resource.pop("blob")
+        if not isinstance(blob, str):
+            raise MCPProtocolError("resource blob must be a string")
+        resource.update(blob_omitted=True, encoded_bytes=len(blob))
+    elif not isinstance(resource.get("text"), str):
+        raise MCPProtocolError("embedded resource requires text or blob")
+    block["resource"] = resource
+
+
+def _check_link(block: dict) -> None:
+    if not isinstance(block.get("uri"), str) or not isinstance(block.get("name"), str):
+        raise MCPProtocolError("resource link requires URI and name")
+
+
+# Each content type's check or projection, applied in place to a private copy of the block.
+_CONTENT = {
+    "text": _check_text,
+    "image": _project_media,
+    "audio": _project_media,
+    "resource": _project_resource,
+    "resource_link": _check_link,
+}
 
 
 def normalize_mcp_result(result: Any, *, max_bytes: int = 65536) -> dict:
@@ -81,32 +156,9 @@ def normalize_mcp_result(result: Any, *, max_bytes: int = 65536) -> dict:
         kind = block.get("type")
         if not isinstance(kind, str):
             raise MCPProtocolError("MCP content type must be a string")
-        if kind == "text":
-            if not isinstance(block.get("text"), str):
-                raise MCPProtocolError("text content requires a string")
-        elif kind in {"image", "audio"}:
-            data = block.pop("data", None)
-            if not isinstance(data, str) or not isinstance(block.get("mimeType"), str):
-                raise MCPProtocolError("media content requires data and mimeType")
-            block.update(data_omitted=True, encoded_bytes=len(data))
-        elif kind == "resource":
-            resource = copy.copy(_mapping(block.get("resource")))
-            resource.pop("_meta", None)
-            if not isinstance(resource.get("uri"), str):
-                raise MCPProtocolError("embedded resource requires a URI")
-            if "blob" in resource:
-                blob = resource.pop("blob")
-                if not isinstance(blob, str):
-                    raise MCPProtocolError("resource blob must be a string")
-                resource.update(blob_omitted=True, encoded_bytes=len(blob))
-            elif not isinstance(resource.get("text"), str):
-                raise MCPProtocolError("embedded resource requires text or blob")
-            block["resource"] = resource
-        elif kind == "resource_link":
-            if not isinstance(block.get("uri"), str) or not isinstance(block.get("name"), str):
-                raise MCPProtocolError("resource link requires URI and name")
-        else:
+        if kind not in _CONTENT:
             raise MCPProtocolError("unsupported MCP content type")
+        _CONTENT[kind](block)
         projected.append(block)
     normalized = {"content": projected}
     for key in ("structuredContent", "isError"):
@@ -114,7 +166,7 @@ def normalize_mcp_result(result: Any, *, max_bytes: int = 65536) -> dict:
             normalized[key] = value[key]
     if "structuredContent" in normalized and not isinstance(normalized["structuredContent"], dict):
         raise MCPProtocolError("structuredContent must be an object")
-    return _json(normalized, max_bytes)
+    return wire_json(normalized, max_bytes)
 
 
 def _validate_result(result, schema, validator):
@@ -124,7 +176,7 @@ def _validate_result(result, schema, validator):
             raise MCPProtocolError("tool with outputSchema requires structuredContent")
         if validator is not None:
             try:
-                verdict = _sync(validator(copy.deepcopy(schema), copy.deepcopy(normalized["structuredContent"])))
+                verdict = require_sync(validator(copy.deepcopy(schema), copy.deepcopy(normalized["structuredContent"])))
                 if verdict is False:
                     raise MCPProtocolError("host rejected the structured tool output")
             except Exception as error:
@@ -134,7 +186,7 @@ def _validate_result(result, schema, validator):
     return normalized
 
 
-def _descriptor(raw):
+def tool_descriptor(raw):
     descriptor = _mapping(raw)
     name = descriptor.get("name")
     if not isinstance(name, str) or not 1 <= len(name) <= 128:
@@ -153,12 +205,22 @@ def _descriptor(raw):
         raise MCPProtocolError("MCP tool requires an object inputSchema")
     if output is not None and not isinstance(output, dict):
         raise MCPProtocolError("MCP outputSchema must be a schema object")
-    return _json(descriptor, 1048576)
+    return wire_json(descriptor, 1048576)
+
+
+MAX_DESCRIPTION_CHARS = 300
+
+
+def clean_description(raw: object) -> str:
+    """Text a remote server wrote about its own tool, made fit to show a model: control and format characters
+    (newlines, escapes, bidi overrides) become spaces, runs of whitespace collapse, and it is cut to a short bound."""
+    text = "".join(" " if unicodedata.category(char)[0] == "C" else char for char in str(raw))
+    return " ".join(text.split())[:MAX_DESCRIPTION_CHARS].strip()
 
 
 def read_tools_page(response: Any, inventory: list, seen: set) -> str | None:
     """Append one `tools/list` page to `inventory`; return the next cursor, or None on the last page."""
-    page = _json(_mapping(response), 1048576)
+    page = wire_json(_mapping(response), 1048576)
     if not isinstance(page.get("tools"), list):
         raise MCPProtocolError("tools/list requires a tools list")
     inventory.extend(page["tools"])
@@ -172,6 +234,58 @@ def read_tools_page(response: Any, inventory: list, seen: set) -> str | None:
     return cursor
 
 
+def _check_binding(server, call_tool, permissions, keywords, asynchronous, normalize_results, validate_output) -> None:
+    if not isinstance(server, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", server):
+        raise ValueError("invalid MCP server identifier")
+    if not callable(call_tool) or (validate_output is not None and not callable(validate_output)):
+        raise TypeError("MCP callback and optional output validator must be callable")
+    if type(asynchronous) is not bool or type(normalize_results) is not bool:
+        raise TypeError("MCP callback and normalization flags must be booleans")
+    if not isinstance(permissions, dict) or not isinstance(keywords, dict):
+        raise TypeError("MCP permissions and keywords must be host mappings")
+
+
+def _check_host_policy(permissions: object, keywords: object) -> None:
+    """What the host grants and which words make a tool relevant, for one tool."""
+    if not isinstance(permissions, frozenset) or any(not isinstance(value, str) or not value.strip() for value in permissions):
+        raise TypeError("MCP tool permissions require a frozenset of nonempty strings")
+    if (
+        not isinstance(keywords, tuple)
+        or not keywords
+        or any(not isinstance(value, str) or not value.strip() for value in keywords)
+    ):
+        raise TypeError("MCP tool keywords require a nonempty tuple of nonempty strings")
+
+
+def _bound_tool(
+    server, descriptor, call_tool, *, permissions, keywords, asynchronous, normalize_results, validate_output
+) -> Tool:
+    name, output = descriptor["name"], descriptor.get("outputSchema")
+    private_output = None if output is None else wire_json(output)
+
+    def steps(arguments):
+        response = yield lambda: _response(call_tool(name, arguments), asynchronous)
+        return _validate_result(response, private_output, validate_output) if normalize_results else response
+
+    def invoke(arguments):
+        return drive(steps(arguments))
+
+    async def ainvoke(arguments):
+        return await adrive(steps(arguments))
+
+    return Tool(
+        id=f"mcp:{server}/{name}",
+        description=clean_description(descriptor.get("description", name)) or name,
+        keywords=keywords,
+        permissions=permissions,
+        schema=wire_json(descriptor.get("inputSchema")),
+        invoke=ainvoke if asynchronous else invoke,
+        origin="mcp",
+        asynchronous=asynchronous,
+        output_schema=None if output is None else wire_json(output),
+    )
+
+
 def bind_mcp(
     server: str,
     inventory: Iterable[dict[str, Any]],
@@ -183,64 +297,46 @@ def bind_mcp(
     normalize_results: bool = True,
     validate_output: Callable | None = None,
 ) -> tuple[Tool, ...]:
-    """Bind an existing callback; opt out of normalization only for legacy callbacks."""
-    if not isinstance(server, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", server):
-        raise ValueError("invalid MCP server identifier")
-    if not callable(call_tool) or (validate_output is not None and not callable(validate_output)):
-        raise TypeError("MCP callback and optional output validator must be callable")
-    if type(asynchronous) is not bool or type(normalize_results) is not bool:
-        raise TypeError("MCP callback and normalization flags must be booleans")
-    if not isinstance(permissions, dict) or not isinstance(keywords, dict):
-        raise TypeError("MCP permissions and keywords must be host mappings")
-    result, seen = [], set()
+    """Bind an existing callback; opt out of normalization only for legacy callbacks.
+
+    Only tools the host gave both permissions and keywords for are bound, and tools that need task support are skipped.
+    """
+    _check_binding(server, call_tool, permissions, keywords, asynchronous, normalize_results, validate_output)
+    bound, seen = [], set()
     for raw in inventory:
-        descriptor = _descriptor(raw)
+        descriptor = tool_descriptor(raw)
         name = descriptor["name"]
         if name in seen or len(seen) >= 4096:
             raise MCPProtocolError("MCP tool names must be unique in a bounded inventory")
         seen.add(name)
         if name not in permissions or name not in keywords:
             continue
-        if not isinstance(permissions[name], frozenset) or any(
-            not isinstance(value, str) or not value.strip() for value in permissions[name]
-        ):
-            raise TypeError("MCP tool permissions require a frozenset of nonempty strings")
-        if (
-            not isinstance(keywords[name], tuple)
-            or not keywords[name]
-            or any(not isinstance(value, str) or not value.strip() for value in keywords[name])
-        ):
-            raise TypeError("MCP tool keywords require a nonempty tuple of nonempty strings")
-        execution = descriptor.get("execution", {})
-        if execution.get("taskSupport") == "required":
+        _check_host_policy(permissions[name], keywords[name])
+        if descriptor.get("execution", {}).get("taskSupport") == "required":
             continue
-        schema, output = descriptor.get("inputSchema"), descriptor.get("outputSchema")
-        private_output = None if output is None else _json(output)
-
-        def steps(arguments, tool_name, output_schema):
-            response = yield lambda: _response(call_tool(tool_name, arguments), asynchronous)
-            return _validate_result(response, output_schema, validate_output) if normalize_results else response
-
-        def invoke(arguments, tool_name=name, output_schema=private_output, workflow=steps):
-            return drive(workflow(arguments, tool_name, output_schema))
-
-        async def ainvoke(arguments, tool_name=name, output_schema=private_output, workflow=steps):
-            return await adrive(workflow(arguments, tool_name, output_schema))
-
-        result.append(
-            Tool(
-                id=f"mcp:{server}/{name}",
-                description=str(descriptor.get("description", name))[:2000],
-                keywords=keywords[name],
+        bound.append(
+            _bound_tool(
+                server,
+                descriptor,
+                call_tool,
                 permissions=permissions[name],
-                schema=_json(schema),
-                invoke=ainvoke if asynchronous else invoke,
-                origin="mcp",
+                keywords=keywords[name],
                 asynchronous=asynchronous,
-                output_schema=None if output is None else _json(output),
+                normalize_results=normalize_results,
+                validate_output=validate_output,
             )
         )
-    return tuple(result)
+    return tuple(bound)
+
+
+# notification method -> (capability section the server must have negotiated, flag inside it that must be true)
+_NOTIFICATION_CAPABILITY = {
+    "notifications/tools/list_changed": ("tools", "listChanged"),
+    "notifications/resources/list_changed": ("resources", "listChanged"),
+    "notifications/resources/updated": ("resources", "subscribe"),
+    "notifications/prompts/list_changed": ("prompts", "listChanged"),
+    "notifications/message": ("logging", None),
+}
 
 
 @dataclass
@@ -275,7 +371,7 @@ class MCPBridge:
             raise TypeError("bridge grants and relevance must be host mappings")
         self.server, self.request = server, request
         self.permissions, self.keywords = copy.deepcopy(permissions), copy.deepcopy(keywords)
-        self._capabilities = _json(_mapping(capabilities))
+        self._capabilities = wire_json(_mapping(capabilities))
         for section in ("tools", "resources", "prompts", "logging"):
             if section in self._capabilities and not isinstance(self._capabilities[section], dict):
                 raise ValueError("negotiated capabilities must contain capability objects")
@@ -333,7 +429,7 @@ class MCPBridge:
 
         def deliver():
             with self._lock:
-                _sync(callback(self.tools() if self._connected and not self._dirty else ()))
+                require_sync(callback(self.tools() if self._connected and not self._dirty else ()))
 
         def changed(event):
             if event.source != f"mcp:{self.server}":
@@ -419,7 +515,7 @@ class MCPBridge:
             raise
 
     def _admit(self, generation, name, arguments):
-        arguments = _json(arguments)
+        arguments = wire_json(arguments)
         if not isinstance(arguments, dict):
             raise MCPProtocolError("MCP tool arguments must be an object")
         context, token = current_invocation(), uuid4().hex
@@ -459,43 +555,40 @@ class MCPBridge:
             response = yield lambda: _response(self.request("tools/call", params), self.asynchronous)
             result = _validate_result(response, schema, self.validate_output)
         except BaseException as error:
+            mark_call_outcome(error)
             self._finish(token, active, error=error)
             raise
         self._finish(token, active, result=result)
         return result
 
+    def _on_progress(self, data: dict) -> None:
+        token, progress, total = data.get("progressToken"), data.get("progress"), data.get("total")
+        if not isinstance(token, (str, int)) or isinstance(token, bool):
+            raise MCPProtocolError("progress notification requires a valid token")
+        with self._lock:
+            active = self._active.get(token)
+            if active is None:
+                return
+            if (
+                type(progress) not in (int, float)
+                or not 0 <= progress <= 1e15
+                or not math.isfinite(progress)
+                or progress <= active.progress
+                or (
+                    total is not None
+                    and (type(total) not in (int, float) or not progress <= total <= 1e15 or not math.isfinite(total))
+                )
+            ):
+                raise MCPProtocolError("progress must increase and have a valid optional total")
+            active.progress = progress
+        self._emit("progress", {**data, "name": active.name, "operation": "tools/call"}, active)
+
     def on_notification(self, method: str, params: Any = None) -> None:
         """Accept host-routed notifications without issuing any requests."""
-        data = _json({} if params is None else _mapping(params))
+        data = wire_json({} if params is None else _mapping(params))
         if method == "notifications/progress":
-            token, progress, total = data.get("progressToken"), data.get("progress"), data.get("total")
-            if not isinstance(token, (str, int)) or isinstance(token, bool):
-                raise MCPProtocolError("progress notification requires a valid token")
-            with self._lock:
-                active = self._active.get(token)
-                if active is None:
-                    return
-                if (
-                    type(progress) not in (int, float)
-                    or not 0 <= progress <= 1e15
-                    or not math.isfinite(progress)
-                    or progress <= active.progress
-                    or (
-                        total is not None
-                        and (type(total) not in (int, float) or not progress <= total <= 1e15 or not math.isfinite(total))
-                    )
-                ):
-                    raise MCPProtocolError("progress must increase and have a valid optional total")
-                active.progress = progress
-            self._emit("progress", {**data, "name": active.name, "operation": "tools/call"}, active)
-            return
-        required = {
-            "notifications/tools/list_changed": ("tools", "listChanged"),
-            "notifications/resources/list_changed": ("resources", "listChanged"),
-            "notifications/resources/updated": ("resources", "subscribe"),
-            "notifications/prompts/list_changed": ("prompts", "listChanged"),
-            "notifications/message": ("logging", None),
-        }.get(method)
+            return self._on_progress(data)
+        required = _NOTIFICATION_CAPABILITY.get(method)
         if required is None or required[0] not in self._capabilities:
             return
         section, flag = required

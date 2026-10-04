@@ -1,0 +1,380 @@
+{
+ "async_dispatch": {
+  "effects": [
+   [
+    "echo",
+    3
+   ]
+  ],
+  "events": [
+   {
+    "kind": "context_plan",
+    "payload": {
+     "memory_ids": [],
+     "model_id": "fake",
+     "plan_id": "<plan>",
+     "skill_ids": [],
+     "stage": "handoff",
+     "tokens": 281,
+     "tool_ids": [
+      "local:echo",
+      "local:fail"
+     ]
+    }
+   },
+   {
+    "kind": "tool_started",
+    "payload": {
+     "call_id": "c1",
+     "plan_id": "<plan>",
+     "tool_id": "local:echo"
+    }
+   },
+   {
+    "kind": "tool_finished",
+    "payload": {
+     "call_id": "c1",
+     "cancelled": false,
+     "ok": true,
+     "plan_id": "<plan>",
+     "tool_id": "local:echo"
+    }
+   }
+  ],
+  "reply": "done",
+  "turns": [
+   0,
+   2
+  ]
+ },
+ "async_entry": [
+  "TypeError: async tool requires ainvoke/adispatch",
+  {
+   "ok": true
+  },
+  "TypeError: async tool requires ainvoke/adispatch"
+ ],
+ "commands": {
+  "context_before_prepare": null,
+  "context_keys": [
+   "id",
+   "memories",
+   "model",
+   "reasons",
+   "skills",
+   "tokens",
+   "tools"
+  ],
+  "context_matches_plan": true,
+  "events_kinds": [
+   "context_plan"
+  ],
+  "forget_unknown": false,
+  "memory_texts": [
+   [
+    "colour",
+    "blue"
+   ],
+   [
+    "lang",
+    "en"
+   ],
+   [
+    "note",
+    "temp"
+   ]
+  ],
+  "not_a_command": "ValueError: unknown personalization command",
+  "refine_bad_action": "ValueError: use /refine or /refine apply ID",
+  "refine_empty": [],
+  "refine_other_verb": "ValueError: use /refine or /refine apply ID",
+  "remember_default_level": true,
+  "remember_session": true,
+  "remember_user_level": true,
+  "remember_without_equals": "ValueError: use /remember [user|project|session] key = text",
+  "rollback_unknown": "ValueError: proposal must belong to this project and be applied",
+  "unknown": "ValueError: unknown personalization command"
+ },
+ "deferred_refinement": {
+  "events": [
+   "refinement_deferred"
+  ],
+  "statuses": [
+   "applied",
+   "draft"
+  ]
+ },
+ "dispatch_budgets": {
+  "batch_larger_than_the_remaining_budget": "ValueError: tool batch exceeds remaining budget",
+  "effects_before_that_refusal": [
+   [
+    "echo",
+    1
+   ]
+  ],
+  "model_that_never_stops_calling": "ValueError: tool batch exceeds remaining budget",
+  "no_eligible_model": "ValueError: no eligible host model; inspect the plan reasons"
+ },
+ "dispatch_refusals": {
+  "arguments_not_an_object": "ValueError: tool calls need fresh identifiers",
+  "arguments_not_json": "ValueError: host callback payload must contain bounded JSON values",
+  "batch_over_the_call_budget": "ValueError: tool batch exceeds remaining budget",
+  "calls_without_an_authorizer": "PermissionError: tool execution needs a host authorizer",
+  "duplicate_call_ids_in_a_batch": "ValueError: duplicate tool call identifier",
+  "empty_call_id": "ValueError: tool calls need fresh identifiers",
+  "oversized_call_id": "ValueError: tool calls need fresh identifiers",
+  "reply_is_not_a_reply": "TypeError: model callback must return Reply",
+  "reply_text_too_large": "TypeError: model callback must return Reply",
+  "tool_not_in_the_plan": "PermissionError: tool batch names an unselected tool"
+ },
+ "failing_tool": {
+  "effects": [
+   [
+    "fail",
+    {
+     "value": 1
+    }
+   ]
+  ],
+  "events": [
+   {
+    "kind": "context_plan",
+    "payload": {
+     "memory_ids": [],
+     "model_id": "fake",
+     "plan_id": "<plan>",
+     "skill_ids": [],
+     "stage": "handoff",
+     "tokens": 281,
+     "tool_ids": [
+      "local:echo",
+      "local:fail"
+     ]
+    }
+   },
+   {
+    "kind": "tool_started",
+    "payload": {
+     "call_id": "c1",
+     "plan_id": "<plan>",
+     "tool_id": "local:fail"
+    }
+   },
+   {
+    "kind": "tool_finished",
+    "payload": {
+     "call_id": "c1",
+     "cancelled": false,
+     "ok": false,
+     "plan_id": "<plan>",
+     "tool_id": "local:fail"
+    }
+   }
+  ],
+  "outcome": "RuntimeError: boom"
+ },
+ "invoke_refusals": {
+  "arguments_not_an_object": "ValueError: tool arguments must be an object of at most 64 KiB",
+  "authorizer_says_no": "PermissionError: host declined this tool invocation",
+  "authorizer_says_truthy_not_true": "PermissionError: host declined this tool invocation",
+  "grants_missing": "PermissionError: tool is not selected or lacks current host grants",
+  "grants_not_a_frozenset": "TypeError: grants must be a frozenset of permission names",
+  "memory_change_expires_the_plan": "ValueError: plan expired; prepare a new turn",
+  "tool_not_selected": "PermissionError: tool is not selected or lacks current host grants",
+  "unknown_plan": "ValueError: plan expired; prepare a new turn"
+ },
+ "lessons": {
+  "after_rollback": [
+   "rolled_back"
+  ],
+  "empty_summaries_add_no_proposal": 0,
+  "failures_add_no_proposal": 0,
+  "overlay_after_prepare": [
+   "Repeated host-verified successful tactic:\nOpen the menu first"
+  ],
+  "overlay_after_rollback": {},
+  "overlay_before_prepare": {},
+  "proposals_after_1": [],
+  "proposals_after_2": [],
+  "proposals_after_3": [
+   [
+    "draft",
+    true
+   ]
+  ],
+  "proposals_after_4": [
+   [
+    "draft",
+    true
+   ]
+  ],
+  "status_after_prepare": [
+   "applied"
+  ]
+ },
+ "observe_user": {
+  "credentials_refused": "ValueError: text appears to contain credentials; redact them first",
+  "ids_are_stable": true,
+  "keys_are_hashes": true,
+  "off_by_default": [],
+  "saved": 6,
+  "stored": [
+   "I prefer short answers.",
+   "I prefer x",
+   "My preference is dark mode!",
+   "Please remember the milk",
+   "Remember that my name is Ada."
+  ]
+ },
+ "reentrant": [
+  "RuntimeError: an orchestration loop is already active for this scope"
+ ],
+ "revoked_local_grant": {
+  "effects": [
+   [
+    "echo",
+    1
+   ]
+  ],
+  "refusal": "PermissionError: local model grant was revoked",
+  "requests": 1
+ },
+ "two_call_dispatch": {
+  "audit_errors": [],
+  "authorizer_saw": [
+   [
+    "local:echo",
+    {
+     "value": 7
+    }
+   ],
+   [
+    "local:echo",
+    {
+     "value": 8
+    }
+   ]
+  ],
+  "effects": [
+   [
+    "echo",
+    7
+   ],
+   [
+    "echo",
+    8
+   ]
+  ],
+  "events": [
+   {
+    "kind": "context_plan",
+    "payload": {
+     "memory_ids": [],
+     "model_id": "fake",
+     "plan_id": "<plan>",
+     "skill_ids": [],
+     "stage": "handoff",
+     "tokens": 281,
+     "tool_ids": [
+      "local:echo",
+      "local:fail"
+     ]
+    }
+   },
+   {
+    "kind": "tool_started",
+    "payload": {
+     "call_id": "c1",
+     "plan_id": "<plan>",
+     "tool_id": "local:echo"
+    }
+   },
+   {
+    "kind": "tool_finished",
+    "payload": {
+     "call_id": "c1",
+     "cancelled": false,
+     "ok": true,
+     "plan_id": "<plan>",
+     "tool_id": "local:echo"
+    }
+   },
+   {
+    "kind": "tool_started",
+    "payload": {
+     "call_id": "c2",
+     "plan_id": "<plan>",
+     "tool_id": "local:echo"
+    }
+   },
+   {
+    "kind": "tool_finished",
+    "payload": {
+     "call_id": "c2",
+     "cancelled": false,
+     "ok": true,
+     "plan_id": "<plan>",
+     "tool_id": "local:echo"
+    }
+   }
+  ],
+  "model_requests": [
+   {
+    "goal": "echo",
+    "max_output_tokens": 1500,
+    "tools": [
+     "local:echo",
+     "local:fail"
+    ],
+    "trajectory": []
+   },
+   {
+    "goal": "echo",
+    "max_output_tokens": 1500,
+    "tools": [
+     "local:echo",
+     "local:fail"
+    ],
+    "trajectory": [
+     {
+      "calls": [
+       {
+        "arguments": {
+         "value": 7
+        },
+        "id": "c1",
+        "tool_id": "local:echo"
+       },
+       {
+        "arguments": {
+         "value": 8
+        },
+        "id": "c2",
+        "tool_id": "local:echo"
+       }
+      ],
+      "role": "assistant",
+      "text": "thinking"
+     },
+     {
+      "call_id": "c1",
+      "result": {
+       "value": 7
+      },
+      "role": "tool",
+      "tool_id": "local:echo"
+     },
+     {
+      "call_id": "c2",
+      "result": {
+       "value": 8
+      },
+      "role": "tool",
+      "tool_id": "local:echo"
+     }
+    ]
+   }
+  ],
+  "reply": "finished"
+ }
+}

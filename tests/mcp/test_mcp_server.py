@@ -9,8 +9,6 @@ from mcp_guard_loader import no_real_memory_or_mcp, sync  # noqa: F401  (autouse
 from glide.mcp import GlideMCPServer, ServerTool, SessionClient, memory_tools, serve_stream
 from glide.memory import Scope, Store
 
-pytestmark = pytest.mark.anyio
-
 SCOPE = Scope("alice", "project", "mcp")
 
 
