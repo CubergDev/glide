@@ -484,6 +484,60 @@ def test_a_typed_stop_during_chat_aborts_a_running_task(monkeypatch):
     assert "Stopped." in terminal and "task aborted" not in terminal.out.getvalue()  # a stopped task reports nothing else
 
 
+# -- clarify: chat has the channel, ask has not ----------------------------------------------------------
+
+
+def clarifying_config() -> FakeConfig:
+    """Asks which file until the history holds the user's answer, then executes."""
+
+    def route(messages):
+        if any("report.pdf" in m["content"] for m in messages):
+            return route_json("execute", reply="On it.", goal="Delete the file")
+        return route_json("clarify", question="Which file do you mean?")
+
+    return FakeConfig(llm=FakeLLM(route=route), tts=FakeTTS(), classifier=object(), writer=object(), secret=SECRET)
+
+
+def test_chat_puts_the_routers_question_and_takes_the_next_line_as_its_answer(monkeypatch, loop_calls):
+    config = clarifying_config()
+    keys = Keys("delete it")
+    monkeypatch.setattr(cli, "_load", lambda path: config)
+    monkeypatch.setattr(cli, "_player", lambda on_error: FakePlayer())
+    monkeypatch.setattr(cli, "_read_line", keys)
+    terminal = Terminal(monkeypatch)
+    thread, result = start(["chat"])
+    assert wait_until(lambda: "Which file do you mean?" in terminal.out.getvalue())
+    assert loop_calls == []  # nothing is done while the question is open
+    keys.press("report.pdf")  # the next line is the ANSWER, not a new request
+    assert wait_until(lambda: len(loop_calls) == 1)
+    keys.close()
+    assert finish(thread, result) == 0
+    assert "Clarifications:" in loop_calls[0].goal and "report.pdf" in loop_calls[0].goal and loop_calls[0].route == "execute"
+    assert len(config.fast.chat_calls) == 2  # the request, then the same request with the answer; the answer was not routed alone
+
+
+def test_chat_treats_a_new_request_after_the_question_as_a_new_request(monkeypatch, loop_calls):
+    config = clarifying_config()
+    keys = Keys("delete it")
+    monkeypatch.setattr(cli, "_load", lambda path: config)
+    monkeypatch.setattr(cli, "_player", lambda on_error: FakePlayer())
+    monkeypatch.setattr(cli, "_read_line", keys)
+    terminal = Terminal(monkeypatch)
+    thread, result = start(["chat"])
+    assert wait_until(lambda: "Which file do you mean?" in terminal.out.getvalue())
+    keys.press("stop")  # a stop is a stop: the question is dropped and nothing is done
+    assert wait_until(lambda: "stopped" in terminal.out.getvalue())
+    keys.close()
+    assert finish(thread, result) == 0
+    assert loop_calls == []
+
+
+def test_ask_has_no_next_line_so_it_says_what_is_needed_and_does_nothing(monkeypatch, loop_calls):
+    code, terminal = run(["ask", "delete", "it"], monkeypatch, clarifying_config())
+    assert code == 0 and loop_calls == []
+    assert "Which file do you mean?" in terminal.out.getvalue()
+
+
 # -- listen -----------------------------------------------------------------------------------------
 
 
@@ -758,8 +812,20 @@ def test_every_switch_is_printed_to_stderr_as_it_happens_and_the_key_in_it_is_no
     assert cli.main(["ask", "hello"]) == 0
     assert "Hi." in terminal.out.getvalue()
     switch = [line for line in terminal.err.getvalue().splitlines() if line.startswith("fallback:")]
-    assert len(switch) == 1 and switch[0].startswith("fallback: llm.fast alpha:m1 -> beta:m2 (rate_limit:")
-    assert SECRET not in terminal.all and "***" in switch[0]
+    # the router asks the classifier chain first (its stand-in here is not a real classifier: a visible hop to the fast
+    # tier), and the fast chain's own failover from alpha to beta is shown once, as it happens
+    own = [line for line in switch if line.startswith("fallback: llm.fast alpha:m1 -> beta:m2 (rate_limit:")]
+    assert len(own) == 1 and any(line.startswith("fallback: router classifier -> fast_llm") for line in switch)
+    assert SECRET not in terminal.all and "***" in own[0]
+
+
+def test_a_bad_routing_table_is_one_line_and_exit_2(monkeypatch, tmp_path):
+    path = tmp_path / "glide.toml"
+    path.write_text("[routing]\nmin_confidance = 0.5\n")
+    terminal = Terminal(monkeypatch)
+    assert cli.main(["--config", str(path), "status"]) == 2
+    err = terminal.err.getvalue()
+    assert err.startswith("glide: [routing] has an unknown key 'min_confidance'") and err.count("\n") == 1
 
 
 def test_a_config_that_cannot_be_loaded_is_one_line_and_exit_2(monkeypatch):
