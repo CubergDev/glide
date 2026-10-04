@@ -227,7 +227,6 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
                 raise AuthError("Subscription expired.")
             calls = translate_outlook(
                 strict_json(raw),
-                event_id=digest,
                 subscription_id=source.subscription_id,
                 mailbox_id=source.mailbox_id,
                 tenant_id=source.tenant_id,
