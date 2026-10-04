@@ -318,6 +318,32 @@ def test_a_request_typed_while_speech_is_still_being_heard_does_not_cancel_the_s
     assert done.wait(WAIT) and box["value"].text == "Four."
 
 
+def test_an_older_requests_transcript_arriving_late_does_not_cancel_a_newer_request_still_being_answered(tmp_path):
+    """PR9-4175621615: requests are ordered by when they were made. The spoken one was made first, so its late
+    transcript supersedes nothing that was made after it: the typed request is answered and remembered, and so is it."""
+    listener = Listener(final="what is two and two")
+    stt = STT(Chain("stt", [Slot("stt", listener)]))
+    hold = Hold(then="Second sentence. ")
+    model = Model(chats=[ANSWER_ROUTE, route_json("answer", reply="Four.")], streams=[["First sentence. ", hold]])
+    rig = build(tmp_path, llm=llm_of(model), stt=stt)
+    spoken_done, spoken_box = in_thread(lambda: rig.assistant.handle_audio(iter(loud())))
+    assert listener.connection.opened.wait(WAIT)
+    typed_done, typed_box = in_thread(lambda: rig.assistant.handle_text("capital of France"))
+    assert hold.connection.opened.wait(WAIT)  # the typed request is mid-answer
+
+    listener.connection.release.set()  # the older request's transcript arrives now
+    assert spoken_done.wait(WAIT) and spoken_box["value"].text == "Four."
+    hold.connection.release.set()
+
+    assert typed_done.wait(WAIT)
+    assert typed_box["value"].text == "First sentence. Second sentence."
+    assert not hold.connection.closed.is_set()  # nothing closed its connection
+    rig.assistant.wait_idle(WAIT)
+    assert {"First sentence.", "Second sentence.", "Four."} <= set(spoken(rig))
+    users = {m["content"] for m in rig.assistant._history if m["role"] == "user"}
+    assert users == {"what is two and two", "capital of France"}
+
+
 # -- the task ------------------------------------------------------------------------------------------
 
 

@@ -642,29 +642,31 @@ class Assistant:
         with self._lock:
             self._live.discard(turn)
 
-    def _cancel_turns(self, reason: str, *, upto: int, hearing: bool = True, keep: _Turn | None = None) -> None:
+    def _cancel_turns(self, reason: str, *, upto: int, hearing: bool = True) -> None:
         """Cancel the requests in flight with a ticket up to `upto` (those still being heard too, unless `hearing` is
         False). Called with the lock held."""
         for turn in tuple(self._live):
-            if turn is not keep and turn.seq <= upto and (hearing or not turn.hearing):
+            if turn.seq <= upto and (hearing or not turn.hearing):
                 turn.control.cancel(reason)
 
     def _begin(self, turn: _Turn) -> bool:
-        """A new request supersedes the answers before it: they stop being written and their speech is cut. A question
+        """A new request supersedes the answers made before it: they stop being written and their speech is cut. A question
         a task is waiting on is dropped with them: this request is not its answer. False if `turn` was cancelled first.
 
-        A request still being heard is not touched: the person said it and wants it answered too."""
+        Order is the order the requests were made in (their tickets), not the order they begin: a spoken request whose
+        transcript arrives after a typed one was made earlier, so it supersedes nothing the typed one is doing. A
+        request still being heard is not touched either: the person said it and wants it answered too."""
         dropped = None
         with self._lock:
             if turn.cancelled:
                 return False
             turn.hearing = False
-            self._cancel_turns(SUPERSEDED, upto=self._seq, hearing=False, keep=turn)
+            self._cancel_turns(SUPERSEDED, upto=turn.seq - 1, hearing=False)
             waiting = self._tasks.current
             if waiting is not None and waiting.pending_question is not None:
                 waiting.stop()
                 dropped = waiting
-            self._cut_speech(self._seq)  # whoever begins last supersedes what is being said, whatever order they were made in
+            self._cut_speech(turn.seq - 1)  # a newer request that is already speaking is spared (see `_cut_speech`)
         if dropped is not None:
             dropped.wait(UNWIND_S)  # a correction that is itself a task ("open Safari instead") must find the machine free
         return True
