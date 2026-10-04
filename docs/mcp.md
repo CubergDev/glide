@@ -22,8 +22,7 @@ Unknown keys are errors. Keys and tokens never go in this file.
 ## Glide as a server (`glide.mcp.server`)
 
 `GlideMCPServer` is a small JSON-RPC 2.0 core: `handle(message)` answers one decoded message, `serve_stream` runs it
-over newline-delimited stdin/stdout (`python -m glide.mcp serve`; `glide mcp serve` once `glide/cli.py` dispatches
-to `glide.mcp.cli.main`). Methods: `initialize`, `ping`, `tools/list`, `tools/call`; batches are refused.
+over newline-delimited stdin/stdout (`glide mcp serve`, or `python -m glide.mcp serve`). Methods: `initialize`, `ping`, `tools/list`, `tools/call`; batches are refused.
 
 What is offered is decided by the host, never by the client:
 

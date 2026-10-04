@@ -1,7 +1,7 @@
 # Browser providers: live verification checklist
 
 Glide can drive a browser through four providers: **CDP**, **native** (the macOS or Windows desktop), **Obscura** and the
-**Playwright CLI** (D7). Everything offline passes, but offline tests use fakes. Per `HANDOFF.md` section 8, only CDP was
+**Playwright CLI** (D7). Everything offline passes, but offline tests use fakes. Per `docs/history/HANDOFF.md` section 8, only CDP was
 ever qualified against a real browser, and that was a report, not something this branch re-checked. **None of the four
 has been run live on this branch.** This list is for you to run, one provider at a time. Nobody else should run it for
 you, because every step takes over a browser or this Mac.
