@@ -64,6 +64,18 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN is not set; skipping Claude review."
           fi
 
+      # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 (set below) makes Claude Code require bubblewrap: it strips credentials from the
+      # environment of every subprocess the agent starts. The runner image does not ship it, so without this step the
+      # action aborts before it reviews anything. Ubuntu 24.04 also restricts unprivileged user namespaces, which bwrap
+      # needs; the runner is a throwaway VM, so lifting that restriction here is contained.
+      - name: Install the subprocess sandbox
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --dev /dev --unshare-pid true && echo "bubblewrap works"
+
       - name: Checkout merge commit
         if: steps.gate.outputs.configured == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
