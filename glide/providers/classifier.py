@@ -47,7 +47,6 @@ for one because the error kind is `unsupported`.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import re
@@ -257,20 +256,20 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _json_object(text: str) -> dict:
-    """The JSON object in a reply, tolerating a code fence or a sentence around it."""
+    """The reply as the one JSON object it must be, a code fence round it allowed and nothing else. The prompt carries
+    text read off a screen, so "the first object found in a reply" would be whichever object that text got in."""
     if not isinstance(text, str) or not text.strip():
         raise _Invalid("the reply was empty")
-    candidates = [text.strip()]
-    if (fenced := _FENCE.search(text)) is not None:
-        candidates.insert(0, fenced.group(1).strip())
-    if (start := text.find("{")) != -1 and (end := text.rfind("}")) > start:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
-        with contextlib.suppress(ValueError):
-            value = json.loads(candidate)
-            if isinstance(value, dict):
-                return value
-    raise _Invalid("the reply was not a JSON object")
+    body = text.strip()
+    if fenced := _FENCE.fullmatch(body):
+        body = fenced.group(1).strip()
+    try:
+        value = json.loads(body)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        raise _Invalid("the reply was not one JSON object and nothing else")
+    return value
 
 
 def _number(value: Any) -> float | None:
@@ -415,7 +414,9 @@ class LLMClassifier:
                 ]
                 if result is not None and result.finish_reason == "length":
                     budget *= 2  # it ran out of room, so the same room would run out again
-            result = self._llm.chat(sent, max_tokens=budget, temperature=self._temperature, schema=schema, timeout=self._timeout)
+            result = self._llm.chat(
+                sent, max_tokens=budget, temperature=self._temperature, schema=schema, timeout=self._timeout, exact_json=True
+            )
             _add(usage, result.usage)
             try:
                 parsed = _answers(result.text, asked)

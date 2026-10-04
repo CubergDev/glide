@@ -747,12 +747,12 @@ class VoiceLoop:
         if result is None or result.stopped or result.outcome != "dry run":
             return
         self._assistant.wait_idle(PREVIEW_HEARD_S)
-        self._approval.open(reply.heard, reply.language)
+        self._approval.open(reply.heard, reply.language, task.goal)
 
     def _run_confirmed(self, pending: Pending, *, standalone: bool = False) -> None:
-        """The yes was given: the same request again, now for real. It is routed again, and may be answered differently."""
+        """The yes was given: the task that was previewed, now for real. It is not routed again, so it cannot differ."""
         try:
-            self._assistant.handle_text(pending.text, act=True, wait=False, hint_language=pending.language)
+            self._assistant.handle_text(pending.text, act=True, wait=False, hint_language=pending.language, goal=pending.goal)
         except Exception as exc:
             if not standalone:
                 raise

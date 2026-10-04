@@ -33,6 +33,7 @@ class Pending:
     text: str
     language: str | None
     deadline: float
+    goal: str = ""  # the task that was previewed: the one the yes runs
 
 
 class TaskApproval:
@@ -56,10 +57,10 @@ class TaskApproval:
     def waiting(self) -> bool:
         return self._pending is not None
 
-    def open(self, text: str, language: str | None) -> None:
+    def open(self, text: str, language: str | None, goal: str = "") -> None:
         """Start the window for a task whose dry run has been heard, and tell the person what to say."""
         with self._lock:
-            self._pending = Pending(text, language, self._clock() + self.timeout_s)
+            self._pending = Pending(text, language, self._clock() + self.timeout_s, goal)
         self._show(say("confirm_task", language, phrase=self._phrase_text, seconds=str(round(self.timeout_s))))
 
     def answer(self, utterance: str) -> Pending | None:
