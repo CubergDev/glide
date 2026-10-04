@@ -89,7 +89,16 @@ def collect(pr: int) -> dict:
     }
 
 
-def render(data: list[dict]) -> str:
+def load_verdicts(path: Path) -> dict[str, dict]:
+    """Triage verdicts by finding id (PR<number>-<comment id>), when a triage has been run; {} otherwise."""
+    try:
+        return {v["id"]: v for v in json.loads(path.read_text())}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def render(data: list[dict], verdicts: dict[str, dict] | None = None) -> str:
+    verdicts = verdicts or {}
     out = [
         "# Pull request review findings",
         "",
@@ -144,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prs", type=int, nargs="*", help="pull request numbers (default: all)")
     parser.add_argument("--out", type=Path, default=Path("review-evidence/pr-reviews"))
     parser.add_argument("--md", type=Path, default=Path("docs/reviews/PR_REVIEW_FINDINGS.md"))
+    parser.add_argument("--verdicts", type=Path, default=Path("review-evidence/pr-reviews/triage-verdicts.json"))
     args = parser.parse_args(argv)
     numbers = args.prs or sorted(p["number"] for p in gh_get(f"repos/{REPO}/pulls?state=all&per_page=100"))
     args.out.mkdir(parents=True, exist_ok=True)
@@ -154,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         (args.out / f"pr-{n}.json").write_text(json.dumps(record, indent=1))
         data.append(record)
         print(f"#{n}: {len(record['inline'])} inline, {len(record['reviews'])} reviews, {len(record['issue'])} comments")
-    args.md.write_text(render(data))
+    args.md.write_text(render(data, load_verdicts(args.verdicts)))
     print(f"wrote {args.md}")
     return 0
 

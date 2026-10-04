@@ -178,7 +178,9 @@ def test_the_answer_goes_through_the_provider_chain_to_a_loopback_endpoint(clean
     body = request["body"]
     assert body["model"] == "smart-model"  # the answer is the smart chain's job, whichever model glide.toml names
     content = body["messages"][-1]["content"]
-    packet = json.loads(next(part["text"] for part in content if part["type"] == "text"))
+    packet = json.loads(
+        next(part["text"] for part in content if part["type"] == "text").removeprefix("<data>\n").removesuffix("\n</data>")
+    )  # the packet reaches the model fenced as data
     assert packet["question"] == "這個錯誤是什麼？" and packet["observed"]["target"]["label"].startswith("錯誤 0007")  # noqa: RUF001
     assert packet["observed"]["age_s"] >= 0.0
     image_part = next(part for part in content if part["type"] == "image_url")
