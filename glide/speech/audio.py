@@ -38,7 +38,7 @@ in a frame always lags it, which is the one thing a canceller cannot work withou
 to the echo delay the canceller sees (`echo.stats.delay_ms`), well inside what either canceller covers. A frame
 is held back in `read()` (about one frame, 32 ms) until the speaker has handed over the samples that pair with
 it, so the reference is never short; a speaker that has stalled is counted (`reference_underruns`), not waited
-for beyond `REF_STALL_S`. The canceller itself runs in `read()`, on the loop's thread.
+for beyond `REF_STALL_S` once. The canceller itself runs in `read()`, on the loop's thread.
 
 Nothing here opens a device until `start()`, and `start()` builds its streams from factories that tests replace.
 """
@@ -183,6 +183,7 @@ class FullDuplexDevice:
             maxsize=MAX_QUEUED_FRAMES
         )  # (microphone, its reference's number)
         self._waiting: tuple[bytes, int, float] | None = None  # a frame held back for its reference, and since when
+        self._ref_stalled = False  # a frame went on without its reference and none has been paired since: do not wait again
         self._reference = bytearray()  # the newest of what the speaker was handed, at 16 kHz
         self._reference_origin = 0  # the number of the sample at the front of `_reference`
         self._reference_total = 0  # samples handed to the speaker so far, at 16 kHz
@@ -210,6 +211,12 @@ class FullDuplexDevice:
     def echo_guard(self) -> bool:
         """The microphone is blanked while Glide speaks: speaker mode with nothing to take the echo out."""
         return not self.headset and self._canceller is None
+
+    @property
+    def guarding(self) -> bool:
+        """The microphone is being blanked right now (`echo_guard`, and Glide is speaking or has only just stopped)."""
+        with self._cond:
+            return self._guarded_locked()
 
     @property
     def echo(self) -> EchoStats | None:
@@ -358,7 +365,13 @@ class FullDuplexDevice:
         if self._canceller is None:
             self._waiting = None
             return frame
-        if not self._reference_ready(number, timeout) and self._clock() - since < REF_STALL_S:
+        # A speaker that has stalled is waited for once: while it stays stalled the frames behind go on without a
+        # reference at once, or the queue would fill faster than a wait of REF_STALL_S per frame could drain it.
+        if self._reference_ready(number, 0 if self._ref_stalled else timeout):
+            self._ref_stalled = False
+        elif self._ref_stalled or self._clock() - since >= REF_STALL_S:
+            self._ref_stalled = True
+        else:
             return None  # its reference has not been handed to the speaker yet: ask again in a moment
         self._waiting = None
         try:
@@ -369,6 +382,7 @@ class FullDuplexDevice:
 
     def _drain_frames(self) -> None:
         self._waiting = None
+        self._ref_stalled = False
         while True:
             try:
                 self._frames.get_nowait()
