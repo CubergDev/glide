@@ -302,3 +302,47 @@ def test_a_cancel_closes_a_response_that_is_open_while_the_block_runs():
         threading.Timer(0.05, lambda: control.cancel("stopped")).start()
         assert b"".join(response.iter_bytes()) == b"first"
     assert released.is_set() and control.cancelled.is_set()
+
+
+class Late(httpx.SyncByteStream):
+    """The body of a response that arrives after the cancel: `closed` is set when whoever got it gives it back."""
+
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+
+    def __iter__(self):
+        yield b"late"
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+def test_a_response_that_arrives_after_the_cancel_is_closed_on_arrival_and_the_call_is_the_cancel():
+    """While a request is still being connected there is no socket for `Call.abort` to shut (interrupt.py), so the
+    thread making it stays in httpx until the connection comes. What is guaranteed is that the connection which then
+    arrives is closed at once and the call ends as the cancel, never as an answer."""
+    control, gate, body = RunControl(), threading.Event(), Late()
+    started = threading.Event()
+
+    def handler(request):
+        started.set()
+        gate.wait(3)
+        return httpx.Response(200, stream=body)
+
+    outcome: dict = {}
+
+    def call():
+        with controlled(control), client_for(handler) as client:
+            try:
+                outcome["response"] = http.open_response(client, "p", "GET", url="https://h.test/", timeout=3)
+            except ProviderError as error:
+                outcome["error"] = error
+
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    assert started.wait(3)
+    control.cancel("stopped")
+    gate.set()
+    thread.join(3)
+    assert outcome["error"].kind == CANCELLED and "response" not in outcome
+    assert body.closed.is_set()

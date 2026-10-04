@@ -33,7 +33,13 @@ def open_response(
     call = interrupt.Call(client)
     built = client.build_request(method, timeout=timeout, extensions=call.extensions, **request)
     with interrupt.closing(call.abort, provider):  # a model's answer is awaited here, before any header
-        return client.send(built, stream=True)
+        response = client.send(built, stream=True)
+    try:
+        interrupt.check(provider)  # a cancel that came while connecting found no socket to shut: this one is closed on arrival
+    except ProviderError:
+        response.close()
+        raise
+    return response
 
 
 @contextlib.contextmanager

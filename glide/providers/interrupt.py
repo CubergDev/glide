@@ -18,6 +18,12 @@ over `RunControl.closing_on_cancel` and `checkpoint`, and nothing more:
   here: `test_httpx_alone_has_what_the_helper_reads` in tests/test_cancel_wire.py fails loudly, over a real loopback
   socket, the day a new httpcore moves them.
 
+What a cancel cannot reach: a request that is still being connected (DNS, TCP, TLS) has no connection in the pool
+yet, so `Call.abort` finds nothing to shut and the thread making it stays inside httpx until its connect timeout or
+until the connection arrives. Through a chain the caller is released at once all the same (chain.py runs the call on a
+thread it can abandon), and `http.open_response` closes the connection that arrives late and ends that call as the
+cancel, so nothing is sent on it and no answer is used.
+
 An adapter raises only `ProviderError`, so a cancel leaves here as kind "cancelled" (errors.py). What the closed
 connection makes httpx raise afterwards is still mapped by the adapter as usual; the chain (chain.py) turns anything
 raised once the control is cancelled into the same "cancelled", so a closed connection is never a transport fault.
