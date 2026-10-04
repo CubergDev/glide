@@ -1212,3 +1212,25 @@ def test_the_lease_threads_stop_when_the_run_ends_and_send_nothing_afterwards():
     seen = len(transport.requests)
     time.sleep(0.4)
     assert len(transport.requests) == seen
+
+
+def test_a_handler_whose_write_may_have_run_is_uncertain_not_failed():
+    """Audit 2 #7: a trusted handler's MCP write with an unknown outcome must hold the queue, not redact and unblock."""
+    from glide.mcp.client import MCPCallError
+
+    def unknown(message, control):
+        raise MCPCallError("lost the reply", kind="timeout", outcome_unknown=True)
+
+    def wrapped(message, control):
+        try:
+            unknown(message, control)
+        except MCPCallError as error:
+            raise RuntimeError("handler failed") from error
+
+    def refused(message, control):
+        raise MCPCallError("no such tool", kind="invalid", outcome_unknown=False)
+
+    for handler, expected in ((unknown, "uncertain"), (wrapped, "uncertain"), (refused, "failed")):
+        transport = OfflineTransport()
+        assert worker.run_one(transport, **handlers_for(transport, handler))
+        assert completed(transport)[0]["outcome"] == expected
