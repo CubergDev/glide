@@ -53,6 +53,8 @@ HISTORY_CHARS = 400  # how much of one earlier message the router and the answer
 ANSWER_TOKENS = 1024  # room for a reasoning model's thinking as well as a short spoken answer (see router.ROUTER_TOKENS)
 ANSWER_TEMPERATURE = 0.3
 UNWIND_S = 2.0  # how long a request waits for the task whose question it dropped to end, so that its own task can start
+CLOSE_WAIT_S = 5.0  # how long `close()` waits for a stopped task to unwind before it gives up and says so
+CLOSE_POLL_S = 0.05  # how often the wait looks at the clock again
 MIN_SPEECH_RMS = 150.0  # audio quieter than this overall is silence: an empty transcript is believed, not retried
 
 
@@ -157,8 +159,10 @@ class Assistant:
         clock: Callable[[], float] = time.monotonic,
         clarify: bool = False,
         extra_stop_phrases: Iterable[str] = (),
+        close_wait_s: float = CLOSE_WAIT_S,
     ) -> None:
         self._config = config
+        self._close_wait_s = close_wait_s
         self._stops = stop_phrases(extra_stop_phrases)
         self.io = io or IO()
         self._clock = clock
@@ -426,12 +430,35 @@ class Assistant:
         task = self._tasks.current
         return task.answer(text) if task is not None else False
 
-    def close(self) -> None:
+    def close(self) -> bool:
+        """Stop everything, wait for a running task to unwind, and close the voice. True if nothing was left running.
+
+        A task that is stopped finishes its current action before it reports how it ended, and its thread is a daemon:
+        returning at once would let the process end in the middle of a write. So `close` waits up to `close_wait_s`
+        (on the assistant's clock) for the task to be done and to have reported (`task.result`). If it has not, that
+        is said through `io.warn` and False is returned: the last action may still be in flight.
+        """
+        deadline = self._clock() + self._close_wait_s
+        task = self._tasks.current
+        waiting = task is not None and task.running
         self.stop()
+        unwound = not waiting or self._wait_for(task, deadline)
+        if not unwound:
+            self.io.warn(
+                "a task was still stopping when Glide closed, so its last action may or may not have happened: check the screen"
+            )
         if self._speaker is not None:
             self._speaker.close()
         elif self.io.player is not None:
             self.io.player.close()
+        return unwound
+
+    def _wait_for(self, task: ComputerTask, deadline: float) -> bool:
+        """Whether `task` has finished (and reported) by `deadline` on the assistant's clock. No lock is held while waiting."""
+        while not task.wait(CLOSE_POLL_S):
+            if self._clock() >= deadline:
+                return False
+        return True
 
     # -- answering ------------------------------------------------------------------------------
 
