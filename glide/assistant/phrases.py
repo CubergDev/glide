@@ -74,6 +74,11 @@ PHRASES: dict[str, dict[str, str]] = {
         "yue": "我已經喺度做緊一件事，請先講停。",
         "zh": "我正在做另一件事，请先说停。",
     },
+    "stopping": {
+        "en": "The last task is still stopping. Ask again in a moment.",
+        "yue": "上一件事仲喺度停緊，請等一陣再講。",
+        "zh": "上一件事还在停止中，请稍等再说。",
+    },
     "no_llm": {
         "en": "Sorry, I cannot reach my language models right now.",
         "yue": "對唔住，我而家連唔到語言模型。",

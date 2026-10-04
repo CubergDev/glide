@@ -15,8 +15,10 @@ from test_assistant_core import build, spoken
 from test_assistant_fakes import WAIT, FakeClassifier, FakeLLM, route_json, wait_until
 from test_cancel_chain import Connection
 
+from glide.assistant import core
 from glide.assistant.audio_io import chunked
 from glide.assistant.core import Assistant
+from glide.assistant.phrases import say
 from glide.assistant.tasks import ComputerTask
 from glide.computer import runner
 from glide.computer.control import controlled
@@ -497,6 +499,25 @@ def test_a_correction_that_is_itself_a_task_waits_for_the_dropped_task_to_end_an
     assert first.wait(WAIT) and isinstance(asking.replies[0], Abort) and len(asking.replies) == 1
     assert asking.goals == ["Open the file", "Open Safari"] and reply.task.result.outcome == "done"
     assert rig.warned == []  # not "a task is already running"
+
+
+def test_a_correction_that_outlasts_the_wait_for_the_dropped_task_is_told_it_is_still_stopping(tmp_path, asking, monkeypatch):
+    # PR9-4175419789: the wait for the dropped task is bounded, and its result was thrown away: the person heard
+    # "I am already working on a task. Say stop first." about a task that had already been stopped
+    monkeypatch.setattr(core, "UNWIND_S", 0.0)
+    instead = route_json("computer", reply="Switching.", goal="Open Safari")
+    rig = assistant_that_asks(tmp_path, [COMPUTER, instead])
+    first = start_asking_task(rig, asking)
+    asking.release.clear()  # the stopped run needs longer than the bound to end
+
+    try:
+        reply = rig.assistant.handle_text("open Safari instead", wait=True)
+        rig.assistant.wait_idle(WAIT)
+        assert reply.task is None and reply.error == "the last task is still stopping"
+        assert say("stopping") in spoken(rig) and say("busy") not in spoken(rig)
+    finally:
+        asking.release.set()
+        assert first.wait(WAIT)
 
 
 def test_by_default_a_task_never_asks(tmp_path, asking):

@@ -552,7 +552,11 @@ class Assistant:
                     else None,
                 )
         except TaskBusy:
-            self._failed(reply, say("busy", language), "a task is already running", language, speak=True)
+            running = self._tasks.current
+            if running is not None and running.stop_requested:  # stopped, and still unwinding: nothing for the user to stop
+                self._failed(reply, say("stopping", language), "the last task is still stopping", language, speak=True)
+            else:
+                self._failed(reply, say("busy", language), "a task is already running", language, speak=True)
             return
         reply.task = task
         self._remember(text, route.reply or f"(started a computer task: {goal})")
