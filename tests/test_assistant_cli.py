@@ -532,6 +532,20 @@ def test_chat_treats_a_new_request_after_the_question_as_a_new_request(monkeypat
     assert loop_calls == []
 
 
+def test_leaving_chat_while_a_question_is_open_drops_it_instead_of_waiting_for_the_answer(monkeypatch, loop_calls):
+    config = clarifying_config()
+    keys = Keys("delete it")
+    monkeypatch.setattr(cli, "_load", lambda path: config)
+    monkeypatch.setattr(cli, "_player", lambda on_error: FakePlayer())
+    monkeypatch.setattr(cli, "_read_line", keys)
+    terminal = Terminal(monkeypatch)
+    thread, result = start(["chat"])
+    assert wait_until(lambda: "Which file do you mean?" in terminal.out.getvalue())
+    keys.close()  # end of input with the question still open: nothing will ever answer it
+    assert finish(thread, result) == 0  # and the command ends now, not when the question's wait runs out
+    assert loop_calls == []
+
+
 def test_ask_has_no_next_line_so_it_says_what_is_needed_and_does_nothing(monkeypatch, loop_calls):
     code, terminal = run(["ask", "delete", "it"], monkeypatch, clarifying_config())
     assert code == 0 and loop_calls == []

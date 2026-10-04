@@ -246,3 +246,36 @@ def test_the_routing_table_is_read_from_the_file_the_config_came_from(tmp_path):
     assert Assistant(rig.config, runs_dir=tmp_path / "runs")._router().settings.confirm_acting is True
     rig.config.source = "fake.toml"  # not a file: defaults
     assert Assistant(rig.config, runs_dir=tmp_path / "runs")._router().settings.confirm_acting is False
+
+
+# -- a task closing the executor's classifier must not close the router's ----------------------------------
+
+
+def test_a_task_that_closes_its_classifier_leaves_the_routers_open():
+    """The router keeps the classifier it was built with; `runner.run` closes whatever its factory hands it on exit."""
+    from glide.providers.config import GlideConfig
+
+    class Slot:
+        name, model = "typesafe:fake", "fake"
+
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def __exit__(self, *exc):
+            self.closed = True
+
+        def system_one(self, **kw):
+            assert not self.closed, "the router asked a classifier a task had closed"
+
+    slot = Slot()
+    config = GlideConfig.from_toml(
+        "", env={"TYPESAFE_API_KEY": "sk-test-0123456789"}, builders={("classifier", "typesafe"): lambda *a: slot}
+    )
+    first = config.classifier()
+    with config.classifier():  # what a finished task does
+        pass
+    assert config.classifier() is first and slot.closed is False
+    first.system_one(state={}, questions={})  # still usable for the next request

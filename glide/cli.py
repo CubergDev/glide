@@ -289,6 +289,8 @@ def cmd_chat(args: argparse.Namespace, config) -> int:
                     break
                 interrupted = True
                 print("\nstopped (Ctrl-C again to leave)")
+        if assistant.pending_question is not None:
+            assistant.stop()  # leaving with a question open: nothing will answer it, so do not wait out its timeout
         _finish(assistant, turn)
     except KeyboardInterrupt:
         assistant.stop()
