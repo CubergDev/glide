@@ -4,8 +4,10 @@ Everything is offline: a fake backend, scripted models and Jev."""
 
 import json
 
+import pytest
 from execution_world import Computer, Jev, Reasoner, drive, response
 
+from glide.computer import diagnostics
 from glide.computer.control import RunControl
 from glide.computer.execution.contracts import Element, Milestone
 
@@ -40,3 +42,78 @@ def test_a_write_that_only_changed_an_unrelated_control_is_not_repeated(monkeypa
     assert state.readback.endswith("completion unknown")
     report = json.loads((tmp_path / "run.json").read_text())
     assert report["uncertain"] is True and report["steps_taken"] == 1
+
+
+# -- finding 4: URL scrubbing does not depend on the scheme ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "gone"),
+    [
+        ("opened file:///Users/ann/tax-return.pdf", "tax-return"),
+        ("fetched ftp://files.example.test/private/plan.txt now", "plan.txt"),
+        ("tab chrome://settings/passwords is open", "passwords"),
+        ("tab about:blank?secret-path is open", "secret-path"),
+        ("page data:text/html,<p>patient-record</p> shown", "patient-record"),
+        ("mail mailto:ann@example.test?subject=diagnosis please", "diagnosis"),
+        ("went to javascript:alert(1337) once", "1337"),
+        ("view-source:https://shop.example.test/cart/9942 failed", "9942"),
+        ("see shop.example.test/account/orders/9942?x=1 for it", "orders"),
+        ("see www.shop.example.test:8443/a/b-c", "b-c"),
+        ("custom-app+v2://host.test/deep/link", "deep"),
+    ],
+)
+def test_a_url_of_any_scheme_or_none_is_cut_to_its_host_in_a_failure_text(text, gone):
+    assert gone not in diagnostics.scrub_text(text)
+
+
+def test_scrubbing_urls_leaves_the_words_around_them_and_ordinary_file_names():
+    out = diagnostics.scrub_text("Cannot read run.json at https://host.test/x/y?z=1 after 3 tries (engine.py)")
+    assert out == "Cannot read run.json at https://host.test after 3 tries (engine.py)"
+
+
+# -- findings 3 and 5: run.json keeps no model, page, provider or user words, nor an address, unless content is recorded --
+
+from research_fakes import decision  # noqa: E402
+
+from glide.computer.models import BrowserConnectionError, DesktopError  # noqa: E402
+
+LEAK = "Mrs Jones at 10 Elm Street, token-9f3a"
+
+
+def failure_of(monkeypatch, tmp_path, *, record, raise_in_inspect=None, replies=(), jev=None, goal="Task", **kwargs):
+    computer = Computer()
+    if raise_in_inspect:
+        computer.on_inspect = lambda _: (_ for _ in ()).throw(raise_in_inspect)
+    state = drive(
+        monkeypatch, tmp_path, computer, Reasoner(list(replies)), jev or Jev("plan"), record_content=record, goal=goal, **kwargs
+    )
+    return state, json.loads((tmp_path / "run.json").read_text())
+
+
+@pytest.mark.parametrize("record", [False, True])
+def test_words_of_the_research_model_stay_out_of_the_failure_unless_content_is_recorded(monkeypatch, tmp_path, record):
+    state, report = failure_of(
+        monkeypatch, tmp_path, record=record, replies=[decision("blocked", reason=LEAK)], jev=Jev("research")
+    )
+    assert state.outcome == "blocked" and LEAK in state.failure  # the person who ran it is told
+    assert report["failure_code"] == "invalid_action"
+    assert (LEAK[:9] in report["failure"]) is record
+    if not record:
+        assert "Verified 0 effect(s)" in report["failure"] and "invalid_action" not in report["failure"]
+
+
+@pytest.mark.parametrize("record", [False, True])
+def test_the_words_of_a_desktop_error_stay_out_of_the_failure_unless_content_is_recorded(monkeypatch, tmp_path, record):
+    _, report = failure_of(monkeypatch, tmp_path, record=record, raise_in_inspect=DesktopError(f"Window {LEAK} is unreadable"))
+    assert report["failure_code"] == "desktop_error"
+    assert ("Mrs Jones" in report["failure"]) is record
+
+
+@pytest.mark.parametrize("record", [False, True])
+def test_a_browser_address_stays_out_of_the_failure_unless_content_is_recorded(monkeypatch, tmp_path, record):
+    refused = BrowserConnectionError("cdp", "http://127.0.0.1:9222", ConnectionRefusedError(61, "refused"))
+    state, report = failure_of(monkeypatch, tmp_path, record=record, raise_in_inspect=refused)
+    assert report["failure_code"] == "browser_unavailable" and report["failure"].startswith("Cannot connect to cdp")
+    assert ("127.0.0.1" in report["failure"]) is record
+    assert "127.0.0.1" in state.failure  # told to the person, never stored

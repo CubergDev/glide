@@ -151,7 +151,8 @@ def test_the_default_run_folder_holds_counts_and_a_scrubbed_failure_but_no_conte
         "errno": 61,
     }
     assert "Mrs Jones" not in text and "secret=1" not in text and "devtools" not in text
-    assert summary["failure"].startswith("Cannot connect to cdp at http://127.0.0.1:9222 ")  # host only, as in every event
+    assert summary["failure"].startswith("Cannot connect to cdp. Start or reconnect")  # no address without recording (audit 5)
+    assert "127.0.0.1" not in text
 
 
 def test_content_recording_adds_goal_plan_history_and_the_failure_handoff(monkeypatch, tmp_path):

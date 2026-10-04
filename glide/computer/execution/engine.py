@@ -67,6 +67,14 @@ PROVIDER_SENTENCES = {
 }
 GENERIC_PROVIDER_SENTENCE = "A model provider failed."
 NO_REPLAY = "No action was repeated."
+# What run.json says in place of an error's own words unless content is recorded (D3): the message of an InvalidAction
+# can be a model's reason or question, a page's title or a clarification, and a desktop or browser message can name a
+# window or an address. The words go to the person who ran the task and to the recorded diagnostics, never to run.json.
+FIXED_FAILURES = {
+    "invalid_action": "A step could not be carried out safely, so the task stopped. Its detail is kept only with content recording.",
+    "invalid_query_contract": "The search could not be verified, so the task stopped. Its detail is kept only with content recording.",
+    "desktop_error": "The desktop could not carry out a step, so the task stopped. Its detail is kept only with content recording.",
+}
 UNVERIFIED_WRITE = (
     "An earlier identical action was not seen to do what was asked, so it was not repeated. It may or may not have "
     "happened: review the page before a fresh task."
@@ -191,6 +199,8 @@ class Execution:
         # How the run failed, for the report.
         self.failure_stage = self.error_type = self.failure_code = ""
         self.connection_error = None
+        self.browser_hint = ""
+        self.error_text = ""  # the words of the error that ended the run, to be replaced in run.json by FIXED_FAILURES
 
     # -- entry ------------------------------------------------------------------------------------------------
 
@@ -682,18 +692,20 @@ class Execution:
         self.failure_stage, self.error_type = self.phases.stage, type(error).__name__
         provider = provider_error(error)
         if isinstance(error, BrowserConnectionError):
-            self.failure_code, self.connection_error = "browser_unavailable", error.details
+            self.failure_code, self.connection_error, self.browser_hint = "browser_unavailable", error.details, error.hint
         elif provider:
             self.failure_code = "model_unavailable"
         elif isinstance(error, InvalidAction):
             self.failure_code = "invalid_query_contract" if "Query verification" in str(error) else "invalid_action"
+        elif isinstance(error, DesktopError):
+            self.failure_code = "desktop_error"
         else:
             self.failure_code = "execution_error"
         state.outcome = "provider failure" if provider else "blocked"
         if provider:
             state.failure = f"{provider_sentence(provider)} {NO_REPLAY}"
         elif isinstance(error, InvalidAction | DesktopError):
-            state.failure = str(error)
+            state.failure = self.error_text = str(error)
         else:
             state.failure = f"Execution stopped ({type(error).__name__}); no automatic replay."
         state.uncertain = self.control.in_flight
@@ -737,6 +749,10 @@ class Execution:
             # An address, and a capability the planner named (it can echo the request), are content (D3).
             connection = {k: v for k, v in connection.items() if k != "endpoint"} if connection else connection
             failure = UNSUPPORTED_RECORDED if self.failure_code == "unsupported_capability" else failure
+            if self.failure_code == "browser_unavailable":  # the message names the address that `connection_error` drops
+                failure = f"Cannot connect to {self.connection_error['provider']}. {self.browser_hint}"
+            elif self.failure_code in FIXED_FAILURES and self.error_text:
+                failure = failure.replace(self.error_text, FIXED_FAILURES[self.failure_code], 1)
         summary = {
             "engine": "structured",
             "transport": getattr(self.backend, "transport", "scripted") if self.backend is not None else "none",

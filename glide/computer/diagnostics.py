@@ -63,7 +63,10 @@ _credential_assignment = re.compile(
 )
 _cookie = re.compile(r"(?i)(\bcookie[\"']?\s*[=:]\s*)[^\r\n]+")
 _bearer = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
-_url = re.compile(r"\b(?:https?|wss?)://[^\s\"'<>]+", re.I)
+_url = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'<>]+", re.I)  # any scheme: http, ws, file, ftp, chrome, an app's own
+# Addresses with no "//": a page's own scheme names (about:, data:, mailto:, javascript:, ...) and a host with a path.
+_opaque_url = re.compile(r"\b(?:about|blob|chrome|data|file|javascript|mailto|sms|tel|view-source):[^\s\"']*", re.I)
+_bare_host = re.compile(r"(?<![\w@/.:%-])((?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?)(?:[/?#][^\s\"'<>]*)?", re.I)
 _content_keys = {
     "goal",
     "plan",
@@ -147,7 +150,9 @@ def scrub_text(value: str, *, urls: bool = True, limit: int = MAX_STRING) -> str
     """Remove credentials (and, by default, everything after a URL's host) from one line of text."""
     value = _hide_credentials(value, _secrets())
     if urls:
+        value = _opaque_url.sub(lambda m: m.group(0).split(":", 1)[0] + ":", value)
         value = _url.sub(_host_only, value)
+        value = _bare_host.sub(lambda m: m.group(1), value)
     value = " ".join(value.split())
     return value if len(value) <= limit else value[:limit] + "..."
 
