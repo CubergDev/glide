@@ -7,12 +7,18 @@ so the real ones are captured at import time, before any guard runs, and each te
 below the one it exercises.
 """
 
+import json
+import socket
 import subprocess
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
 
 from glide.computer import macos, platform_adapter, windows
+from glide.computer.browser import cdp
 from glide.computer.control import RunControl, controlled
 from glide.computer.models import Abort, DesktopError
 from glide.computer.platform_adapter import using
@@ -24,6 +30,8 @@ REAL_OPEN_URL = macos.open_url
 REAL_BROWSER_URL = macos.browser_url
 REAL_BROWSER_JXA = macos._browser_jxa
 REAL_WINDOWS_OPEN_URL = windows.open_url
+REAL_GET_JSON = cdp._get_json
+REAL_CREATE_CONNECTION = cdp.websocket.create_connection
 
 ADAPTERS = pytest.mark.parametrize("adapter", [macos, windows], ids=["macos", "windows"])
 
@@ -304,3 +312,99 @@ def test_windows_refuses_what_macos_refuses(windows_launch, url):
 def test_windows_launches_a_plain_web_address(windows_launch):
     assert REAL_WINDOWS_OPEN_URL("Google Chrome", BENIGN_URL) is True
     assert windows_launch == [("popen", ["chrome", BENIGN_URL])]
+
+
+# ------------------------------------------------------------------ CDP ignores environment proxies on loopback (finding 4)
+
+
+class Listener:
+    """A loopback TCP listener that counts the connections it is dealt and closes each at once."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.sock.settimeout(0.05)
+        self.port = self.sock.getsockname()[1]
+        self.accepted = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self):
+        while not self._stop.is_set():
+            try:
+                client, _ = self.sock.accept()
+            except TimeoutError:
+                continue
+            self.accepted += 1
+            client.close()
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join()
+        self.sock.close()
+
+
+class Answers(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"Browser": "fake"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def proxy_in_the_environment(monkeypatch):
+    """What the conftest guard switched off, switched back on: a proxy named in the environment, no
+    `no_proxy`, and urllib reading the environment again. The proxy is a loopback listener that counts hits."""
+    with Listener() as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.port}")
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.port}")
+        for name in ("no_proxy", "NO_PROXY"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(urllib.request, "getproxies", urllib.request.getproxies_environment)
+        monkeypatch.setattr(urllib.request, "_opener", None)  # the shared opener is built once, from the environment
+        yield proxy
+
+
+def test_the_cdp_http_endpoint_is_asked_directly_whatever_the_environment_says(proxy_in_the_environment):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Answers)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        reply = REAL_GET_JSON(f"http://127.0.0.1:{server.server_address[1]}/json/version", timeout=2.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert reply == {"Browser": "fake"}
+    assert proxy_in_the_environment.accepted == 0
+
+
+def test_the_cdp_websocket_is_dialled_directly_whatever_the_environment_says(proxy_in_the_environment, monkeypatch):
+    monkeypatch.setattr(cdp.websocket, "create_connection", REAL_CREATE_CONNECTION)
+    with (
+        Listener() as target,
+        pytest.raises((cdp.websocket.WebSocketException, OSError)),
+    ):  # the listener hangs up: only where it dialled matters
+        cdp.Session(f"ws://127.0.0.1:{target.port}/devtools/page/1", timeout=1.0)
+    assert proxy_in_the_environment.accepted == 0
+    assert target.accepted == 1
+
+
+def test_an_address_that_is_not_loopback_keeps_the_environment_proxy_rules(monkeypatch):
+    """Only this machine's own addresses are exempt; the helper that decides is exact."""
+    assert all(cdp.is_loopback(host) for host in ("127.0.0.1", "::1", "localhost", "127.1.2.3"))
+    assert not any(cdp.is_loopback(host) for host in ("example.com", "10.0.0.5", "0.0.0.0", "", None, "127.0.0.1.example.com"))
+    seen = {}
+    monkeypatch.setattr(cdp.websocket, "create_connection", lambda url, **kw: seen.update(url=url, **kw))
+    cdp.Session("ws://example.com:9222/devtools/page/1")
+    assert "http_proxy_host" not in seen and "http_no_proxy" not in seen
