@@ -503,6 +503,12 @@ def _help_asked(words: Sequence[str]) -> bool:
     return any(word in ("-h", "--help") for word in words)
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    from .setup import main as setup_main
+
+    return setup_main(_forward(args))
+
+
 def cmd_memory(args: argparse.Namespace) -> int:
     from .memory import cli as memory
 
@@ -668,6 +674,9 @@ def build_parser() -> argparse.ArgumentParser:
         loads=True,
     )
     passthrough(commands, "inspect", cmd_inspect, "capture the screen and show what the classifier would be sent")
+    passthrough(
+        commands, "setup", cmd_setup, "first-run wizard: writes glide.toml, never a key (`glide setup --text`)", config=True
+    )
     passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)
     passthrough(commands, "mcp", cmd_mcp, "serve Glide over MCP, show the MCP settings (`glide mcp --help`)", config=True)
     webhooks = commands.add_parser("webhooks", help="the webhook listener and its worker (`glide webhooks serve --help`)")

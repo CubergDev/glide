@@ -1,0 +1,57 @@
+# Defaults for glide.direct. Every address the package can build lives here, never in Python, and any of it can be
+# replaced or extended in glide.toml under a [direct] table with the same shape:
+#
+#   [direct.sites]            # spoken name -> address ("open youtube")
+#   [direct.search]           # spoken name -> address with {query} ("search amazon for ..."); `default` names one
+#   [direct.maps]             # directions ({origin} {destination}), directions_to ({destination}), place ({query})
+#   [direct.tickers]          # spoken company name -> ticker symbol
+#   weather = "...{city}..."  # and quote = "...{ticker}..."
+#
+# A value is substituted URL-encoded. A placeholder may appear only after the host, so the text of a request can never
+# choose where it goes. Only http and https addresses are accepted.
+
+weather = "https://www.google.com/search?q=weather+in+{city}"
+quote = "https://finance.yahoo.com/quote/{ticker}"
+
+[sites]
+youtube = "https://www.youtube.com/"
+google = "https://www.google.com/"
+gmail = "https://mail.google.com/"
+"google maps" = "https://www.google.com/maps"
+maps = "https://www.google.com/maps"
+"google calendar" = "https://calendar.google.com/"
+github = "https://github.com/"
+amazon = "https://www.amazon.com/"
+wikipedia = "https://www.wikipedia.org/"
+reddit = "https://www.reddit.com/"
+netflix = "https://www.netflix.com/"
+linkedin = "https://www.linkedin.com/"
+twitter = "https://twitter.com/"
+facebook = "https://www.facebook.com/"
+news = "https://news.google.com/"
+
+[search]
+default = "google"
+google = "https://www.google.com/search?q={query}"
+youtube = "https://www.youtube.com/results?search_query={query}"
+amazon = "https://www.amazon.com/s?k={query}"
+wikipedia = "https://www.wikipedia.org/w/index.php?search={query}"
+github = "https://github.com/search?q={query}"
+reddit = "https://www.reddit.com/search/?q={query}"
+maps = "https://www.google.com/maps/search/?api=1&query={query}"
+
+[maps]
+directions = "https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}"
+directions_to = "https://www.google.com/maps/dir/?api=1&destination={destination}"
+place = "https://www.google.com/maps/search/?api=1&query={query}"
+
+[tickers]
+apple = "AAPL"
+microsoft = "MSFT"
+tesla = "TSLA"
+amazon = "AMZN"
+google = "GOOGL"
+alphabet = "GOOGL"
+nvidia = "NVDA"
+meta = "META"
+netflix = "NFLX"

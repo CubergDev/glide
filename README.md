@@ -33,6 +33,20 @@ one is reported with the command to install it.
 | `memory` | nothing (standard library only) | `glide memory`; names the feature. MCP-facing parts also need `mcp` |
 | `all` | all of the above | |
 
+## First run: `glide setup`
+
+```sh
+glide setup           # a page on this computer only (127.0.0.1, random port, a link that works once)
+glide setup --text    # the same questions as plain prompts
+```
+
+It asks which features to turn on (computer control, webhooks and memory start off; confirmations are always on), which
+providers to use per role (one key is enough, and a fallback chain is visible), shows the variable each provider reads and
+whether it is set (never its value), and prints the exact `glide.toml` before writing it. An existing file is backed up
+first. A key you paste is held in the wizard's memory for the optional test and for starting Glide, and is never written
+anywhere. A test sends one tiny request, spends a few tokens, and only runs when you click it. The "where to get a key"
+links live in `glide/setup/keys.toml`; check the provider's site, pages move.
+
 ## Set up
 
 ```sh

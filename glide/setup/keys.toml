@@ -1,0 +1,14 @@
+# Where a person can get a key for each built-in provider. This is configuration, not code: a page moves, so the
+# wizard labels every link "check the provider's site". Only https links are ever shown.
+[openai]
+url = "https://platform.openai.com/api-keys"
+[openrouter]
+url = "https://openrouter.ai/keys"
+[deepseek]
+url = "https://platform.deepseek.com/api_keys"
+[gemini]
+url = "https://aistudio.google.com/app/apikey"
+[elevenlabs]
+url = "https://elevenlabs.io/app/settings/api-keys"
+[typesafe]
+url = "https://typesafe.ai"
