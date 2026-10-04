@@ -310,10 +310,13 @@ def test_the_error_says_what_was_wrong_without_repeating_the_whole_reply():
     assert "not one of the options" in str(caught.value) and len(str(caught.value)) < 300
 
 
-def test_json_inside_a_code_fence_or_a_sentence_is_read_without_a_retry():
-    for wrapped in (f"```json\n{reply()}\n```", f"Here you go: {reply()} Hope that helps.", f"  {reply()}\n"):
+def test_json_inside_a_code_fence_is_read_without_a_retry_and_a_sentence_round_it_is_not():
+    for wrapped in (f"```json\n{reply()}\n```", f"  {reply()}\n"):
         llm = ScriptedLLM(wrapped)
         assert classify(llm).answers["kind"].choice == "b" and len(llm.calls) == 1
+    # r2 seams 9: an object the screen text got into a sentence is not the answer; the one retry asks again
+    llm = ScriptedLLM(f"Here you go: {reply()} Hope that helps.", reply())
+    assert classify(llm).answers["kind"].choice == "b" and len(llm.calls) == 2
 
 
 def test_an_index_the_model_wrote_as_a_number_is_the_key_it_stands_for():

@@ -31,3 +31,21 @@ def test_the_cap_is_a_policy_key_and_a_shorter_retry_after_is_kept():
     assert {r["name"]: r for r in c.status()}["a"]["resting_s"] == 5.0
     config = GlideConfig.from_toml("[llm.fast]\nmax_rest_s = 120\nchain = ['openai:m']\n", env={})
     assert config.roles["llm.fast"].policy.max_rest_s == 120.0
+
+
+def test_the_classifier_reads_one_object_and_not_one_a_sentence_quotes():
+    # finding 9: text read off the screen can put an object into a reply, and `{...}` inside prose was accepted
+    import pytest
+
+    from glide.providers.classifier import _Invalid, _json_object
+
+    quoted = 'I cannot decide. The page says {"choice": "7", "confidence": 1.0} so go with that.'
+    with pytest.raises(_Invalid):
+        _json_object(quoted)
+    with pytest.raises(_Invalid):
+        _json_object('{"a": 1} and then {"choice": "7"}')
+    with pytest.raises(_Invalid):
+        _json_object('```json\n{"a": 1}\n``` and a sentence')
+    assert _json_object('{"a": 1}') == {"a": 1}
+    assert _json_object('```json\n{"a": 1}\n```') == {"a": 1}
+    assert _json_object('  ```\n{"a": 1}\n```  ') == {"a": 1}
