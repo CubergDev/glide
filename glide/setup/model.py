@@ -202,7 +202,7 @@ def launch_argv(mode: str, config_path: Path, *, act: bool, text: str = "") -> l
     base = [sys.executable, "-m", "glide.cli", "--config", str(config_path)]
     if mode == "ui":
         return [*base, "app-server"]
-    argv = [*base, {"ask": "ask", "chat": "chat", "voice": "voice"}[mode]]
+    argv = [*base, mode]  # mode is one of MODES, checked above
     if act:
         argv.append("--act")
     if mode == "ask":

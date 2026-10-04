@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import getpass
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -83,7 +84,7 @@ def run_text(
         try:
             role, slot = next((r, c[0]) for r, c in roles.items() if c[0]["provider"] in PRESETS)
             info = next(i for i in config.slots(role) if i.provider == slot["provider"])
-            row = doctor._probe(config, role, info, 20.0, __import__("time").monotonic)
+            row = doctor._probe(config, role, info, 20.0, time.monotonic)
             out(f"{row.status}: {config.scrub(row.detail)}")
         finally:
             config.close()

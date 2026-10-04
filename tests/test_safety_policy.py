@@ -120,7 +120,7 @@ SECRET_FIELDS = [
 @pytest.mark.parametrize("kind", ["type", "click", "key"])
 def test_secret_field_is_refused_for_every_kind(fields, kind):
     verdict = decide(Action(kind, text="hunter2" if kind == "type" else "", key="return" if kind == "key" else "", **fields))
-    assert (verdict.decision, verdict.reason) == (REFUSE, Reason.SECRET)
+    assert (verdict.decision, verdict.reason) == (REFUSE, Reason.SECRET_FIELD)
 
 
 def test_secret_is_refused_even_when_the_task_text_holds_it():

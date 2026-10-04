@@ -40,7 +40,7 @@ class Reason(StrEnum):
     DESTRUCTIVE = "destructive"
     OVERWRITE = "overwrite"
     CONSENT = "consent"
-    SECRET = "secret"
+    SECRET_FIELD = "secret_field"
     PERSONAL = "personal"
     UNLABELED = "unlabeled"
     UNKNOWN = "unknown"  # a role or an action kind the tables do not list
@@ -113,12 +113,12 @@ def _field_words(a: Action) -> list[tuple[str, ...]]:
 
 def _secret(a: Action, lex: Lexicon, role: str) -> Verdict | None:
     if a.secret or role in lex.secret_roles:
-        return Verdict(Decision.REFUSE, Reason.SECRET)
+        return Verdict(Decision.REFUSE, Reason.SECRET_FIELD)
     for word in normalize(a.field_type):
         if word in lex.secret_types:
-            return Verdict(Decision.REFUSE, Reason.SECRET, word)
+            return Verdict(Decision.REFUSE, Reason.SECRET_FIELD, word)
     term = lex.find("secret", _field_words(a))
-    return Verdict(Decision.REFUSE, Reason.SECRET, term) if term else None
+    return Verdict(Decision.REFUSE, Reason.SECRET_FIELD, term) if term else None
 
 
 def _risk(a: Action, lex: Lexicon, role: str) -> Verdict | None:

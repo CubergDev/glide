@@ -74,6 +74,21 @@ class Allowed:
 
 
 ALLOWED: dict[str, Allowed] = {
+    "glide/setup/cli.py": Allowed(
+        Counter({"webbrowser": 1}),
+        "the first-run wizard opens its own loopback page in the browser, only when the person did not pass --no-open; tests refuse it",
+        "setup",
+    ),
+    "glide/setup/server.py": Allowed(
+        Counter({"subprocess": 1, "Popen": 1, "subprocess.run": 1}),
+        "the first-run wizard starts Glide (`glide ask|chat|voice`) with the keys the person pasted in its environment; tests refuse it",
+        "setup",
+    ),
+    "glide/setup/text.py": Allowed(
+        Counter({"subprocess": 1, "subprocess.call": 1}),
+        "the plain-prompt wizard starts Glide the same way; tests inject a runner",
+        "setup",
+    ),
     "glide/computer/execution/spawn.py": Allowed(
         Counter({"subprocess": 1, "Popen": 2}),
         "the seam: the one `Popen`, without a shell, that the execution backends call as `spawn.start`; tests refuse it",
