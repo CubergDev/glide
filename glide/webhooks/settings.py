@@ -5,6 +5,7 @@ Everything is off until switched on (D5): the file needs `"enabled": true` and e
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from pydantic import Field, field_validator, model_validator
 from .contracts import ENV_NAME, SLUG, Message, strict_json
 from .secret_sources import EnvSecrets, SecretSource
 from .translation import is_login, is_repository
+
+RETENTION_ENV = "GLIDE_WEBHOOK_UNCERTAIN_RETENTION_DAYS"
 
 
 class VerificationKey(Message):
@@ -126,6 +129,9 @@ class ServerSettings(Message):
     max_events: int = Field(default=100000, ge=1, le=1000000)
     # Once `max_events` receipts exist, receipts of finished work older than this are dropped to make room.
     receipt_retention_days: int = Field(default=30, ge=1, le=3650)
+    # The D3 exception: an `uncertain` run keeps its goal and context for an operator to review, but only this long.
+    # Then they are deleted (the row keeps its identifiers). Overridden by GLIDE_WEBHOOK_UNCERTAIN_RETENTION_DAYS.
+    uncertain_retention_days: int = Field(default=14, ge=1, le=90)
     lease_seconds: int = Field(default=60, ge=15, le=300)
     allowed_hosts: tuple[str, ...] = Field(default=("localhost", "127.0.0.1"), min_length=1, max_length=64)
 
@@ -146,6 +152,12 @@ def load_settings(path: Path) -> ServerSettings:
     try:
         raw = path.read_bytes()
         strict_json(raw)  # refuses duplicate keys, which pydantic would let silently override each other
-        return ServerSettings.model_validate_json(raw)
+        settings = ServerSettings.model_validate_json(raw)
+        if override := os.environ.get(RETENTION_ENV, "").strip():
+            days = int(override)
+            if not 1 <= days <= 90:
+                raise ValueError(RETENTION_ENV)
+            settings = settings.model_copy(update={"uncertain_retention_days": days})
+        return settings
     except (OSError, ValueError):
         raise ValueError("Invalid webhook configuration. See glide/webhooks/README.md.") from None

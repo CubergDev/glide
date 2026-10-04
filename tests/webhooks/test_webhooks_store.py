@@ -788,3 +788,132 @@ def test_a_blocked_redaction_checkpoint_is_retried_by_the_next_commit(tmp_path):
     finally:
         reader.close()
         store.close()
+
+
+# -- D3 exception, bounded: an uncertain row's content is deleted at the retention limit or at reconciliation --------
+
+DAY = 86400
+
+
+def uncertain_row(store, clock, identity="m1"):
+    store.enqueue("standard", identity, "digest-" + identity, marked_call(identity))
+    lease = claim(store)
+    store.finish(*args(lease), "uncertain", note="Interrupted.")
+    return lease
+
+
+def test_the_default_retention_is_fourteen_days(tmp_path):
+    store = QueueStore(tmp_path / "q.sqlite3")
+    assert store.uncertain_retention_s == 14 * DAY
+    store.close()
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), True, "7"])
+def test_the_retention_must_be_a_positive_number(tmp_path, bad):
+    with pytest.raises(ValueError):
+        QueueStore(tmp_path / "q.sqlite3", uncertain_retention_s=bad)
+
+
+def test_the_purge_waits_for_the_limit_and_fires_exactly_at_it(redacting):
+    store, clock = redacting
+    uncertain_row(store, clock)
+    became_uncertain = clock.now
+    clock.now = became_uncertain + 14 * DAY - 1
+    assert store.purge_uncertain() == 0
+    assert store.get("laptop", "m1")["call"]["goal"].endswith(MARKER)  # one second before the limit: still reviewable
+    clock.now = became_uncertain + 14 * DAY  # the boundary counts as expired
+    assert store.purge_uncertain() == 1
+    row = store.get("laptop", "m1")
+    assert row["call"]["goal"] == "redacted" and row["call"]["context"] == {} and row["call"]["id"] == "m1"
+    assert row["status"] == "uncertain" and row["summary"] == "Expired, not reconciled." and row["expired_at"] == clock.now
+    assert claim(store) is None  # it still blocks its agent until an operator decides
+    assert store.purge_uncertain() == 0  # each row once
+
+
+def test_the_purge_uses_the_injected_clock_and_the_configured_limit(tmp_path):
+    clock = SimpleNamespace(now=1000.0)
+    store = QueueStore(tmp_path / "q.sqlite3", clock=lambda: clock.now, uncertain_retention_s=3 * DAY)
+    uncertain_row(store, clock)
+    clock.now += 3 * DAY - 1
+    assert store.purge_uncertain() == 0
+    clock.now += 1
+    assert store.purge_uncertain() == 1
+    store.close()
+
+
+def test_the_expired_content_is_gone_from_the_database_and_wal_bytes(redacting):
+    store, clock = redacting
+    uncertain_row(store, clock)
+    assert MARKER.encode() in database_bytes(store)  # kept until the limit
+    clock.now += 14 * DAY
+    assert store.purge_uncertain() == 1
+    store.close()
+    assert MARKER.encode() not in database_bytes(store)
+
+
+def test_the_purge_never_touches_pending_leased_or_finished_rows(redacting):
+    store, clock = redacting
+    store.enqueue("standard", "pending", "d1", marked_call("pending") | {"agent_id": "a-pending"})
+    store.enqueue("standard", "leased", "d2", marked_call("leased") | {"agent_id": "a-leased"})
+    store.claim("a-leased", "worker", lease_seconds=3600)
+    store.enqueue("standard", "done", "d3", marked_call("done") | {"agent_id": "a-done"})
+    lease = store.claim("a-done", "worker")
+    store.finish("a-done", "worker", "done", lease["lease_token"], "blocked")
+    clock.now += 80 * DAY  # far past the limit; the leased row's one-hour lease has also lapsed, but nobody touched it
+    with sqlite3.connect(store.path) as raw:
+        before = raw.execute("SELECT id, status, call_json FROM messages WHERE id IN ('pending','leased')").fetchall()
+    assert store.purge_uncertain() == 0
+    with sqlite3.connect(store.path) as raw:
+        after = raw.execute("SELECT id, status, call_json FROM messages WHERE id IN ('pending','leased')").fetchall()
+    assert before == after and all(MARKER in call_json for _, _, call_json in after)
+    assert {status for _, status, _ in after} == {"pending", "leased"}
+
+
+def test_recording_on_keeps_an_uncertain_rows_content_forever(stored):
+    store, clock = stored
+    uncertain_row(store, clock)
+    clock.now += 80 * DAY
+    assert store.purge_uncertain() == 0
+    assert store.get("laptop", "m1")["call"]["goal"].endswith(MARKER)
+
+
+@pytest.mark.parametrize(("verdict", "status"), [("done", "completed"), ("not-done", "cancelled"), ("unknown", "failed")])
+def test_a_reconcile_writes_the_verdict_and_deletes_the_content_at_once(redacting, verdict, status):
+    store, clock = redacting
+    uncertain_row(store, clock)
+    agent = store.agent_of("m1")
+    assert agent == "laptop"
+    result = store.reconcile(agent, "m1", verdict)
+    assert result["status"] == status and result["resolved_at"] == clock.now
+    assert result["summary"] == f"Reconciled by an operator: {verdict}."
+    assert result["call"]["goal"] == "redacted" and result["call"]["context"] == {}
+    store.close()
+    assert MARKER.encode() not in database_bytes(store)
+
+
+def test_a_reconcile_after_expiry_still_works_and_unblocks_the_agent(redacting):
+    store, clock = redacting
+    uncertain_row(store, clock)
+    clock.now += 20 * DAY
+    store.purge_uncertain()
+    store.reconcile("laptop", "m1", "not-done")
+    assert store.get("laptop", "m1")["status"] == "cancelled"
+    store.enqueue("standard", "m2", "digest-m2", marked_call("m2"))
+    assert claim(store) is not None
+
+
+def test_reconcile_refuses_other_states_and_unknown_verdicts(redacting):
+    store, _ = redacting
+    store.enqueue("standard", "m1", "d", marked_call())
+    with pytest.raises(LeaseConflict):
+        store.reconcile("laptop", "m1", "done")  # pending
+    with pytest.raises(ValueError):
+        store.reconcile("laptop", "m1", "maybe")
+    assert store.agent_of("nope") is None
+    assert store.get("laptop", "m1")["status"] == "pending" and store.get("laptop", "m1")["call"]["goal"].endswith(MARKER)
+
+
+def test_reconcile_with_recording_on_keeps_the_content(stored):
+    store, clock = stored
+    uncertain_row(store, clock)
+    assert store.reconcile("laptop", "m1", "done")["call"]["goal"].endswith(MARKER)

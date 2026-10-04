@@ -248,3 +248,33 @@ def test_github_allowlist_entries_that_could_never_match_are_refused(field, valu
         parse(data)
     data[field] = ["team/repo"] if field == "repositories" else ["octocat", "dependabot[bot]"]
     assert parse(data)
+
+
+def test_uncertain_retention_defaults_to_fourteen_days_and_is_bounded():
+    assert make_settings().uncertain_retention_days == 14
+    for days, ok in ((1, True), (90, True), (0, False), (91, False)):
+        data = {**settings_data(), "uncertain_retention_days": days}
+        if ok:
+            assert ServerSettings.model_validate_json(json.dumps(data)).uncertain_retention_days == days
+        else:
+            with pytest.raises(ValidationError):
+                ServerSettings.model_validate_json(json.dumps(data))
+
+
+@pytest.mark.parametrize(("env", "expected"), [("3", 3), ("90", 90), (" 1 ", 1)])
+def test_the_environment_overrides_the_retention(tmp_path, monkeypatch, env, expected):
+    path = tmp_path / "w.json"
+    path.write_text(json.dumps({**settings_data(), "uncertain_retention_days": 20}))
+    monkeypatch.setenv("GLIDE_WEBHOOK_UNCERTAIN_RETENTION_DAYS", env)
+    assert load_settings(path).uncertain_retention_days == expected
+    monkeypatch.delenv("GLIDE_WEBHOOK_UNCERTAIN_RETENTION_DAYS")
+    assert load_settings(path).uncertain_retention_days == 20
+
+
+@pytest.mark.parametrize("env", ["0", "91", "-5", "soon", "1.5"])
+def test_a_bad_environment_retention_is_refused(tmp_path, monkeypatch, env):
+    path = tmp_path / "w.json"
+    path.write_text(json.dumps(settings_data()))
+    monkeypatch.setenv("GLIDE_WEBHOOK_UNCERTAIN_RETENTION_DAYS", env)
+    with pytest.raises(ValueError, match="Invalid webhook configuration"):
+        load_settings(path)

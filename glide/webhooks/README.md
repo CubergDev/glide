@@ -48,9 +48,25 @@ Default: for GitHub, repository, number, action, commit ids and comment id. For 
 times. No titles, bodies, comments, senders, mailbox addresses, sender source URIs or URLs of any kind.
 A finished task has its goal and context replaced by a placeholder; worker summaries are replaced by the worker's
 content-free `note`; event text is dropped; `secure_delete` plus a WAL truncate remove the bytes from the files.
-An `uncertain` task keeps its call (goal and context included) until an operator resolves it; the operator needs it to
-review what ran. With `record_content` on, excerpts, summaries
-and event text are kept (still never a URL). The consequence: GitHub reports run on metadata only unless you opt
+With `record_content` on, excerpts, summaries
+and event text are kept (still never a URL).
+
+**The one D3 exception: an `uncertain` run.** A run that ended `uncertain` (a write may or may not have happened)
+keeps its goal and context so an operator can review what it was meant to do. This is bounded:
+
+- **Retention limit.** `uncertain_retention_days` in the webhook JSON (default 14, range 1 to 90), or the environment
+  variable `GLIDE_WEBHOOK_UNCERTAIN_RETENTION_DAYS` (same range, wins over the file). Once a row has been uncertain
+  that long (the limit itself counts as expired), its goal and context are deleted. The row keeps its identifiers,
+  stays `uncertain` (it still blocks its agent; nothing is replayed) and reads `Expired, not reconciled.` with an
+  `expired_at` time. `secure_delete` plus a WAL truncate remove the bytes from the files.
+- **When it runs.** At service start and then hourly while it runs. Only rows still `uncertain` are touched, never
+  pending, leased or finished ones.
+- **Reconcile.** `glide webhooks reconcile <message-id> done|not-done|unknown` records your verdict and deletes the
+  content at once. `done` (the write happened) leaves `completed`, `not-done` leaves `cancelled`, `unknown` leaves
+  `failed`; none of them requeues or reruns anything, and the agent is unblocked. It works on an expired row too.
+  Check the real effect yourself first (an attempted action is not a verified effect). The HTTP resolve endpoint
+  deletes the content in the same way.
+- **Recording on.** With `record_content` on nothing is deleted at the limit; the content is kept, as that setting says. The consequence: GitHub reports run on metadata only unless you opt
 in, and they say so.
 
 Receipts keep the source, event id and a digest of the authenticated body, so duplicate deliveries are

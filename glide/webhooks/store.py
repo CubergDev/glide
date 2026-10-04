@@ -6,7 +6,8 @@ uncertain rather than retryable: computer actions may already have happened.
 D3 recording rule. Unless `record_content=True`, the database never keeps what the task was about once the task
 is over: a message that reaches a terminal state (other than `uncertain`, which an operator still has to review)
 has its goal and context replaced by a fixed placeholder, worker summaries are replaced by the worker's content-free
-`note`, and event text is dropped. `secure_delete` and a WAL truncate make the replaced bytes actually leave the
+`note`, and event text is dropped. The one exception, an `uncertain` row, is bounded: its content goes at
+reconciliation, or when `uncertain_retention_s` has passed (`purge_uncertain`), whichever comes first. `secure_delete` and a WAL truncate make the replaced bytes actually leave the
 files. Receipts keep only a source, an event id and a digest of the authenticated body.
 """
 
@@ -38,6 +39,12 @@ BUSY_TIMEOUT_MS = 5000
 RECEIPT_RETENTION_S = 30 * 86400  # how long a finished delivery's receipt is kept once the receipt table is full
 REDACTED_GOAL = "redacted"
 RESOLVED_NOTE = "Reconciled by an operator."
+EXPIRED_NOTE = "Expired, not reconciled."
+UNCERTAIN_RETENTION_S = 14 * 86400  # default: how long an uncertain row keeps its goal and context
+UNCERTAIN_RETENTION_DAYS = (1, 90)
+# An operator's verdict on a write that may or may not have happened, and the final state it leaves. A verdict never
+# requeues or reruns the task. `unknown` is `failed`: nothing confirmed it, and nothing will replay it.
+VERDICTS = {"done": "completed", "not-done": "cancelled", "unknown": "failed"}
 
 
 class DeliveryConflict(RuntimeError):
@@ -104,11 +111,17 @@ class QueueStore:
         clock: Callable[[], float] = time.time,
         record_content: bool = False,
         receipt_retention_s: float = RECEIPT_RETENTION_S,
+        uncertain_retention_s: float = UNCERTAIN_RETENTION_S,
     ):
         if not _is_int(max_pending) or max_pending < 1:
             raise ValueError("The pending-message limit must be positive.")
         if not _is_int(max_events) or max_events < 1:
             raise ValueError("The delivery limit must be positive.")
+        if isinstance(uncertain_retention_s, bool) or not isinstance(uncertain_retention_s, int | float):
+            raise ValueError("The uncertain-row retention must be a number of seconds.")
+        if not math.isfinite(uncertain_retention_s) or uncertain_retention_s <= 0:
+            raise ValueError("The uncertain-row retention must be positive.")
+        self.uncertain_retention_s = float(uncertain_retention_s)
         self.path = Path(path).absolute()
         self.max_pending = max_pending
         self.max_events = max_events
@@ -166,6 +179,8 @@ class QueueStore:
                 columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
                 if "resolved_at" not in columns:
                     db.execute("ALTER TABLE messages ADD COLUMN resolved_at REAL")
+                if "expired_at" not in columns:
+                    db.execute("ALTER TABLE messages ADD COLUMN expired_at REAL")
             self._protect_files()
         except BaseException:
             self._db.close()
@@ -259,6 +274,44 @@ class QueueStore:
             return False
         db.execute("UPDATE messages SET call_json=? WHERE id=?", (_redacted_call(row["call_json"]), message_id))
         return True
+
+    def purge_uncertain(self) -> int:
+        """Delete the goal and context of `uncertain` rows older than the retention limit; return how many.
+
+        Only rows that are still `uncertain` are touched (never pending, leased or finished ones), each once. The row
+        keeps its identifiers, stays `uncertain` (it still blocks its agent until an operator reconciles it) and gets
+        an `expired_at` time and the summary `EXPIRED_NOTE`. With `record_content` on nothing is deleted.
+        """
+        if self.record_content:
+            return 0
+        with self._transaction() as db:
+            cutoff = self.clock() - self.uncertain_retention_s
+            rows = db.execute(
+                "SELECT id, call_json FROM messages WHERE status='uncertain' AND expired_at IS NULL AND updated_at<=?",
+                (cutoff,),
+            ).fetchall()
+            now = self.clock()
+            for row in rows:
+                db.execute(
+                    "UPDATE messages SET call_json=?, summary=?, expired_at=? WHERE id=?",
+                    (_redacted_call(row["call_json"]), EXPIRED_NOTE, now, row["id"]),
+                )
+        if rows:
+            self._checkpoint()
+        return len(rows)
+
+    def agent_of(self, message_id: str) -> str | None:
+        """The agent a message belongs to (for an operator who only has the message id)."""
+        with self._transaction() as db:
+            row = db.execute("SELECT agent_id FROM messages WHERE id=?", (message_id,)).fetchone()
+        return row["agent_id"] if row else None
+
+    def reconcile(self, agent_id: str, message_id: str, verdict: str) -> dict:
+        """Operator verdict `done`, `not-done` or `unknown` on an uncertain row; the content is redacted at once."""
+        if verdict not in VERDICTS:
+            raise ValueError("The verdict must be done, not-done or unknown.")
+        text = f"Reconciled by an operator: {verdict}."
+        return self.resolve(agent_id, message_id, VERDICTS[verdict], summary=text, note=text)
 
     def close(self) -> None:
         with self._lock:
@@ -492,7 +545,7 @@ class QueueStore:
             raise LeaseConflict("The agent lease is unavailable.")
         return result
 
-    def resolve(self, agent_id: str, message_id: str, outcome: str, *, summary: str = "") -> dict:
+    def resolve(self, agent_id: str, message_id: str, outcome: str, *, summary: str = "", note: str = RESOLVED_NOTE) -> dict:
         """Explicit operator reconciliation; this never requeues or reruns a task.
 
         The API must authorize this separately from ordinary worker leases.
@@ -501,7 +554,7 @@ class QueueStore:
         """
         if outcome not in {"completed", "failed", "cancelled"} or not isinstance(summary, str):
             raise ValueError("The reconciliation outcome is invalid.")
-        summary = clip_bytes(summary if self.record_content else RESOLVED_NOTE, MAX_SUMMARY_BYTES)
+        summary = clip_bytes(summary if self.record_content else note, MAX_SUMMARY_BYTES)
         result = None
         redacted = False
         with self._transaction() as db:
@@ -536,6 +589,7 @@ class QueueStore:
             "updated_at": row["updated_at"],
             "expires_at": row["expires_at"],
             "resolved_at": row["resolved_at"],
+            "expired_at": row["expired_at"],
             "events": [json.loads(event["event_json"]) for event in events],
         }
 
