@@ -52,11 +52,25 @@ def isolated(monkeypatch, tmp_path):
 
 
 class Keys:
-    """A terminal: lines come out when the test puts them in, and `EOFError` when it closes."""
+    """A terminal: lines come out when the test puts them in, and `EOFError` when it closes.
+
+    With `settle`, a line is released only after the request for the previous one has been taken up and has ended,
+    as a person cannot type the next line before the last request has begun. "Taken up" has to be observed, not
+    guessed: `cli.LineReader` reads one line ahead on its own thread, so by the time the chat loop has received a
+    line, the next one is already being asked for. Counting live request threads at that moment sees none (the loop
+    has not started the thread for the line it was just given) and releases the next line at once, so its
+    `interrupt_speech` cancelled a request that had not begun. The loop is seen through `reader()`: a line is
+    released only once the loop has received the previous one and has come back asking for the next, which it does
+    after it has started that request's thread.
+    """
 
     def __init__(self, *lines, settle: bool = False) -> None:
         self.queue: queue.Queue = queue.Queue()
         self.settle = settle
+        self.released = 0  # lines given to the reader thread
+        self._seen = threading.Condition()
+        self._received = 0  # lines the loop has received
+        self._asking = False  # the loop is asking for a line, having handled the last one it received
         for line in lines:
             self.queue.put(line)
 
@@ -66,8 +80,31 @@ class Keys:
     def close(self) -> None:
         self.queue.put(EOF_MARK)
 
+    def reader(self):
+        """A `cli.LineReader` that tells these keys when the loop receives a line and when it asks for the next."""
+        keys = self
+
+        class Watched(cli.LineReader):
+            def get(self, timeout=None):
+                with keys._seen:
+                    keys._asking = True
+                    keys._seen.notify_all()
+                line = super().get(timeout)
+                with keys._seen:
+                    keys._asking = False
+                    keys._received += line is not None
+                    keys._seen.notify_all()
+                return line
+
+        return Watched
+
+    def _loop_has_taken_up(self, lines: int) -> bool:
+        with self._seen:
+            return self._seen.wait_for(lambda: self._received >= lines and self._asking, WAIT)
+
     def __call__(self, prompt: str = "") -> str:
-        if self.settle:  # a person cannot type the next line before the last request has been taken up; a test must not either
+        if self.settle:
+            assert self._loop_has_taken_up(self.released), "the chat loop never asked for another line"
             wait_until(lambda: not any(t.name in ("glide-turn", "glide-task") and t.is_alive() for t in threading.enumerate()))
         try:
             item = self.queue.get(timeout=WAIT)
@@ -77,6 +114,7 @@ class Keys:
             raise EOFError
         if isinstance(item, BaseException):
             raise item
+        self.released += 1
         return item
 
 
@@ -123,6 +161,8 @@ def run(argv, monkeypatch, config, keys=None, player=None) -> tuple[int, Termina
     monkeypatch.setattr(cli, "_player", lambda on_error: player or FakePlayer())
     if keys is not None:
         monkeypatch.setattr(cli, "_read_line", keys)
+        if keys.settle:
+            monkeypatch.setattr(cli, "LineReader", keys.reader())
     terminal = Terminal(monkeypatch)
     return cli.main(argv), terminal
 
