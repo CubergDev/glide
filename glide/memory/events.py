@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from ._callbacks import _sync
+from ._callbacks import require_sync
 from .contracts import Scope
 
 
@@ -87,7 +87,7 @@ class EventBus:
             if kinds is not None and kind not in kinds:
                 continue
             try:
-                _sync(callback(copy.deepcopy(event)))
+                require_sync(callback(copy.deepcopy(event)))
             except BaseException as error:
                 with self._lock:
                     self.errors.append({"event_id": event.id, "subscriber_id": identifier, "error_type": type(error).__name__})

@@ -26,7 +26,7 @@ import httpx
 
 from glide.providers.errors import ProviderError, from_exception
 
-from .bridge import MCPProtocolError, _descriptor, _json, normalize_mcp_result, read_tools_page
+from .bridge import MCPProtocolError, normalize_mcp_result, read_tools_page, rpc_code, tool_descriptor, wire_json
 
 REQUEST = Callable[[str, dict], Awaitable[Any]]
 
@@ -59,18 +59,12 @@ class MCPCallError(ProviderError):
         self.outcome_unknown = outcome_unknown
 
 
-def _rpc_code(error: BaseException) -> int | None:
-    detail = getattr(error, "error", None)
-    code = detail.get("code") if isinstance(detail, dict) else getattr(detail, "code", None)
-    return code if type(code) is int else None
-
-
 def to_provider_error(error: BaseException, *, server: str, action: str, call: bool = False) -> ProviderError:
     """The ProviderError for anything an MCP request raised. `call=True` marks a tool call (see module doc)."""
     provider = f"mcp:{server}"
     if isinstance(error, ProviderError):
         return error
-    code = _rpc_code(error)
+    code = rpc_code(error)
     reached_server = False  # the server answered, so it knows whether it ran the tool
     if isinstance(error, MCPProtocolError):
         kind, detail = "content", "sent an unusable reply"
@@ -135,7 +129,7 @@ class SessionClient:
                 raise MCPProtocolError("inventory exceeds 128 pages")
             tools, names = [], set()
             for raw in inventory:
-                descriptor = _descriptor(raw)
+                descriptor = tool_descriptor(raw)
                 if descriptor["name"] in names:
                     raise MCPProtocolError("duplicate tool name")
                 names.add(descriptor["name"])
@@ -161,7 +155,7 @@ class SessionClient:
                 provider=f"mcp:{self.name}",
             )
         try:
-            params = {"name": name, "arguments": _json(arguments)}
+            params = {"name": name, "arguments": wire_json(arguments)}
         except MCPProtocolError:
             raise ProviderError(
                 f"mcp:{self.name} tools/call: arguments are too large or not JSON",

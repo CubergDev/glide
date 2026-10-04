@@ -21,7 +21,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from glide.memory._callbacks import _sync, adrive, drive
+from glide.memory._callbacks import adrive, drive, require_sync
 from glide.memory._json import bounded_json
 from glide.memory.contracts import Tool
 from glide.memory.events import EventBus, Invocation, current_invocation
@@ -35,11 +35,15 @@ class MCPStaleCatalogError(RuntimeError):
     """Refresh and replace the harness tools before executing this catalog."""
 
 
-def _protocol_failure(error):
-    # The MCP SDK normally raises an exception whose .error is ErrorData.
+def rpc_code(error: BaseException) -> int | None:
+    """The JSON-RPC error code an MCP SDK exception carries (its `.error` is ErrorData or a dict), else None."""
     detail = getattr(error, "error", None)
     code = detail.get("code") if isinstance(detail, dict) else getattr(detail, "code", None)
-    return isinstance(error, MCPProtocolError) or type(code) is int
+    return code if type(code) is int else None
+
+
+def _protocol_failure(error: BaseException) -> bool:
+    return isinstance(error, MCPProtocolError) or rpc_code(error) is not None
 
 
 def _response(value, asynchronous):
@@ -58,7 +62,7 @@ def _mapping(value: Any) -> dict:
     return value
 
 
-def _json(value: Any, limit: int = 65536) -> Any:
+def wire_json(value: Any, limit: int = 65536) -> Any:
     return bounded_json(value, limit, MCPProtocolError, "MCP payload")
 
 
@@ -114,7 +118,7 @@ def normalize_mcp_result(result: Any, *, max_bytes: int = 65536) -> dict:
             normalized[key] = value[key]
     if "structuredContent" in normalized and not isinstance(normalized["structuredContent"], dict):
         raise MCPProtocolError("structuredContent must be an object")
-    return _json(normalized, max_bytes)
+    return wire_json(normalized, max_bytes)
 
 
 def _validate_result(result, schema, validator):
@@ -124,7 +128,7 @@ def _validate_result(result, schema, validator):
             raise MCPProtocolError("tool with outputSchema requires structuredContent")
         if validator is not None:
             try:
-                verdict = _sync(validator(copy.deepcopy(schema), copy.deepcopy(normalized["structuredContent"])))
+                verdict = require_sync(validator(copy.deepcopy(schema), copy.deepcopy(normalized["structuredContent"])))
                 if verdict is False:
                     raise MCPProtocolError("host rejected the structured tool output")
             except Exception as error:
@@ -134,7 +138,7 @@ def _validate_result(result, schema, validator):
     return normalized
 
 
-def _descriptor(raw):
+def tool_descriptor(raw):
     descriptor = _mapping(raw)
     name = descriptor.get("name")
     if not isinstance(name, str) or not 1 <= len(name) <= 128:
@@ -153,12 +157,12 @@ def _descriptor(raw):
         raise MCPProtocolError("MCP tool requires an object inputSchema")
     if output is not None and not isinstance(output, dict):
         raise MCPProtocolError("MCP outputSchema must be a schema object")
-    return _json(descriptor, 1048576)
+    return wire_json(descriptor, 1048576)
 
 
 def read_tools_page(response: Any, inventory: list, seen: set) -> str | None:
     """Append one `tools/list` page to `inventory`; return the next cursor, or None on the last page."""
-    page = _json(_mapping(response), 1048576)
+    page = wire_json(_mapping(response), 1048576)
     if not isinstance(page.get("tools"), list):
         raise MCPProtocolError("tools/list requires a tools list")
     inventory.extend(page["tools"])
@@ -194,7 +198,7 @@ def bind_mcp(
         raise TypeError("MCP permissions and keywords must be host mappings")
     result, seen = [], set()
     for raw in inventory:
-        descriptor = _descriptor(raw)
+        descriptor = tool_descriptor(raw)
         name = descriptor["name"]
         if name in seen or len(seen) >= 4096:
             raise MCPProtocolError("MCP tool names must be unique in a bounded inventory")
@@ -215,7 +219,7 @@ def bind_mcp(
         if execution.get("taskSupport") == "required":
             continue
         schema, output = descriptor.get("inputSchema"), descriptor.get("outputSchema")
-        private_output = None if output is None else _json(output)
+        private_output = None if output is None else wire_json(output)
 
         def steps(arguments, tool_name, output_schema):
             response = yield lambda: _response(call_tool(tool_name, arguments), asynchronous)
@@ -233,11 +237,11 @@ def bind_mcp(
                 description=str(descriptor.get("description", name))[:2000],
                 keywords=keywords[name],
                 permissions=permissions[name],
-                schema=_json(schema),
+                schema=wire_json(schema),
                 invoke=ainvoke if asynchronous else invoke,
                 origin="mcp",
                 asynchronous=asynchronous,
-                output_schema=None if output is None else _json(output),
+                output_schema=None if output is None else wire_json(output),
             )
         )
     return tuple(result)
@@ -275,7 +279,7 @@ class MCPBridge:
             raise TypeError("bridge grants and relevance must be host mappings")
         self.server, self.request = server, request
         self.permissions, self.keywords = copy.deepcopy(permissions), copy.deepcopy(keywords)
-        self._capabilities = _json(_mapping(capabilities))
+        self._capabilities = wire_json(_mapping(capabilities))
         for section in ("tools", "resources", "prompts", "logging"):
             if section in self._capabilities and not isinstance(self._capabilities[section], dict):
                 raise ValueError("negotiated capabilities must contain capability objects")
@@ -333,7 +337,7 @@ class MCPBridge:
 
         def deliver():
             with self._lock:
-                _sync(callback(self.tools() if self._connected and not self._dirty else ()))
+                require_sync(callback(self.tools() if self._connected and not self._dirty else ()))
 
         def changed(event):
             if event.source != f"mcp:{self.server}":
@@ -419,7 +423,7 @@ class MCPBridge:
             raise
 
     def _admit(self, generation, name, arguments):
-        arguments = _json(arguments)
+        arguments = wire_json(arguments)
         if not isinstance(arguments, dict):
             raise MCPProtocolError("MCP tool arguments must be an object")
         context, token = current_invocation(), uuid4().hex
@@ -466,7 +470,7 @@ class MCPBridge:
 
     def on_notification(self, method: str, params: Any = None) -> None:
         """Accept host-routed notifications without issuing any requests."""
-        data = _json({} if params is None else _mapping(params))
+        data = wire_json({} if params is None else _mapping(params))
         if method == "notifications/progress":
             token, progress, total = data.get("progressToken"), data.get("progress"), data.get("total")
             if not isinstance(token, (str, int)) or isinstance(token, bool):
