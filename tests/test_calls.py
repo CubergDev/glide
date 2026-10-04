@@ -1,10 +1,15 @@
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from world import FakeWriter, Page, World, drive, scripted
 
 from glide.computer.calls import Calls, MeteredClassifier, MeteredWriter, Usage
+from glide.computer.control import RunControl, controlled
+from glide.computer.generation import GenerationRequest, GenerationResult, TokenUsage
+
+REQUEST = GenerationRequest(model="", instructions="be brief", text="{}", schema={"type": "object"})
 
 
 def test_no_request_yet_has_no_share():
@@ -18,31 +23,59 @@ def test_no_request_yet_has_no_share():
 def test_each_client_counts_its_own_requests_and_passes_them_through():
     calls = Calls()
     classifier = MeteredClassifier(SimpleNamespace(system_one=lambda **request: request), calls)
-    writer = MeteredWriter(SimpleNamespace(messages=SimpleNamespace(create=lambda **request: request)), calls)
+    reply = GenerationResult("{}", "")
+    writer = MeteredWriter(SimpleNamespace(generate=lambda request, cancel=None: reply), calls)
 
     for _ in range(3):
         assert classifier.system_one(state={}, questions={}) == {"state": {}, "questions": {}}
-    assert writer.messages.create(model="m") == {"model": "m"}
+    assert writer.generate(REQUEST) is reply
 
     assert calls.count == {"classifier": 3, "writer": 1}
     assert calls.share("classifier") == 0.75
     assert calls.line().startswith("calls: classifier 3 (75%, ")
     # Neither reply reports usage or, for the classifier, a model: each is still a request, with zero tokens.
-    assert calls.usage == {"classifier": Usage(requests=3), "m": Usage(requests=1)}
+    assert calls.usage == {"classifier": Usage(requests=3), "writer": Usage(requests=1)}
+
+
+def test_the_writer_passes_the_request_and_the_cancel_on_untouched():
+    seen = []
+    cancel = object()
+    writer = MeteredWriter(
+        SimpleNamespace(generate=lambda request, cancel=None: seen.append((request, cancel)) or GenerationResult("{}", "m")),
+        Calls(),
+    )
+
+    writer.generate(REQUEST, cancel)
+
+    assert seen == [(REQUEST, cancel)]
 
 
 def test_a_request_that_fails_was_still_made():
     calls = Calls()
 
-    def refuse(**request):
+    def refuse(request, cancel):
         raise RuntimeError("no")
 
-    writer = MeteredWriter(SimpleNamespace(messages=SimpleNamespace(create=refuse)), calls)
+    writer = MeteredWriter(SimpleNamespace(generate=refuse), calls)
 
     with pytest.raises(RuntimeError):
-        writer.messages.create(model="m")
+        writer.generate(GenerationRequest("m", "", "", {}))
     assert calls.count["writer"] == 1
     assert calls.usage == {}  # no reply, so no tokens reported
+
+
+def test_live_events_name_actual_returned_models_and_roles():
+    events = []
+    classifier = MeteredClassifier(SimpleNamespace(system_one=lambda **kw: SimpleNamespace(model="jev-resolved")), Calls())
+    writer = MeteredWriter(SimpleNamespace(generate=lambda req, cancel: GenerationResult("ok", "writer-resolved")), Calls())
+    with controlled(RunControl("task", events.append)):
+        classifier.system_one(model="jev-alias")
+        writer.generate(GenerationRequest("writer-alias", "", "", {}))
+    assert [(e.kind, e.model, e.role) for e in events] == [
+        ("classifier_completed", "jev-resolved", "classifier"),
+        ("model_completed", "writer-resolved", "writer"),
+    ]
+    assert all(e.elapsed_s >= 0 and not e.text for e in events)
 
 
 def test_the_classifier_counts_tokens_under_the_model_its_reply_names():
@@ -66,15 +99,15 @@ def test_the_classifier_counts_tokens_under_the_model_its_reply_names():
     assert calls.count == {"classifier": 3, "writer": 0}
 
 
-def test_the_writer_counts_cache_reads_apart_and_cache_writes_as_uncached_input():
+def test_the_writer_counts_each_reply_under_the_model_that_answered_with_cache_reads_apart():
     calls = Calls()
-    usage = SimpleNamespace(input_tokens=50, cache_creation_input_tokens=1000, cache_read_input_tokens=3000, output_tokens=80)
-    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **request: SimpleNamespace(usage=usage)))
+    usage = TokenUsage(1050, 3000, 80)
+    client = SimpleNamespace(generate=lambda request, cancel: GenerationResult("ok", request.model, usage))
     writer = MeteredWriter(client, calls)
 
-    writer.messages.create(model="writer-model")
-    writer.messages.create(model="answer-model")
-    writer.messages.create(model="answer-model")
+    writer.generate(GenerationRequest("writer-model", "", "", {}))
+    writer.generate(GenerationRequest("answer-model", "", "", {}))
+    writer.generate(GenerationRequest("answer-model", "", "", {}))
 
     assert calls.tokens() == {
         "writer-model": {"requests": 1, "input_tokens": 1050, "cached_input_tokens": 3000, "output_tokens": 80},
@@ -82,13 +115,21 @@ def test_the_writer_counts_cache_reads_apart_and_cache_writes_as_uncached_input(
     }
 
 
-class CountingWriter(FakeWriter):
-    """The scenario writer, with Anthropic usage on every reply."""
+def test_a_reply_that_names_no_model_is_counted_under_the_request_s_model_or_the_writer_label():
+    calls = Calls()
+    client = SimpleNamespace(generate=lambda request, cancel=None: GenerationResult("{}", ""))
+    writer = MeteredWriter(client, calls)
 
-    def _create(self, **request):
-        reply = super()._create(**request)
-        reply.usage = SimpleNamespace(input_tokens=700, cache_read_input_tokens=300, output_tokens=40)
-        return reply
+    writer.generate(replace(REQUEST, model="asked-for"))
+    writer.generate(REQUEST)
+
+    assert set(calls.usage) == {"asked-for", "writer"}
+
+
+class CountingWriter(FakeWriter):
+    """The scenario writer, with usage on every reply."""
+
+    usage = TokenUsage(700, 300, 40)
 
 
 def test_run_json_shows_tokens_per_model_and_the_calls_line_is_unchanged(monkeypatch, tmp_path):
@@ -98,7 +139,7 @@ def test_run_json_shows_tokens_per_model_and_the_calls_line_is_unchanged(monkeyp
     drive(world, scripted(("done", None)), monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
 
     run = json.loads((tmp_path / "run" / "run.json").read_text())
-    (model,) = {request["model"] for request in writer.requests}
+    model = CountingWriter.MODEL
     assert run["usage"] == {
         "classifier": {"requests": 1, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0},
         model: {"requests": len(writer.requests), "input_tokens": 700, "cached_input_tokens": 300, "output_tokens": 40},
@@ -106,3 +147,17 @@ def test_run_json_shows_tokens_per_model_and_the_calls_line_is_unchanged(monkeyp
     assert run["calls"]["classifier"]["calls"] == 1
     log = (tmp_path / "run" / "run.log").read_text()
     assert "calls: classifier 1 (50%, " in log and "writer 1 (50%, " in log
+
+
+def test_request_content_is_traced_only_when_recording_is_opted_into(tmp_path):
+    from glide.computer.diagnostics import Diagnostics
+
+    request = GenerationRequest("m", "be brief", "secret page text", {})
+    writer = MeteredWriter(SimpleNamespace(generate=lambda request, cancel: GenerationResult("answer", "m")), Calls())
+    for opted_in in (False, True):
+        recorder = Diagnostics(tmp_path, record_content=opted_in)
+        with recorder.activate():
+            writer.generate(request)
+        names = [item["event"] for item in recorder.events]
+        assert ("model_request_content" in names) is opted_in
+        assert ("secret page text" in str(list(recorder.events))) is opted_in

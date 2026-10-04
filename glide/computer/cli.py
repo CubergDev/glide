@@ -6,10 +6,12 @@ import argparse
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from . import config
 from .actions import Context
+from .control import RunControl
 from .perception import capture, perceive
 from .platform_adapter import desktop
 from .report import annotate, ax_count, render_payload
@@ -55,6 +57,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--out", type=Path, default=Path("runs") / time.strftime("%Y%m%d-%H%M%S"), help="run folder")
     parser.add_argument("--image", type=Path, help="replay a saved capture instead of the live screen (never acts)")
+    parser.add_argument(
+        "--record-content",
+        action="store_true",
+        help="also save the goal, the answer, history, screenshots and step files in the run folder (off by default)",
+    )
     parser.add_argument("--app", help="frontmost app to report during replay")
     parser.add_argument("--url", help="browser URL to report during replay")
     args = parser.parse_args(argv)
@@ -85,6 +92,7 @@ def main(argv: list[str] | None = None) -> None:
         image=args.image,
         app=args.app,
         url=args.url,
+        record_content=args.record_content,
     )
 
     def ctx_factory(typesafe, history):
@@ -98,7 +106,9 @@ def main(argv: list[str] | None = None) -> None:
             ask=ask_user if sys.stdin.isatty() else None,
         )
 
-    state = run(cfg, ctx_factory)
+    # The run prints nothing of its own; this terminal shows what it reports, and Ctrl-C reaches it as a stop.
+    control = RunControl(str(uuid.uuid4()), lambda event: print(event.text) if event.text else None)
+    state = run(cfg, ctx_factory, control=control)
     if state.outcome.startswith("aborted"):
         sys.exit(130)
 

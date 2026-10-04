@@ -12,6 +12,7 @@ ABORT_CORNER_PX = 4
 DEFAULT_MIN_CONFIDENCE = 0.4
 DEFAULT_STEPS = 100
 DEFAULT_DELAY = 2.0
+DEFAULT_READINESS_TIMEOUT = 10.0  # seconds a page or form may take to become usable before the run reports it
 DEFAULT_HANDOFFS = 10  # each one is a call to the answer model, a few seconds and a few cents
 DEFAULT_WRITER_MODEL = "claude-haiku-4-5"
 DEFAULT_ANSWER_MODEL = "claude-sonnet-5"  # runs only when the classifier stops, on a screenshot: worth a stronger reader

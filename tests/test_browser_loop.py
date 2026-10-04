@@ -20,6 +20,7 @@ from glide.computer.browser.decide import base_state, decide, element_criteria
 from glide.computer.browser.perceive import INTERACTIVE_JS, perceive, to_json
 from glide.computer.browser.report import RunFolder, load_step
 from glide.computer.browser.runner import run_goal, typing_target
+from glide.computer.generation import GenerationRequest, GenerationResult
 
 SECRET = "hunter2-do-not-leak"
 
@@ -174,17 +175,15 @@ class FakeTypeSafe:
 
 
 class FakeWriter:
-    """The Anthropic client, stubbed where `_structured` calls it. Records every request."""
+    """The neutral writer, stubbed where `_structured` calls it. Records every request."""
 
     def __init__(self, reply: dict):
         self.reply = reply
-        self.requests: list[dict] = []
-        self.messages = self
+        self.requests: list[GenerationRequest] = []
 
-    def create(self, **kwargs):
-        self.requests.append(kwargs)
-        block = SimpleNamespace(type="text", text=json.dumps(self.reply))
-        return SimpleNamespace(content=[block])
+    def generate(self, request, cancel=None):
+        self.requests.append(request)
+        return GenerationResult(json.dumps(self.reply), "fake-model")
 
 
 def run(browser, client, tmp_path: Path, writer=None, steps: int = 3):

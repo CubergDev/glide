@@ -774,7 +774,7 @@ def test_l27_scrolling_past_the_end_stops_as_a_repeated_action(monkeypatch, tmp_
 
 def answer_packet(writer: FakeWriter) -> dict:
     """The packet of the writer's last call: the one that composed the answer."""
-    return json.loads(writer.requests[-1]["messages"][0]["content"][-1]["text"])
+    return json.loads(writer.requests[-1].text)
 
 
 def step_record(tmp_path, step: int) -> dict:

@@ -15,6 +15,7 @@ from glide.computer.browser.decide import serialize_answers
 from glide.computer.browser.perceive import Element, Page, TextBlock
 from glide.computer.browser.report import RunFolder, load_step, render_answers, render_payload
 from glide.computer.browser.runner import resolve_text
+from glide.computer.generation import GenerationResult
 from glide.computer.writer import CREDENTIAL_HINTS, compose_browser_text, looks_credential
 
 
@@ -212,29 +213,18 @@ def test_credential_hints_cover_the_obvious_cases():
         assert any(must in hint for hint in CREDENTIAL_HINTS)
 
 
-class _Block:
-    type = "text"
+class StubWriter:
+    """The neutral writer: counts requests and answers with one JSON text."""
 
-    def __init__(self, text):
-        self.text = text
-
-
-class _Messages:
     def __init__(self, payload):
         self.payload = payload
         self.calls = 0
-        self.last_kwargs = None
+        self.last_request = None
 
-    def create(self, **kwargs):
+    def generate(self, request, cancel=None):
         self.calls += 1
-        self.last_kwargs = kwargs
-        return type("R", (), {"content": [_Block(json.dumps(self.payload))]})()
-
-
-class StubWriter:
-    def __init__(self, payload):
-        self.messages = _Messages(payload)
-        self.api_key = "stub"
+        self.last_request = request
+        return GenerationResult(json.dumps(self.payload), "stub-model")
 
 
 def test_writer_refuses_credential_fields_without_calling_the_model():
@@ -242,7 +232,7 @@ def test_writer_refuses_credential_fields_without_calling_the_model():
     assert (
         compose_browser_text(writer, "log in", field_label="Password", page_title="t", url="u", nearby_text=[], history=[]) == ""
     )
-    assert writer.messages.calls == 0
+    assert writer.calls == 0
 
 
 def test_writer_returns_composed_text():
@@ -257,7 +247,7 @@ def test_writer_returns_composed_text():
         history=[],
     )
     assert got == "invoice automation"
-    assert writer.messages.calls == 1
+    assert writer.calls == 1
 
 
 def test_writer_declines_when_fill_is_false():
@@ -285,10 +275,9 @@ def test_resolve_text_reports_a_writer_decline_distinctly():
 
 def test_resolve_text_survives_a_writer_failure():
     class Boom:
-        class messages:
-            @staticmethod
-            def create(**kwargs):
-                raise RuntimeError("upstream 500")
+        @staticmethod
+        def generate(request, cancel=None):
+            raise RuntimeError("upstream 500")
 
     text, source = resolve_text(Boom, "search for 'x'", make_page(), make_page().items[0], [])
     assert text == "" and source == "writer_error(RuntimeError)"

@@ -17,10 +17,13 @@ RULE = "=" * 78
 class Log:
     """Print and append to a file."""
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, enabled: bool = True):
         self.path = path
+        self.enabled = enabled
 
     def __call__(self, msg: str = "", echo: bool = True) -> None:
+        if not self.enabled:
+            return
         if echo:
             print(msg)
         if self.path is not None:

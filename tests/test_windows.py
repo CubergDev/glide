@@ -154,7 +154,8 @@ def test_a_click_lands_only_where_the_cursor_went():
 def test_a_click_that_did_not_land_presses_nothing(monkeypatch):
     sent = []
     monkeypatch.setattr(windows, "_move", lambda point: None)
-    monkeypatch.setattr(windows, "mouse_location", lambda: (0.0, 0.0))
+    locations = iter([(500.0, 500.0), (0.0, 0.0)])  # the abort check reads the pointer first, then the landing check
+    monkeypatch.setattr(windows, "mouse_location", lambda: next(locations))
     monkeypatch.setattr(windows, "_send", sent.append)
     with pytest.raises(Missed, match="not \\(640, 480\\)"):
         windows.click_at((640.0, 480.0))

@@ -48,6 +48,18 @@ chain = [
   { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
 ]
 
+# Two more LLM jobs. Leave them out and both use the [llm.smart] chain above (the same chain, so the same health
+# and pin). Give them their own chain to plan or research with a different model. `deadline_s` (any [llm.*] role)
+# caps how long one request may take; a request that asks for less keeps its own limit.
+#
+# [llm.planner]
+# chain = [{ provider = "openai", model = "<planner model id>", options = { reasoning_effort = "high" } }]
+# deadline_s = 60
+#
+# [llm.research]
+# chain = [{ provider = "openai", model = "<research model id>", options = { reasoning_effort = "high" } }]
+# deadline_s = 120
+
 # Speech to text. The "openai" provider is any OpenAI-style /audio/transcriptions endpoint.
 [stt]
 chain = [
@@ -69,11 +81,23 @@ chain = [
 [classifier]
 chain = ["typesafe:jev-latest", "llm.fast"]
 
+# Voice sessions. Voice ids and model ids belong to the [tts] and [stt] slots above (options.voice, the model after
+# the colon); nothing here has a built-in value, and a voice session says what is missing. The voice-activity model
+# is a file you supply: its path and its SHA-256 digest are required, the https URL only says where it was fetched from.
+#
+# [speech]
+# language = "en"
+# silence_ms = 700
+# headset = false
+# vad_model_path = "models/vad.onnx"
+# vad_model_url = "https://example.invalid/vad.onnx"
+# vad_model_sha256 = "<64 hexadecimal digits>"
+
 # ---------------------------------------------------------------------------------------------------------------
 # Pinning, from the environment and with no edit to this file. The value is a slot name or a prefix that names one;
 # a trailing ! means only that slot is ever used and its failure is yours to see:
 #   GLIDE_PIN_LLM_FAST=openai            GLIDE_PIN_LLM_SMART=openai:gpt-6.1-sol!
 #   GLIDE_PIN_STT=elevenlabs             GLIDE_PIN_TTS=macos_say!
-#   GLIDE_PIN_CLASSIFIER=typesafe
+#   GLIDE_PIN_CLASSIFIER=typesafe        GLIDE_PIN_LLM_PLANNER=openai (only when [llm.planner] is set)
 # A pin that names no usable slot is an error that lists the slots there are.
 # ---------------------------------------------------------------------------------------------------------------

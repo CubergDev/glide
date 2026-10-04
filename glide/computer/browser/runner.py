@@ -22,6 +22,9 @@ from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
 
+from ..control import checkpoint
+from ..generation import GenerationUnavailable
+from ..models import Abort
 from ..writer import Writer, compose_browser_text, compose_url, looks_credential
 from . import act
 from .decide import Decision, available_actions, decide, field_context, verify_typed
@@ -120,6 +123,8 @@ def resolve_text(writer: Writer | None, goal: str, page: Page, target: Element, 
             nearby_text=field_context(page, int(target.index)),
             history=history,
         )
+    except (Abort, GenerationUnavailable):
+        raise
     except Exception as exc:
         return "", f"writer_error({type(exc).__name__})"
     return (composed, "writer") if composed else ("", "writer_declined")
@@ -132,9 +137,22 @@ def resolve_url(writer: Writer | None, goal: str, history: list[str]) -> tuple[s
         return "", "no_writer"
     try:
         url = compose_url(writer, goal, history)
+    except (Abort, GenerationUnavailable):
+        raise
     except Exception as exc:
         return "", f"writer_error({type(exc).__name__})"
     return (url, "writer") if url else ("", "writer_declined")
+
+
+def stop_reason(decision: Decision, min_confidence: float) -> str:
+    """Why this decision ends the run, or "" when the loop goes on and acts on it."""
+    if decision.kind.choice == "done" or decision.satisfied.noul >= 0.5:
+        return "done"
+    if decision.kind.choice == "none":
+        return "blocked"
+    if decision.confidence < min_confidence:
+        return f"low_confidence({decision.confidence:.2f})"
+    return ""
 
 
 def run_goal(
@@ -152,6 +170,7 @@ def run_goal(
     writer: Writer | None = None,
     runfolder: RunFolder | None = None,
 ) -> RunResult:
+    checkpoint()
     result = RunResult(goal=goal, url=str(session.evaluate("location.href") or ""), outcome="incomplete")
     if start_url:
         act.navigate(session, start_url)
@@ -164,6 +183,7 @@ def run_goal(
     started = time.perf_counter()
 
     for n in range(1, max_steps + 1):
+        checkpoint()
         step_started = time.perf_counter()
 
         if pending is None:
@@ -208,6 +228,7 @@ def run_goal(
             runfolder.step_answers(n, decision.answers)
             runfolder.step_elements(n, page, can_write=can_write)
 
+        checkpoint()
         fp_before = act.fingerprint(page)
         kind = decision.kind.choice
         detail = ""
@@ -216,7 +237,12 @@ def run_goal(
 
         t0 = time.perf_counter()
         touched = kind in {"click", "type_text", "press_enter", "press_escape", "back", "navigate", "scroll_down", "scroll_up"}
-        if kind == "click":
+        stop = stop_reason(decision, min_confidence)
+        if stop:
+            # Done, blocked or unsure: nothing is sent to the page on a decision that ends the run.
+            detail = kind if kind in {"done", "none"} else f"{kind} not performed ({stop})"
+            touched = False
+        elif kind == "click":
             idx = decision.chosen_element
             element = next((e for e in page.items if e.index == idx), None)
             if element is None:
@@ -235,9 +261,11 @@ def run_goal(
                 noops += 1
                 touched = False
             else:
+                checkpoint()
                 act.type_text(session, int(target.index), text)
                 value_now = act.field_value(session, int(target.index))
                 ok = verify_typed(client, goal, target.label(), text, value_now, model=model)
+                checkpoint()
                 if ok < 0.5:
                     act.clear_field(session, int(target.index))
                     detail = f"type {text!r} -> verify {ok:.2f}, cleared"
@@ -257,6 +285,7 @@ def run_goal(
         elif kind == "navigate":
             target_url, text_source = resolve_url(writer, goal, history)
             if target_url:
+                checkpoint()
                 detail = act.navigate(session, target_url)
             else:
                 detail = f"navigate -> {text_source}"
@@ -297,14 +326,8 @@ def run_goal(
             print(step.line(), flush=True)
         history.append(f"{kind}: {detail}" + ("" if changed else " (page unchanged)"))
 
-        if kind == "done" or decision.satisfied.noul >= 0.5:
-            result.outcome = "done"
-            break
-        if kind == "none":
-            result.outcome = "blocked"
-            break
-        if decision.confidence < min_confidence:
-            result.outcome = f"low_confidence({decision.confidence:.2f})"
+        if stop:
+            result.outcome = stop
             break
         if noops >= 2:
             result.outcome = "stuck"

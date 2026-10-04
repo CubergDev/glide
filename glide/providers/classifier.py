@@ -646,3 +646,35 @@ class ChainedClassifier:
         name, reply = self.chain.call(ask, hedge=True)
         self.last_slot = name
         return reply
+
+
+# ---------------------------------------------------------------------------------------------
+# The factory the run loop takes
+# ---------------------------------------------------------------------------------------------
+
+
+class ClassifierSource(Protocol):
+    """Anything that hands out the classifier chain: `GlideConfig` (config.py) is the one that does."""
+
+    def classifier(self) -> ChainedClassifier: ...
+
+
+def classifier_factory(source: ClassifierSource) -> Callable[[], ChainedClassifier]:
+    """What `runner.run(..., classifier_factory=)` takes, so the engine's classifier is the provider chain.
+
+    Without it the engine builds a bare `TypeSafeClient` itself, which has no failover and no `SwitchEvent`, and
+    reads its key from the SDK's own environment variable instead of the one glide.toml names. Call it as often as
+    you like: the chain is one per configuration, its slots are lent, and a run closing it leaves them open.
+
+    A configuration that cannot serve the role (no key set for any slot) raises a `ProviderError` of kind `auth`,
+    which the run loop reports as a provider failure with a message that names the variables to set, instead of
+    crashing on a configuration error.
+    """
+
+    def factory() -> ChainedClassifier:
+        try:
+            return source.classifier()
+        except ValueError as e:  # config.ConfigError, which this module cannot import: it imports us
+            raise ProviderError(str(e), kind="auth", provider=ROLE) from None
+
+    return factory

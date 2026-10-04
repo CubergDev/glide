@@ -27,6 +27,9 @@ from typing import Any
 
 import websocket
 
+from ..control import checkpoint
+from ..diagnostics import event
+
 CHROME_CANDIDATES = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -72,8 +75,29 @@ def local_debugger_url(url: str, port: int) -> str:
     return url
 
 
+@contextlib.contextmanager
+def _traced(kind: str, **details):
+    """Trace one browser request: started, then completed or failed with its seconds.
+
+    Yields a dict the body may add to (the HTTP status); it is reported on completion.
+    """
+    started = time.perf_counter()
+    extra: dict[str, Any] = {}
+    event(f"browser_{kind}_started", provider="cdp", **details)
+    try:
+        yield extra
+    except BaseException as error:
+        event(f"browser_{kind}_failed", provider="cdp", **details, elapsed_s=time.perf_counter() - started, exception=error)
+        raise
+    event(f"browser_{kind}_completed", provider="cdp", **details, elapsed_s=time.perf_counter() - started, **extra)
+
+
 def _get_json(url: str, timeout: float = 5.0) -> Any:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    with (
+        _traced("http", method="GET", endpoint=url, timeout_s=timeout) as done,
+        urllib.request.urlopen(url, timeout=timeout) as resp,
+    ):
+        done["status_code"] = getattr(resp, "status", None)
         return json.loads(resp.read())
 
 
@@ -162,20 +186,52 @@ class Chrome:
 class Session:
     """One flat CDP session over websocket. Sync, because the loop is sync."""
 
-    def __init__(self, ws_url: str, *, origin: str | None = None, timeout: float = 30.0, max_size: int | None = 64 * 1024 * 1024):
+    def __init__(
+        self,
+        ws_url: str,
+        *,
+        origin: str | None = None,
+        timeout: float = 30.0,
+        navigation_timeout: float | None = None,
+        max_size: int | None = 64 * 1024 * 1024,
+        suppress_origin: bool = False,
+    ):
         self.ws_url = ws_url
         self.timeout = timeout
+        self.navigation_timeout = max(timeout, navigation_timeout) if navigation_timeout is not None else timeout
         self._id = 0
-        self._ws = websocket.create_connection(ws_url, timeout=timeout, max_size=max_size, origin=origin)
+        with _traced("socket", endpoint=ws_url, timeout_s=timeout):
+            self._ws = websocket.create_connection(
+                ws_url, timeout=timeout, max_size=max_size, origin=origin, suppress_origin=suppress_origin
+            )
         self.calls = 0
 
     # -- plumbing ----------------------------------------------------------
-    def call(self, method: str, params: dict | None = None) -> dict:
+    def call(self, method: str, params: dict | None = None, *, session_id: str | None = None) -> dict:
+        timeout = self.navigation_timeout if method == "Page.navigate" else self.timeout
+        with _traced("request", method=method, endpoint=self.ws_url, request_count=self._id + 1, timeout_s=timeout):
+            return self._call(method, params, session_id=session_id)
+
+    def _call(self, method: str, params: dict | None = None, *, session_id: str | None = None) -> dict:
+        checkpoint()
         self._id += 1
         msg_id = self._id
-        self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+        message = {"id": msg_id, "method": method, "params": params or {}}
+        if session_id:
+            message["sessionId"] = session_id
+        self._ws.send(json.dumps(message))
+        # Connecting and small control requests keep their short deadline. Navigation can wait on remote TLS/HTTP.
+        deadline = time.monotonic() + (self.navigation_timeout if method == "Page.navigate" else self.timeout)
         while True:
-            raw = self._ws.recv()
+            checkpoint(wait=False)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CDPError(f"{method}: request deadline exceeded")
+            self._ws.settimeout(min(0.1, remaining))
+            try:
+                raw = self._ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
             if not raw:
                 raise CDPError("websocket closed")
             data = json.loads(raw)

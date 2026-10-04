@@ -4,29 +4,32 @@ A task is `runner.run` on a worker thread, so the assistant stays free to hear "
 
 - A dry run is the default at every layer. `act=True` has to be passed in by the caller, and it is checked
   against the macOS Accessibility permission first, as `glide-computer --act` does.
-- A stop reaches the loop through the abort path it already has. Every step, every action and every wait of
-  the loop calls `desktop.check_abort()`, which raises `Abort`; while a task runs that call is replaced by one
-  that also raises when the task's stop event is set. After `stop()`, no further action can be taken, but the
-  step already in flight (a classifier or writer request) finishes first, since a network call cannot be
-  interrupted. The replacement is process-wide, so only one task runs at a time.
+- A stop reaches the loop by two routes that raise the same `Abort` with the same reason. `stop()` cancels the
+  task's `RunControl` (glide/computer/control.py): every step, every action (`dispatch`) and every platform
+  input call takes a checkpoint, and connections registered with `closing_on_cancel` are closed so a blocked
+  request ends at once instead of being waited out. It also sets the stop event that `abort_on` watches:
+  while a task runs, `desktop.check_abort()` is replaced by one that also raises when that event is set,
+  which keeps working for code that has no control in scope. After `stop()`, no further action is taken.
+  An action that was already sent cannot be taken back; the run records it as "completion unknown", reads the
+  screen once and never replays it. The replacement is process-wide, so only one task runs at a time.
 - The loop's own words are data. What the writer read off the screen is spoken and printed, never routed.
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..computer.control import RunControl
 from .phrases import say
 
 DEFAULT_RUNS_DIR = Path("runs")
 STOPPED_BY_USER = "stopped by the user"
-WOULD_DO_CHARS = 60
 
 _ACTIVE = threading.Lock()  # held while a task runs: the abort hook is process-wide, so one task at a time
 _NOTHING = object()
@@ -37,8 +40,11 @@ class TaskBusy(RuntimeError):
 
 
 @contextmanager
-def abort_on(stop: threading.Event) -> Iterator[None]:
+def abort_on(stop: threading.Event, control=None) -> Iterator[None]:
     """While the block runs, `desktop.check_abort()` also raises `Abort` once `stop` is set.
+
+    With a `RunControl`, a cancel of it counts as a stop too, with the reason it was cancelled for, so
+    whichever of the two fires first gives the same outcome.
 
     The replacement is assigned through `desktop`, which forwards to the platform adapter, so the calls the
     adapter makes to its own `check_abort` (between the characters of `type_text`, in `click_at`, while
@@ -54,6 +60,8 @@ def abort_on(stop: threading.Event) -> Iterator[None]:
         original = _NOTHING
 
     def check() -> None:
+        if control is not None and control.cancelled.is_set():
+            raise Abort(control.reason)
         if stop.is_set():
             raise Abort(STOPPED_BY_USER)
         if original is not _NOTHING:
@@ -118,26 +126,12 @@ OUTCOME_PHRASES = {
     "stuck": "stalled",
     "step limit": "limit",
     "provider failure": "provider",
+    "generation unavailable": "provider",
+    "desktop unavailable": "desktop",
     "crashed": "crashed",
     "not permitted": "no_permission",
     "not configured": "not_configured",
 }
-
-
-def would_do(folder: Path) -> str | None:
-    """The first move of a dry run, in words, read back from the run folder's first step. None if unreadable."""
-    try:
-        first = sorted(folder.glob("step-*-answers.json"))[0]
-        data = json.loads(first.read_text(encoding="utf-8"))
-        chosen = str(data["chosen"])
-        if chosen.isdigit():
-            text = next((str(it["text"]) for it in data.get("items", []) if str(it.get("index")) == chosen), "")
-            return f"click {text[:WOULD_DO_CHARS]!r}" if text else "click an item"
-        if chosen.startswith("offscreen:"):
-            return "press an off-screen control"
-        return chosen.replace("_", " ")
-    except (IndexError, OSError, ValueError, KeyError, TypeError):
-        return None
 
 
 class ComputerTask:
@@ -148,6 +142,8 @@ class ComputerTask:
         self.act = act
         self.folder = folder
         self.stop_event = threading.Event()
+        self.events: list = []  # the run's TaskEvents, in order; nothing is printed
+        self.control = RunControl(str(uuid.uuid4()), self.events.append)
         self.result: TaskResult | None = None
         self._config = config
         self._finished = threading.Event()
@@ -172,6 +168,7 @@ class ComputerTask:
     def stop(self) -> None:
         """Ask the loop to stop. It does so at its next check, which is before the next action."""
         self.stop_event.set()
+        self.control.cancel(STOPPED_BY_USER)
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until the task has finished and `on_done(task)` has returned. False if `timeout` ran out first."""
@@ -218,7 +215,9 @@ class ComputerTask:
             )
         try:
             writer = self._config.writer()
-            cfg = runner.RunConfig(goal=self.goal, out=self.folder, act=self.act)
+            cfg = runner.RunConfig(
+                goal=self.goal, out=self.folder, act=self.act, record_content=bool(getattr(self._config, "record_content", False))
+            )
 
             def ctx_factory(typesafe, history):
                 # ask=None: nobody can be asked a question in the middle of a run. An input() here would race the
@@ -233,8 +232,8 @@ class ComputerTask:
                     ask=None,
                 )
 
-            with abort_on(self.stop_event):
-                state = runner.run(cfg, ctx_factory, classifier_factory=self._config.classifier)
+            with abort_on(self.stop_event, self.control):
+                state = runner.run(cfg, ctx_factory, classifier_factory=self._config.classifier, control=self.control)
         except ConfigError as exc:
             return TaskResult(self.goal, self.act, "not configured", failure=self._scrub(str(exc)), folder=self.folder)
         return TaskResult(
@@ -246,7 +245,7 @@ class ComputerTask:
             failure=self._scrub(state.failure) if state.failure else None,
             folder=self.folder,
             steps=len(state.history),
-            would_do=would_do(self.folder) if state.outcome == "dry run" else None,
+            would_do=state.would_do if state.outcome == "dry run" else None,
             stopped=state.outcome.startswith("aborted"),
         )
 

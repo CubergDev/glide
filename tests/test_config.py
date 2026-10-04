@@ -16,11 +16,11 @@ from types import SimpleNamespace
 import pytest
 from typesafe_sdk import Choice, ChoiceAnswer, constants
 
-from glide.computer.config import answer_model, writer_model
+from glide.computer.generation import GenerationError, GenerationRequest
 from glide.providers import config as config_module
 from glide.providers.base import Audio, ChatResult, SpeechAudio, Transcript, Usage
 from glide.providers.chain import SwitchEvent
-from glide.providers.classifier import ChainedClassifier, ClassifierReply, LLMClassifier
+from glide.providers.classifier import ChainedClassifier, ClassifierReply, LLMClassifier, classifier_factory
 from glide.providers.config import (
     DEFAULT_TOML,
     PRESETS,
@@ -28,6 +28,7 @@ from glide.providers.config import (
     ConfigError,
     GlideConfig,
     NoUsableProvider,
+    SpeechSettings,
     load_config,
     pin_variable,
 )
@@ -496,7 +497,7 @@ def test_facades_are_built_once_and_chains_are_their_chains():
     assert cfg.chains["llm.fast"] is fast.chain
     assert cfg.chain("fast") is fast.chain
     assert list(cfg.chains) == ["llm.fast", "llm.smart", "stt", "tts", "classifier"]
-    with pytest.raises(ConfigError, match="'fast' or 'smart'"):
+    with pytest.raises(ConfigError, match="one of fast, smart, planner, research"):
         cfg.llm("medium")
     with pytest.raises(ConfigError, match="is not a role"):
         cfg.chain("nope")
@@ -717,6 +718,36 @@ def test_a_failing_typesafe_slot_falls_back_to_the_classifier_over_the_fast_llm(
     assert [(e.role, e.from_slot, e.to_slot) for e in heard] == [("classifier", "typesafe:jev-latest", "llm.fast")]
 
 
+def test_the_classifier_factory_hands_the_run_the_provider_chain_with_failover_and_a_visible_switch():
+    cfg, fakes = make(FAST)
+    heard = []
+    cfg.on_switch(heard.append)
+    fakes.fail["typesafe:jev-latest"] = ProviderError("down", kind="transport", provider="typesafe:jev-latest")
+    factory = classifier_factory(cfg)
+    questions = {"q": Choice(criteria={"a": None, "b": None})}
+
+    for _ in range(2):  # a run closes what it was given; the next run must still have a classifier
+        with factory() as classifier:
+            assert isinstance(classifier, ChainedClassifier) and classifier.chain is cfg.chain("classifier")
+            assert classifier.system_one(state="s", questions=questions).answers["q"].choice == "a"
+            assert classifier.last_slot == "llm.fast"
+    assert next((e.role, e.from_slot, e.to_slot, e.kind) for e in heard) == (
+        "classifier",
+        "typesafe:jev-latest",
+        "llm.fast",
+        "transport",
+    )
+    assert fakes.client("openai:gpt-a").closed is False  # the slots are lent: closing the run's classifier left them open
+
+
+def test_a_classifier_factory_with_no_usable_slot_is_a_provider_failure_naming_the_variables():
+    cfg, _ = make("", env={})
+    with pytest.raises(ProviderError) as caught:
+        classifier_factory(cfg)()
+    assert caught.value.kind == "auth" and caught.value.provider == "classifier"
+    assert "TYPESAFE_API_KEY" in str(caught.value)
+
+
 def test_the_classifier_over_the_fast_llm_is_skipped_when_the_fast_chain_is_unusable():
     cfg, _ = make(FAST, env={"TYPESAFE_API_KEY": KEYS["TYPESAFE_API_KEY"]})
     assert cfg.classifier().chain.names == ["typesafe:jev-latest"]
@@ -751,18 +782,107 @@ def test_a_chat_endpoint_can_serve_as_a_classifier_slot_by_itself():
 # -- the writer ----------------------------------------------------------------------------------
 
 
-def test_the_writer_is_built_from_the_fast_and_smart_chains_and_routes_by_model(monkeypatch):
-    monkeypatch.delenv("CLICKER_ANSWER_MODEL", raising=False)
-    monkeypatch.delenv("CLICKER_WRITER_MODEL", raising=False)
-    cfg, fakes = make(FAST + '[llm.smart]\nchain = ["openai:gpt-big"]')
+def test_the_writer_is_built_from_the_chains_and_routes_by_role():
+    cfg, fakes = make(
+        FAST
+        + """
+        [llm.smart]
+        chain = ["openai:gpt-big"]
+        [llm.planner]
+        chain = ["deepseek:plan-model"]
+        [llm.research]
+        chain = ["gemini:research-model"]
+        """
+    )
+    fakes.text = "{}"
     writer = cfg.writer(timeout=9.0)
-    request = {"max_tokens": 50, "system": "be brief", "messages": [{"role": "user", "content": "hi"}]}
-    reply = writer.messages.create(model=answer_model(), **request)
-    assert reply.provider == "openai:gpt-big" and reply.content[0].text == "ok"
-    reply = writer.messages.create(model=writer_model(), **request)
-    assert reply.provider == "openai:gpt-a"
-    assert fakes.log == ["openai:gpt-big", "openai:gpt-a"]
-    assert writer.spells_out_schema is True
+
+    def ask(role: str):
+        request = GenerationRequest("ignored", "be brief", "hi", {"type": "object"}, max_tokens=50, role=role)
+        return writer.generate(request)
+
+    answers = [ask(role) for role in ("recovery", "writer", "planner", "research_supervisor", "task_routing")]
+    assert [a.model for a in answers] == ["gpt-big", "gpt-a", "plan-model", "research-model", "gpt-a"]
+    assert fakes.log == [
+        "openai:gpt-big",
+        "openai:gpt-a",
+        "deepseek:plan-model",
+        "gemini:research-model",
+        "openai:gpt-a",
+    ]
+    with pytest.raises(GenerationError, match="no provider chain serves"):
+        ask("nobody")
+
+
+def test_planner_and_research_stand_on_the_smart_chain_when_the_file_gives_them_none():
+    cfg, fakes = make(FAST + '[llm.smart]\nchain = ["openai:gpt-big"]')
+    assert cfg.llm("planner") is cfg.llm("smart") and cfg.llm("research") is cfg.llm("smart")
+    fakes.text = "{}"
+    assert cfg.chain("llm.research") is cfg.chain("smart")  # one chain: one health record, one pin, nothing built twice
+    assert list(cfg.chains) == ["llm.fast", "llm.smart", "stt", "tts", "classifier"]
+    writer = cfg.writer()
+    request = GenerationRequest("", "x", "y", {"type": "object"}, role="planner")
+    assert writer.generate(request).model == "gpt-big"
+    assert fakes.log == ["openai:gpt-big"]
+
+
+def test_a_planner_chain_in_the_file_is_its_own_chain_with_its_own_pin_and_listing():
+    cfg, _ = make(FAST + '[llm.planner]\nchain = ["openai:gpt-p", "gemini:gem-p"]')
+    assert cfg.llm("planner") is not cfg.llm("smart")
+    assert cfg.chain("planner").names == ["openai:gpt-p", "gemini:gem-p"]
+    assert list(cfg.chains) == ["llm.fast", "llm.smart", "stt", "tts", "classifier", "llm.planner"]
+    assert cfg.pin("planner", "gemini") == "gemini:gem-p"
+    assert cfg.pinned("planner") == ("gemini:gem-p", False) and cfg.pinned("smart") is None
+
+
+def test_the_role_names_are_checked_and_a_deadline_is_a_cap_on_one_request():
+    with pytest.raises(ConfigError, match=r"\[llm.medium\] is not a role"):
+        make('[llm.medium]\nchain = ["openai:x"]')
+    with pytest.raises(ConfigError, match="deadline_s must be more than 0"):
+        make('[llm.research]\nchain = ["openai:x"]\ndeadline_s = 0')
+    with pytest.raises(ConfigError, match="unknown key 'deadline_s'"):
+        make('[stt]\nchain = ["openai:x"]\ndeadline_s = 5')
+    cfg, fakes = make(FAST + '[llm.research]\nchain = ["openai:gpt-r"]\ndeadline_s = 45')
+    fakes.text = "{}"
+    seen = []
+    research = cfg.llm("research")
+    real = research.chat
+    research.chat = lambda messages, **kw: seen.append(kw["timeout"]) or real(messages, **kw)
+    writer = cfg.writer()
+    writer.generate(GenerationRequest("", "x", "y", {"type": "object"}, deadline_s=120, role="research_supervisor"))
+    writer.generate(GenerationRequest("", "x", "y", {"type": "object"}, deadline_s=20, role="research_supervisor"))
+    assert seen == [45, 20]  # the file's number caps; it never stretches a request that asked for less
+
+
+def test_the_speech_table_is_validated_and_has_no_built_in_values():
+    cfg, _ = make("")
+    assert cfg.speech == SpeechSettings()
+    with pytest.raises(ConfigError, match="vad_model_path and vad_model_sha256: the voice-activity model is not configured"):
+        cfg.speech.vad_model()
+    digest = "ab" * 32
+    cfg, _ = make(
+        f"""
+        [speech]
+        language = "en"
+        silence_ms = 700
+        headset = true
+        vad_model_path = "models/vad.onnx"
+        vad_model_url = "https://models.example.test/vad.onnx"
+        vad_model_sha256 = "{digest.upper()}"
+        """
+    )
+    assert (cfg.speech.language, cfg.speech.silence_ms, cfg.speech.headset) == ("en", 700, True)
+    assert cfg.speech.vad_model() == ("models/vad.onnx", "https://models.example.test/vad.onnx", digest)
+    for bad, match in (
+        ("silence_ms = 0", "silence_ms must be at least 1"),
+        ('headset = "yes"', "headset must be true or false"),
+        ('vad_model_url = "http://models.example.test/x"', "must be an https URL"),
+        ('vad_model_sha256 = "abc"', "64 hexadecimal digits"),
+        ('voice = "x"', "unknown key 'voice'"),
+    ):
+        with pytest.raises(ConfigError, match=match):
+            make(f"[speech]\n{bad}")
+    assert "speech" not in "".join(cfg.warnings)  # a known table, not an ignored one
 
 
 def test_the_writer_names_the_variables_when_the_smart_chain_is_unusable():
