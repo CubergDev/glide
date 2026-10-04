@@ -345,6 +345,8 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         try:
             answer = review(cfg, ctx, state, stopped, can_ask)
         except WriterError as e:
+            if e.halt:  # an account spent or every slot down ends the run, as it does anywhere else the writer is asked
+                raise
             state.failure = str(e)
             log(f"\nno answer: the writer failed ({e})")
             return False

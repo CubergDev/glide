@@ -12,11 +12,13 @@ from types import SimpleNamespace
 import pytest
 from world import FakeTypeSafe, FakeWriter, Page, World, scripted
 
-from glide.assistant.tasks import STOPPED_BY_USER, ComputerTask, abort_on
+from glide.assistant.phrases import say
+from glide.assistant.tasks import STOPPED_BY_USER, ComputerTask, TaskResult, abort_on
 from glide.computer import macos, runner, windows
 from glide.computer.actions import Context
 from glide.computer.config import DEFAULT_READINESS_TIMEOUT
 from glide.computer.control import RunControl, checkpoint, controlled, dispatch
+from glide.computer.generation import GenerationUnavailable
 from glide.computer.models import Abort, BrowserConnectionError, DesktopPermissionError
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunConfig, RunState
@@ -49,6 +51,19 @@ def test_stop_during_classification_never_dispatches(monkeypatch, tmp_path):
 
     world, state = run_with(monkeypatch, tmp_path, policy, control)
     assert state.outcome == "aborted (stopped by the user)" and not state.uncertain and not world.typed
+
+
+def test_a_writer_that_is_unavailable_at_review_time_ends_the_run_as_generation_unavailable(monkeypatch, tmp_path):
+    # PR4-4175615096: the review used to swallow the halt, leaving outcome "done" and "Done." spoken.
+    def refuse(request, cancel=None):
+        raise GenerationUnavailable("account spent")
+
+    fake = FakeWriter()
+    fake.generate = refuse
+    _, state = run_with(monkeypatch, tmp_path, scripted(("done", None)), RunControl("task"), writer=fake)
+    assert state.outcome == "generation unavailable" and state.failure == "account spent"
+    result = TaskResult("goal", True, state.outcome, failure=state.failure)
+    assert result.spoken() == say("provider")
 
 
 def test_a_stop_during_a_re_decision_after_a_writer_focus_dispatches_nothing_more(monkeypatch, tmp_path):
