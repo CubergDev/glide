@@ -734,3 +734,17 @@ def test_the_body_reader_bounds_size_encoding_and_declared_length():
         with pytest.raises(TranslationError):
             run_body([b"x"], headers)
     assert run_body([b"x"], [("content-encoding", "identity")]) == b"x"
+
+
+def test_unauthenticated_floods_cannot_starve_a_workers_authenticated_requests(environment):
+    """PR7-4175586392: heartbeats and completions answered 429 would make a worker drop its lease."""
+    env = environment
+    settings = ServerSettings.model_validate_json(json.dumps({**env.data, "requests_per_minute": 3}))
+    with TestClient(create_app(settings, store=env.store)) as client:
+        assert [client.get("/healthz").status_code for _ in range(4)] == [200, 200, 200, 429]
+        bad = {"Authorization": "Bearer not-a-token"}
+        assert client.post("/v1/agents/team/claim", headers=bad).status_code == 429  # the flood is limited ...
+        for _ in range(3):  # ... and the worker, with a valid token, is not
+            assert client.post("/v1/agents/team/claim", headers=auth(env)).status_code == 200
+        assert client.post("/v1/agents/team/claim", headers=auth(env)).status_code == 429  # its own bucket still caps it
+        assert client.get("/healthz").status_code == 429

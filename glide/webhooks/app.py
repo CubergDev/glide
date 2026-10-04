@@ -171,7 +171,12 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
     google = google_verifier
     if google is None and any(s.provider == "gmail" for s in sources.values()):
         google = GoogleVerifier()
+    # Two fixed buckets. `ingress` is for traffic anyone can send (health checks, callbacks, failed bearer checks);
+    # `agent_limit` is for requests that already passed bearer verification. Unauthenticated floods can therefore
+    # never make a worker's heartbeat or completion answer 429 (a lost lease becomes an uncertain run).
     global_limit = Limiter(settings.requests_per_minute)
+    agent_limit = Limiter(settings.requests_per_minute)
+    ingress = Depends(global_limit.admit)
     source_limits = {sid: Limiter(settings.source_requests_per_minute) for sid in sources}
 
     @asynccontextmanager
@@ -197,7 +202,6 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(global_limit.admit)],
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
     if check_only:
@@ -216,13 +220,13 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             error, lambda request, exc, d=detail, s=status, h=headers: JSONResponse({"detail": d}, s, headers=h or None)
         )
 
-    @app.get("/healthz")
+    @app.get("/healthz", dependencies=[ingress])
     def health():
         return {"status": "ok"}
 
     # -- provider callbacks -------------------------------------------------------------------------------------
 
-    @app.post("/webhooks/{provider}/{source_id}", status_code=202)
+    @app.post("/webhooks/{provider}/{source_id}", status_code=202, dependencies=[ingress])
     async def callback(request: Request, provider: str, source_id: str):
         source = sources.get(source_id)
         if source is None or source.provider != provider:
@@ -259,7 +263,13 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         """Authenticate before anything else is read: the bearer, its issuer, audience, agent id and scope."""
 
         def check(request: Request, agent_id: str):
-            return verifier.verify(bearer(request.headers), agent_id, scope)
+            try:
+                principal = verifier.verify(bearer(request.headers), agent_id, scope)
+            except AuthError:
+                global_limit.admit()  # a failed attempt is anyone's traffic: it spends the ingress bucket, not the agents'
+                raise
+            agent_limit.admit()
+            return principal
 
         return Depends(check)
 
