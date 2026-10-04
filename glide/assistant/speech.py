@@ -276,10 +276,19 @@ class Speaker:
     the next sentence is tried: one lost sentence is better than a reply that goes silent.
     """
 
-    def __init__(self, tts, player, *, on_error: Callable[[BaseException], None] | None = None, clock=time.monotonic) -> None:
+    def __init__(
+        self,
+        tts,
+        player,
+        *,
+        on_error: Callable[[BaseException], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
+        clock=time.monotonic,
+    ) -> None:
         self._tts = tts
         self._player = player
         self._on_error = on_error
+        self._on_cancel = on_cancel
         self._clock = clock
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
@@ -313,7 +322,11 @@ class Speaker:
         return True
 
     def cancel(self) -> None:
-        """Silence now: queued sentences are dropped, the one being made is abandoned, the player is cut."""
+        """Silence now: queued sentences are dropped, the one being made is abandoned, the player is cut.
+
+        `on_cancel` runs under the lock `say` takes, once the lane is reset: whatever the owner must cut as well (the
+        voice's connection) is cut before any sentence can be queued behind this cancel, so that a sentence said the
+        moment after it never starts on the connection about to be closed."""
         with self._cond:
             lane, self._lane = self._lane, None
             if lane is not None:
@@ -326,6 +339,8 @@ class Speaker:
                         break
                 lane.items.put(None)
             self._player.cancel()
+            if self._on_cancel is not None:
+                self._on_cancel()
             self._cond.notify_all()
 
     def wait_idle(self, timeout: float | None = None) -> bool:

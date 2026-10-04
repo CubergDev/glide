@@ -712,7 +712,7 @@ class Assistant:
                     self.io.warn(f"speech is off: {self._scrub(str(exc))}")
                     return None
                 self._voice = _Voice(tts)
-                self._speaker = Speaker(self._voice, self.io.player, on_error=self._speech_failed)
+                self._speaker = Speaker(self._voice, self.io.player, on_error=self._speech_failed, on_cancel=self._voice.cut)
             return self._speaker
 
     def _cut_speech(self, upto: int) -> None:
@@ -732,11 +732,9 @@ class Assistant:
         """Silence now. The lane is marked dead and its queue drained BEFORE the sentence being made is cut: the thread
         that the cut wakes then finds a dead lane and ends, instead of starting the next queued sentence."""
         if self._speaker is not None:
-            self._speaker.cancel()
+            self._speaker.cancel()  # which also cuts the voice (the sentence being made), atomically with the lane's reset
         elif self.io.player is not None:
             self.io.player.cancel()
-        if self._voice is not None:
-            self._voice.cut()  # the sentence being made: its connection is closed and its thread released
 
     def _speech_failed(self, exc: BaseException) -> None:
         if isinstance(exc, ProviderError) and exc.kind == CANCELLED:

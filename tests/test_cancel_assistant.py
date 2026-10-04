@@ -231,6 +231,36 @@ def test_a_sentence_said_after_the_cut_is_heard_in_full(tmp_path):
     assert [pcm for pcm, _ in rig.player.played] == [b"\x01\x00\x02\x00", b"\x03\x00"]  # all of it, none of the cut one
 
 
+def test_a_sentence_queued_the_moment_after_a_cut_is_not_lost_to_it(tmp_path, monkeypatch):
+    """PR9-4175620373: the lane was reset and the voice's connection cut as two steps, so a sentence queued between them
+    (from a path that does not hold the assistant lock) started on the connection the second step then closed."""
+    from glide.assistant.speech import Speaker
+
+    voice = Voice()
+    tts = TTS(Chain("tts", [Slot("voice", voice)]))
+    rig = build(tmp_path, llm=llm_of(Model()), tts=tts)
+    speaker = rig.assistant._speaker_or_none()
+    cancel, injected = Speaker.cancel, []
+
+    def cancel_then_a_sentence_is_said(self, *args, **kwargs):
+        cancel(self, *args, **kwargs)  # the lane is reset here, and with the fix the voice already cut
+        if not injected:
+            injected.append(True)
+            threading.Thread(target=lambda: self.say("late"), daemon=True).start()
+            assert voice.connection.opened.wait(WAIT)  # "late" is being made, on the voice's current connection
+
+    monkeypatch.setattr(Speaker, "cancel", cancel_then_a_sentence_is_said)
+
+    rig.assistant.interrupt_speech()
+
+    assert voice.calls == ["late"]
+    assert not voice.connection.closed.is_set(), "the new sentence's connection was closed by the cut that came before it"
+    voice.connection.release.set()
+    assert rig.assistant.wait_idle(WAIT)
+    assert [pcm for pcm, _ in rig.player.played] == [b"\x01\x00\x02\x00", b"\x03\x00"] and rig.warned == []
+    assert speaker is rig.assistant._speaker
+
+
 # -- a request being heard ----------------------------------------------------------------------------
 
 
