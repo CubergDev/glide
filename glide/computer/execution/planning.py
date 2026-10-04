@@ -46,7 +46,90 @@ def grounded_origins(goal, reply, observed, steps, search_url):
     return {_origin(a) for a in addresses if a and safe_url(a)}
 
 
+_URL = r"https?://[^\s;,]+"
+_OPEN = re.compile(rf"^\s*open\s+({_URL})\s*$", re.IGNORECASE)
+_CLICK = (
+    rf"(?:and\s+)?click\s+(?:on\s+)?(?:the\s+)?link\s+(.+?)\s*[;,]\s*success\s+means\s+(?:the\s+)?(?:address|url)\s+is\s+({_URL})"
+)
+_OPEN_CLICKS = re.compile(
+    rf"^\s*open\s+({_URL})\s+(?P<rest>{_CLICK}(?:\s*[;,.]?\s*(?:and\s+)?then\s+{_CLICK})*)\s*$", re.IGNORECASE
+)
+_CLICK_ONE = re.compile(_CLICK, re.IGNORECASE)
+
+
+def compile_goal(goal):
+    """The plan for a goal that states every address itself, with no model: "open ADDRESS", or "open ADDRESS and click
+    the link TEXT; success means the address is ADDRESS". Anything else is the planner's. The addresses are the user's own
+    words, so the plan is as grounded as they are; the caller still validates it like any other plan."""
+    text = " ".join(goal.split())
+    if match := _OPEN.match(text):
+        return [
+            {
+                "id": "open-page",
+                "goal": "Open the requested page.",
+                "effect": "url",
+                "target": "",
+                "value": match.group(1).rstrip(".!?"),
+                "quantity": 1,
+            }
+        ]
+    if match := _OPEN_CLICKS.match(text):
+        steps = [
+            {
+                "id": "open-page",
+                "goal": "Open the requested page.",
+                "effect": "url",
+                "target": "",
+                "value": match.group(1).rstrip(".!?"),
+                "quantity": 1,
+            }
+        ]
+        for number, (label, landing) in enumerate(_CLICK_ONE.findall(match.group("rest")), 1):
+            label = label.strip(" \"'\u201c\u201d")
+            steps.append(
+                {
+                    "id": f"follow-link-{number}",
+                    "goal": f"Follow the link {label}.",
+                    "effect": "url",
+                    "target": f"link {label}",
+                    "value": landing.rstrip(".!?"),
+                    "quantity": 1,
+                }
+            )
+        return steps
+    return None
+
+
+def compile_site(goal):
+    """ "open youtube", "search amazon for headphones", "weather in London": the shipped request compilers of `glide.direct`
+    (their address tables are configuration) give the one address to open. Returns (steps, origin) or None."""
+    from glide.direct import resolve
+
+    text = " ".join(goal.split()).rstrip(".!?")
+    text = re.sub(r"\s+(?:in|on|with)\s+(?:the\s+|my\s+)?(?:browser|chrome|safari|web)$", "", text, flags=re.IGNORECASE)
+    found = resolve(text)
+    if found is None or not found.url or found.kind not in {"open", "search", "maps", "weather", "stock"}:
+        return None
+    step = {
+        "id": "open-page",
+        "goal": "Open the requested page.",
+        "effect": "url",
+        "target": "",
+        "value": found.url,
+        "quantity": 1,
+    }
+    return [step], _origin(found.url)
+
+
 def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", context=None):
+    if not steps and not context and not reason:
+        compiled, extra = compile_goal(goal), set()
+        if compiled is None and (site := compile_site(goal)) is not None:
+            compiled, extra = site[0], {site[1]}  # an address from the shipped table: as grounded as the code's own catalog
+        if compiled is not None:
+            grounded = grounded_origins(goal, reply, observed, steps, browser_settings.current().search_url) | extra
+            diagnostics.event("plan_compiled", step_count=len(compiled))
+            return validate_plan({"question": "", "steps": compiled}, observed, steps, grounded=grounded)
     if writer is None:
         raise InvalidAction("This goal needs planning, but the configured model provider is unavailable")
     packet = {

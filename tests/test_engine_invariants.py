@@ -250,8 +250,14 @@ def test_the_correction_may_ask_the_user_instead_of_guessing_an_address(monkeypa
 @pytest.mark.parametrize(
     ("goal", "url"),
     [
-        ("Open https://reports.example.net/q3", "https://reports.example.net/q3"),
-        ("Open https://reports.example.net/q3", "https://www.reports.example.net/q3/"),  # the same address, spelled alike
+        (
+            "Please open https://reports.example.net/q3 now",
+            "https://reports.example.net/q3",
+        ),  # not the stated-address shape: the planner's
+        (
+            "Please open https://reports.example.net/q3 now",
+            "https://www.reports.example.net/q3/",
+        ),  # the same address, spelled alike
         ("Open reports.example.net and read the totals", "https://reports.example.net/totals"),  # a path on the named host
         ("Open Gmail", "https://mail.google.com/"),  # a site the code's own catalog names, named in the goal
     ],
