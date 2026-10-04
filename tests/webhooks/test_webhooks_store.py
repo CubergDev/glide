@@ -266,7 +266,7 @@ def test_restart_preserves_exclusive_lease_and_token_is_never_persisted_or_retur
             row = db.execute("SELECT token_hash,lease_owner,call_json,summary FROM messages").fetchone()
             assert row[0] != lease["lease_token"] and len(row[0]) == 64
             assert lease["lease_token"] not in repr(row)
-        assert store.heartbeat(*args(lease)) > 0
+        assert store.heartbeat(*args(lease))["expires_at"] > 0
     finally:
         store.close()
 
@@ -292,7 +292,7 @@ def test_heartbeat_extends_only_the_current_owned_lease(stored):
     enqueue(store)
     lease = claim(store)
     clock.now = 150
-    assert store.heartbeat(*args(lease), lease_seconds=30) == 180
+    assert store.heartbeat(*args(lease), lease_seconds=30)["expires_at"] == 180
     clock.now = 160
     assert store.get("laptop", "m1")["status"] == "leased"
     clock.now = 180
