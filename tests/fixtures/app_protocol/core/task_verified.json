@@ -1,0 +1,10 @@
+{
+  "data": {
+    "phase": "verified",
+    "step": 2,
+    "task_id": "t1",
+    "verified": true
+  },
+  "type": "task",
+  "v": 1
+}

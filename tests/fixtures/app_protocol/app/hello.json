@@ -1,0 +1,10 @@
+{
+  "data": {
+    "client": "glide-app",
+    "client_version": "0.1.0",
+    "protocol": 1
+  },
+  "id": "a1",
+  "type": "hello",
+  "v": 1
+}

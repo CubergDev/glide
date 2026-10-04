@@ -12,6 +12,7 @@
     glide memory ...               local memory administration (off unless [memory] enabled = true)
     glide mcp ...                  serve Glide over MCP and show the MCP settings
     glide webhooks serve|work ...  the webhook listener and its worker (serve needs the webhooks extra)
+    glide app-server [--socket PATH]  serve the SwiftUI app over a local Unix socket (never a network port)
 
 `memory`, `mcp` and `webhooks` have their own options and help (`glide memory --help`); everything after the
 command is theirs. Optional packages are imported only by the command that needs them, so `glide --help` and
@@ -534,6 +535,12 @@ def cmd_computer(args: argparse.Namespace, config=None) -> int:
     return computer.main(args.rest, config)
 
 
+def cmd_app_server(args: argparse.Namespace, config=None) -> int:
+    from .app_server import cli as app_server
+
+    return app_server.main(args.rest, config)
+
+
 def cmd_inspect(args: argparse.Namespace) -> int:
     from .computer import cli as computer
 
@@ -637,6 +644,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     passthrough(
         commands, "computer", cmd_computer, "drive the screen toward a goal (`glide computer --help`)", config=True, loads=True
+    )
+    passthrough(
+        commands,
+        "app-server",
+        cmd_app_server,
+        "serve the SwiftUI app over a local socket (`glide app-server --help`)",
+        config=True,
+        loads=True,
     )
     passthrough(commands, "inspect", cmd_inspect, "capture the screen and show what the classifier would be sent")
     passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)

@@ -1,0 +1,15 @@
+{
+  "data": {
+    "errors": [
+      {
+        "key": "voice.silence_ms",
+        "message": "must be a whole number from 200 to 2000"
+      }
+    ],
+    "ok": false,
+    "revision": 3
+  },
+  "reply_to": "a4",
+  "type": "settings_result",
+  "v": 1
+}

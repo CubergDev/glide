@@ -1,0 +1,10 @@
+{
+  "data": {
+    "assistant": "error",
+    "detail": "voice_failed",
+    "hands_free": true,
+    "muted": true
+  },
+  "type": "state",
+  "v": 1
+}

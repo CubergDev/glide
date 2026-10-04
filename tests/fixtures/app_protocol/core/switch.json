@@ -1,0 +1,11 @@
+{
+  "data": {
+    "from_slot": "alpha:m1",
+    "kind": "timeout",
+    "reason": "alpha timed out",
+    "role": "tts",
+    "to_slot": "beta"
+  },
+  "type": "switch",
+  "v": 1
+}

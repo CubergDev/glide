@@ -1,0 +1,11 @@
+{
+  "data": {
+    "from_slot": "beta",
+    "kind": "auth",
+    "reason": "key refused",
+    "role": "stt",
+    "to_slot": null
+  },
+  "type": "switch",
+  "v": 1
+}
