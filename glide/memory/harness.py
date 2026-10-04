@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from ._callbacks import adrive, drive
@@ -78,6 +78,53 @@ def _goal_bound(goal: str) -> int:
 
 def _memory_signature(memories: list[dict]) -> str:
     return hashlib.sha256(json.dumps(memories, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+_MAX_REPLY_BYTES = 65536
+_MAX_TRAJECTORY_BYTES = 1048576
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+_PREFERENCE = re.compile(r"(?i)^(?:please\s+)?(?:remember(?:\s+that)?\b|i\s+prefer\b|my\s+preference\s+is\b)")
+
+
+def _direct_text(text: str) -> str:
+    """The lines a person typed to Glide: not inside a fenced code block, not quoted with `>`."""
+    kept, fence = [], None
+    for line in text.splitlines():
+        marker = _FENCE.match(line)
+        if marker:
+            character = marker.group(1)[0]
+            fence = None if fence == character else character if fence is None else fence
+            continue
+        if fence is None and not line.lstrip().startswith(">"):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _check_reply(reply: object) -> None:
+    if (
+        not isinstance(reply, Reply)
+        or not isinstance(reply.text, str)
+        or not isinstance(reply.calls, tuple)
+        or len(reply.text.encode()) > _MAX_REPLY_BYTES
+    ):
+        raise TypeError("model callback must return Reply")
+
+
+def _check_call_shapes(calls: tuple, seen: set[str]) -> None:
+    """Every call has a fresh identifier (1 to 128 characters, unused this dispatch), a tool id and an argument object."""
+    if any(
+        not isinstance(call, ToolCall)
+        or not isinstance(call.id, str)
+        or not 1 <= len(call.id) <= 128
+        or not isinstance(call.tool_id, str)
+        or not isinstance(call.arguments, dict)
+        or call.id in seen
+        for call in calls
+    ):
+        raise ValueError("tool calls need fresh identifiers")
+    ids = [call.id for call in calls]
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate tool call identifier")
 
 
 class Harness:
@@ -163,21 +210,9 @@ class Harness:
         validate_text(text)
         saved = []
         # Deliberately narrow. Quoted text, documents, tool outputs and model guesses are not inputs.
-        direct_lines = []
-        fence = None
-        for line in text.splitlines():
-            marker = re.match(r"^\s*(`{3,}|~{3,})", line)
-            if marker:
-                character = marker.group(1)[0]
-                fence = None if fence == character else character if fence is None else fence
-                continue
-            if fence is None and not line.lstrip().startswith(">"):
-                direct_lines.append(line)
-        for sentence in re.split(r"[\n]+|(?<=[.!?])\s+", "\n".join(direct_lines)):
+        for sentence in re.split(r"[\n]+|(?<=[.!?])\s+", _direct_text(text)):
             sentence = sentence.strip()
-            if not re.match(r"(?i)^(?:please\s+)?(?:remember(?:\s+that)?\b|i\s+prefer\b|my\s+preference\s+is\b)", sentence):
-                continue
-            if not 8 <= len(sentence) <= 2000:
+            if not _PREFERENCE.match(sentence) or not 8 <= len(sentence) <= 2000:
                 continue
             # A stable normalized key deduplicates repeated direct statements, not inferred meanings.
             key = "auto:" + hashlib.sha256(sentence.casefold().encode()).hexdigest()[:24]
@@ -197,14 +232,7 @@ class Harness:
         output_reserve: int | None = None,
     ) -> Plan:
         with self._lock:
-            pending = self._pending.pop((scope.user, scope.project), None)
-            if pending:
-                identifier, expected = pending
-                try:
-                    self.store.apply(scope, identifier, expected_revision=expected)
-                except ValueError:
-                    # A concurrent edit leaves a draft for review instead of retrying a stale patch.
-                    self._audit(scope, "refinement_deferred", {"proposal_id": identifier})
+            self._apply_pending_refinement(scope)
             revision, overlays = self.store.overlays_with_revision(scope)
             memories = self.store.memories(scope)
             bundle = plan(
@@ -235,6 +263,17 @@ class Harness:
                 },
             )
             return bundle
+
+    def _apply_pending_refinement(self, scope: Scope) -> None:
+        """Apply the lesson drafted by an earlier turn, here at a turn boundary and never during a live trajectory."""
+        pending = self._pending.pop((scope.user, scope.project), None)
+        if pending:
+            identifier, expected = pending
+            try:
+                self.store.apply(scope, identifier, expected_revision=expected)
+            except ValueError:
+                # A concurrent edit leaves a draft for review instead of retrying a stale patch.
+                self._audit(scope, "refinement_deferred", {"proposal_id": identifier})
 
     def _selected_tool(self, scope: Scope, plan_id: str, tool_id: str, grants: frozenset[str]) -> Tool:
         if not isinstance(grants, frozenset) or any(not isinstance(item, str) for item in grants):
@@ -365,6 +404,19 @@ class Harness:
             )
         )
 
+    def _check_context_room(self, base: int, bundle: Plan, trajectory: list, model: Model) -> None:
+        used = len(json.dumps(trajectory, ensure_ascii=True, allow_nan=False).encode())
+        if base + bundle.token_upper_bound + used + self.policy.output_reserve > model.context_tokens:
+            raise ValueError("context budget exhausted by tool results; summarize before another turn")
+
+    def _check_calls(self, calls: tuple[ToolCall, ...], seen: set[str], issued: _Issued) -> None:
+        _check_call_shapes(calls, seen)
+        if issued.calls + len(calls) > self.policy.max_tool_calls:
+            raise ValueError("tool batch exceeds remaining budget")
+        selected = {tool.id for tool in issued.plan.tools}
+        if any(call.tool_id not in selected for call in calls):
+            raise PermissionError("tool batch names an unselected tool")
+
     def _dispatch_steps(
         self,
         scope,
@@ -389,47 +441,20 @@ class Harness:
             for _ in range(self.policy.max_tool_calls + 1):
                 with self._lock:
                     self._check_plan(scope, bundle.id)
-                extra = len(json.dumps(trajectory, ensure_ascii=True, allow_nan=False).encode())
-                if base + bundle.token_upper_bound + extra + self.policy.output_reserve > model.context_tokens:
-                    raise ValueError("context budget exhausted by tool results; summarize before another turn")
+                self._check_context_room(base, bundle, trajectory, model)
                 fresh = grants if current_grants is None else (yield current_grants)
                 if model.local and "model:local" not in fresh:
                     raise PermissionError("local model grant was revoked")
-                request = Request(
-                    bundle.snapshot(), goal, tuple(_json_copy(trajectory, limit=1048576)), self.policy.output_reserve
-                )
-                reply = yield partial(call_model, request)
+                shown = tuple(_json_copy(trajectory, limit=_MAX_TRAJECTORY_BYTES))
+                reply = yield partial(call_model, Request(bundle.snapshot(), goal, shown, self.policy.output_reserve))
                 with self._lock:
                     issued = self._check_plan(scope, bundle.id)
-                if (
-                    not isinstance(reply, Reply)
-                    or not isinstance(reply.text, str)
-                    or not isinstance(reply.calls, tuple)
-                    or len(reply.text.encode()) > 65536
-                ):
-                    raise TypeError("model callback must return Reply")
+                _check_reply(reply)
                 if not reply.calls:
                     return reply
                 if authorize is None:
                     raise PermissionError("tool execution needs a host authorizer")
-                if any(
-                    not isinstance(call, ToolCall)
-                    or not isinstance(call.id, str)
-                    or not 1 <= len(call.id) <= 128
-                    or not isinstance(call.tool_id, str)
-                    or not isinstance(call.arguments, dict)
-                    or call.id in call_ids
-                    for call in reply.calls
-                ):
-                    raise ValueError("tool calls need fresh identifiers")
-                ids = [call.id for call in reply.calls]
-                if len(set(ids)) != len(ids):
-                    raise ValueError("duplicate tool call identifier")
-                if issued.calls + len(reply.calls) > self.policy.max_tool_calls:
-                    raise ValueError("tool batch exceeds remaining budget")
-                selected = {tool.id for tool in issued.plan.tools}
-                if any(call.tool_id not in selected for call in reply.calls):
-                    raise PermissionError("tool batch names an unselected tool")
+                self._check_calls(reply.calls, call_ids, issued)
                 assistant = _json_copy(
                     {
                         "role": "assistant",
@@ -453,14 +478,9 @@ class Harness:
                         asynchronous=asynchronous,
                     )
                     trajectory.append(
-                        {
-                            "role": "tool",
-                            "call_id": call["id"],
-                            "tool_id": call["tool_id"],
-                            "result": _json_copy(result),
-                        }
+                        {"role": "tool", "call_id": call["id"], "tool_id": call["tool_id"], "result": _json_copy(result)}
                     )
-            raise ValueError("model/tool turn budget exhausted")
+            raise ValueError("model/tool turn budget exhausted")  # unreachable while the checks above hold; a hard stop
 
     def dispatch(
         self,
@@ -519,61 +539,76 @@ class Harness:
     def record_outcome(self, scope: Scope, run_id: str, success: bool, summary: str) -> str:
         """Host-verified outcomes, not model assertions, supply refinement evidence."""
         outcome_id = self.store.record_outcome(scope, run_id, success, summary)
-        matches = [row for row in self.store.outcomes(scope) if row["success"] and row["summary"] == summary]
-        if summary and success and len(matches) >= 3:
-            evidence = [row["id"] for row in matches[:3]]
-            text = "Repeated host-verified successful tactic:\n" + summary
-            target = "prompt:lesson-" + hashlib.sha256(summary.encode()).hexdigest()[:16]
-            existing = [row for row in self.store.proposals(scope) if row["target"] == target and row["text"] == text]
-            # A deliberate rollback suppresses automatic reintroduction of the same tactic.
-            if not any(row["status"] == "rolled_back" for row in existing):
-                proposal_id = self.store.propose(scope, target, text, evidence)
-                proposal = next(row for row in self.store.proposals(scope) if row["id"] == proposal_id)
-                if self.policy.auto_refine and proposal["status"] == "draft":
-                    # Apply at a later prepare boundary, never during a live model/tool trajectory.
-                    self._pending[(scope.user, scope.project)] = (proposal_id, self.store.revision(scope))
+        if summary and success:
+            self._draft_lesson(scope, summary)
         return outcome_id
+
+    def _draft_lesson(self, scope: Scope, summary: str) -> None:
+        """Three host-verified successes of the same tactic draft one prompt overlay for the user to review."""
+        matches = [row for row in self.store.outcomes(scope) if row["success"] and row["summary"] == summary]
+        if len(matches) < 3:
+            return
+        text = "Repeated host-verified successful tactic:\n" + summary
+        target = "prompt:lesson-" + hashlib.sha256(summary.encode()).hexdigest()[:16]
+        existing = [row for row in self.store.proposals(scope) if row["target"] == target and row["text"] == text]
+        # A deliberate rollback suppresses automatic reintroduction of the same tactic.
+        if any(row["status"] == "rolled_back" for row in existing):
+            return
+        proposal_id = self.store.propose(scope, target, text, [row["id"] for row in matches[:3]])
+        proposal = next(row for row in self.store.proposals(scope) if row["id"] == proposal_id)
+        if self.policy.auto_refine and proposal["status"] == "draft":
+            # Apply at a later prepare boundary, never during a live model/tool trajectory.
+            self._pending[(scope.user, scope.project)] = (proposal_id, self.store.revision(scope))
 
     def command(self, scope: Scope, text: str) -> Any:
         """Slash commands are an extension API; registering them in a UI is host-owned."""
-        command, _, argument = text.strip().partition(" ")
-        argument = argument.strip()
-        if command == "/remember":
-            level = "project"
-            first, _, rest = argument.partition(" ")
-            if first in {"user", "project", "session"}:
-                level, argument = first, rest
-            key, separator, value = argument.partition("=")
-            if not separator:
-                raise ValueError("use /remember [user|project|session] key = text")
-            return self.store.remember(scope, key.strip(), value.strip(), source="user", level=level)
-        if command == "/memory":
-            return self.store.memories(scope)
-        if command == "/events":
-            return self.store.events(scope)
-        if command == "/forget":
-            return self.store.forget(scope, argument)
-        if command == "/refine":
-            if not argument:
-                return self.store.proposals(scope)
-            action, _, identifier = argument.partition(" ")
-            if action != "apply" or not identifier.strip():
-                raise ValueError("use /refine or /refine apply ID")
-            return self.store.apply(scope, identifier.strip(), expected_revision=self.store.revision(scope))
-        if command == "/rollback":
-            return self.store.rollback(scope, argument, expected_revision=self.store.revision(scope))
-        if command == "/context":
-            issued = self._issued.get(scope)
-            if issued is None:
-                return None
-            bundle = issued.plan
-            return {
-                "id": bundle.id,
-                "model": bundle.model_id,
-                "memories": bundle.memory_ids,
-                "skills": bundle.skill_ids,
-                "tools": [tool.id for tool in bundle.tools],
-                "tokens": bundle.token_upper_bound,
-                "reasons": bundle.reasons,
-            }
-        raise ValueError("unknown personalization command")
+        name, _, argument = text.strip().partition(" ")
+        run = self._COMMANDS.get(name)
+        if run is None:
+            raise ValueError("unknown personalization command")
+        return run(self, scope, argument.strip())
+
+    def _remember_command(self, scope: Scope, argument: str) -> str:
+        level = "project"
+        first, _, rest = argument.partition(" ")
+        if first in {"user", "project", "session"}:
+            level, argument = first, rest
+        key, separator, value = argument.partition("=")
+        if not separator:
+            raise ValueError("use /remember [user|project|session] key = text")
+        return self.store.remember(scope, key.strip(), value.strip(), source="user", level=level)
+
+    def _refine_command(self, scope: Scope, argument: str) -> Any:
+        if not argument:
+            return self.store.proposals(scope)
+        action, _, identifier = argument.partition(" ")
+        if action != "apply" or not identifier.strip():
+            raise ValueError("use /refine or /refine apply ID")
+        return self.store.apply(scope, identifier.strip(), expected_revision=self.store.revision(scope))
+
+    def _context_command(self, scope: Scope, argument: str) -> dict | None:
+        issued = self._issued.get(scope)
+        if issued is None:
+            return None
+        bundle = issued.plan
+        return {
+            "id": bundle.id,
+            "model": bundle.model_id,
+            "memories": bundle.memory_ids,
+            "skills": bundle.skill_ids,
+            "tools": [tool.id for tool in bundle.tools],
+            "tokens": bundle.token_upper_bound,
+            "reasons": bundle.reasons,
+        }
+
+    _COMMANDS: ClassVar[dict[str, Callable[..., Any]]] = {
+        "/remember": _remember_command,
+        "/memory": lambda self, scope, argument: self.store.memories(scope),
+        "/events": lambda self, scope, argument: self.store.events(scope),
+        "/forget": lambda self, scope, argument: self.store.forget(scope, argument),
+        "/refine": _refine_command,
+        "/rollback": lambda self, scope, argument: self.store.rollback(
+            scope, argument, expected_revision=self.store.revision(scope)
+        ),
+        "/context": _context_command,
+    }
