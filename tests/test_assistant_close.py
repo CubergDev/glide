@@ -101,3 +101,47 @@ def test_close_with_a_finished_task_neither_waits_nor_warns(tmp_path, monkeypatc
     rig = build(tmp_path, llm=llm_of(Model(chats=[ROUTE])), writer=object(), classifier=FakeClassifier(None))
     rig.assistant.handle_text("send the invoice", act=True)
     assert rig.assistant.close() is True and rig.warned == []
+
+
+def test_close_waits_for_a_task_that_started_between_its_first_look_and_the_stop(tmp_path):
+    """audit2 finding 1: a task started concurrently with close() was cancelled by stop() but not waited for."""
+    rig = build(tmp_path)
+    clock = Clock()
+    assistant = Assistant(rig.config, io=rig.assistant.io, runs_dir=tmp_path / "runs", clock=clock, close_wait_s=2.0)
+
+    class Never:
+        running = True
+
+        def wait(self, timeout=None):
+            clock.now += 1.0  # each poll is a second of the assistant's clock
+            return False
+
+    class Runner:
+        """No task is visible until `stop()` has run: the one that a request thread started just before it."""
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        @property
+        def current(self):
+            return Never() if self.stopped else None
+
+        running = False
+
+        def stop(self):
+            self.stopped = True
+            return True
+
+    assistant._tasks = Runner()
+    assert assistant.close() is False
+    assert any("still stopping" in line for line in rig.warned)
+
+
+def test_no_task_starts_after_close_has_begun(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: started.append(1) or RunState(outcome="done"))
+    monkeypatch.setattr(desktop, "accessibility_trusted", lambda: True)
+    rig = build(tmp_path, llm=llm_of(Model(chats=[ROUTE])), writer=object(), classifier=FakeClassifier(None))
+    assert rig.assistant.close() is True
+    reply = rig.assistant.handle_text("send the invoice", act=True)
+    assert reply.task is None and started == []

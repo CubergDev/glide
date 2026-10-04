@@ -193,6 +193,7 @@ class Assistant:
         self._speaker: Speaker | None = None
         self._voice: _Voice | None = None
         self._speech_off = False
+        self._closed = False  # set by `close`, under the lock: no task is started after it
         self._clarify = clarify  # whether a computer task may put a question to the user (see `answer_pending`)
 
     def __repr__(self) -> str:
@@ -519,9 +520,11 @@ class Assistant:
         is said through `io.warn` and False is returned: the last action may still be in flight.
         """
         deadline = self._clock() + self._close_wait_s
-        task = self._tasks.current
+        with self._lock:  # closed and stopped together: no request can start a task after this, and any started before is seen
+            self._closed = True
+            self._stop(self._seq)
+            task = self._tasks.current
         waiting = task is not None and task.running
-        self.stop()
         unwound = not waiting or self._wait_for(task, deadline)
         if not unwound:
             self.io.warn(
@@ -614,7 +617,7 @@ class Assistant:
             reply.text = " ".join(turn.parts)
         try:
             with self._lock:  # checked and started under the lock `stop` takes, so a stop cannot fall between the two
-                if turn.cancelled:
+                if turn.cancelled or self._closed:
                     reply.route = "stop"
                     return
                 self._task_seq = turn.seq

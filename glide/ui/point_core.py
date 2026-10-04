@@ -188,7 +188,8 @@ class PointMode:
         with self._lock:
             session = self._session
         if session is not None and session.available and (self._voiced or not voice):
-            session.repoint(selection)  # the same session and voice, a new pin, no old exchanges
+            if not session.repoint(selection):  # it ended on its own just now; the selection is closed: a failed open
+                return False
         elif voice:
             if session is not None:
                 session.close()  # a typed session cannot take a microphone: it ends, and a spoken one begins

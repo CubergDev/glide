@@ -252,3 +252,32 @@ def test_the_device_build_voice_owns_is_opened_only_if_the_caller_is_still_ready
         )
         loop.assistant.close()
     assert len(opened) == 1
+
+
+def test_a_failing_assistant_factory_closes_the_device_and_its_canceller_this_built(monkeypatch):
+    """audit2 finding 11: the canceller was left to the garbage collector when the assistant could not be made."""
+    import glide.speech.session as session
+
+    closed = []
+
+    class Marker:
+        hold = False
+        stats = None
+
+        def close(self):
+            closed.append("canceller")
+
+    monkeypatch.setattr(session, "make_canceller", lambda name, warn: Marker())
+    monkeypatch.setattr(FullDuplexDevice, "start", lambda self: None)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic")
+
+    with pytest.raises(RuntimeError):
+        build_voice(
+            FakeConfig(llm=FakeLLM(), tts=FakeTTS()),
+            SpeechSettings(echo_canceller="nlms"),
+            vad=lambda f: 0.0,
+            assistant_factory=broken,
+        )
+    assert closed == ["canceller"]

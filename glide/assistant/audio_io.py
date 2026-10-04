@@ -223,8 +223,10 @@ class Player:
         """Block until everything queued has been played out. False if `timeout` ran out first."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cond:
-            if self._thread is None:
+            if self._thread is None or self._closed:  # nothing queued, or nothing will ever play: no marker nobody consumes
                 return True
+            if timeout is not None and timeout <= 0:
+                return self._busy == 0  # a poll: no marker, so nothing is left queued behind it
             self._busy += 1
             self._items.put(_Flush(self._epoch))
             while self._busy > 0:
@@ -244,6 +246,7 @@ class Player:
             with contextlib.suppress(Exception):
                 self._backend.abort()
             self._items.put(_CLOSE)
+            self._cond.notify_all()  # a wait_idle in progress sees the queue drained and returns
             thread = self._thread
         if thread is not None:
             thread.join(timeout=2.0)

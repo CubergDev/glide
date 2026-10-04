@@ -417,3 +417,24 @@ def test_an_image_crop_off_the_primary_display_says_so_instead_of_blaming_permis
         "text": "The image crop works on the primary display only; point again.",
         "closed": True,
     }
+
+
+def test_pointing_again_as_the_session_ends_is_a_failed_open_that_unpins_the_view():
+    """audit2 finding 10: repoint() returned False and the new pin stayed drawn with nothing behind it."""
+    rig = Rig()
+    rig.start("first", share=True)
+    rig.wait_for("answer")
+    session = rig.mode._session
+    asked = []
+    session.ask = lambda question: asked.append(question) or False
+
+    def ended_meanwhile(selection):
+        session.close()
+        selection.close()
+        return False
+
+    session.repoint = ended_meanwhile
+    rig.start("second", share=True)
+    rig.wait_for("closed")
+    assert not rig.mode.holding and asked == []
+    rig.mode.close()

@@ -127,3 +127,26 @@ def test_a_malformed_manifest_surfaces_when_the_harness_is_needed(tmp_path):
         (service.database.parent / "catalog" / "skills" / "broken.md").write_text("nope")
         with pytest.raises(ValueError, match="frontmatter"):
             service.harness  # noqa: B018
+
+
+def test_a_subscriber_that_raises_keyboard_interrupt_does_not_swallow_it():
+    """audit2 finding 7: publish turned a Ctrl-C inside a subscriber into an errors entry and carried on."""
+    from glide.memory.events import EventBus
+
+    bus = EventBus()
+
+    def interrupted(event):
+        raise KeyboardInterrupt
+
+    bus.subscribe(interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        bus.publish("k", "s", {})
+    assert bus.errors and bus.errors[-1]["error_type"] == "KeyboardInterrupt"
+
+    def broken(event):
+        raise ValueError
+
+    other = EventBus()
+    other.subscribe(broken)
+    other.publish("k", "s", {})  # an ordinary bug is still only recorded
+    assert other.errors[-1]["error_type"] == "ValueError"

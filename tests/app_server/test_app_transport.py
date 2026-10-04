@@ -240,3 +240,19 @@ def test_a_peer_of_another_user_or_one_that_cannot_be_identified_is_refused():
         assert not transport.same_user(a, reader=lambda sock: os.getuid() + 1)
         assert not transport.same_user(a, reader=lambda sock: None)
         assert not transport.same_user(a, uid=os.getuid() + 1)
+
+
+def test_an_accept_error_other_than_a_timeout_backs_off_instead_of_spinning():
+    """audit2 finding 4: EMFILE made accept return at once, so the accept loop spun at 100% CPU."""
+    import errno
+
+    pauses: list[float] = []
+    listener = Listener(Path("unused.sock"), pause=pauses.append)
+
+    class Full:
+        def accept(self):
+            raise OSError(errno.EMFILE, "too many open files")
+
+    listener._sock = Full()  # type: ignore[assignment]
+    assert listener.accept() is None
+    assert pauses and pauses[0] > 0

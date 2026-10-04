@@ -898,8 +898,8 @@ class FakeTask:
             outcome="done", achieved=True, failure=None, stopped=False, answer="ok", uncertain=False
         )
 
-    def start(self):
-        self.started = True
+    def start(self, on_done=None, release=None):
+        self.started, self.release = True, release  # the real task thread calls `release` when it ends
 
     def stop(self):
         self.stopped += 1
@@ -909,12 +909,31 @@ class FakeTask:
         self.waits += 1
         if self.wait_raises and self.waits == 1:
             raise self.wait_raises
-        return self.finished.is_set() or (timeout is not None and self.waits > self.finish_after) or timeout is None
+        done = self.finished.is_set() or (timeout is not None and self.waits > self.finish_after) or timeout is None
+        if done and self.release is not None:
+            release, self.release = self.release, None
+            release()
+        return done
 
 
 def test_drive_returns_the_mapped_outcome_of_a_task_that_finishes():
     task = FakeTask()
     assert worker.drive(task, RunControl())["outcome"] == "completed" and task.started and task.stopped == 0
+
+
+def test_drive_refuses_while_another_task_holds_the_process_wide_slot_and_gives_it_back_after():
+    """audit2 finding 9: drive ran a task without the lock that keeps one abort hook owner per process."""
+    from glide.assistant.tasks import _ACTIVE
+
+    assert _ACTIVE.acquire(blocking=False)  # an assistant task is running in this process
+    try:
+        task = FakeTask()
+        assert worker.drive(task, RunControl())["outcome"] == "blocked" and not task.started
+    finally:
+        _ACTIVE.release()
+    assert worker.drive(FakeTask(), RunControl())["outcome"] == "completed"
+    assert _ACTIVE.acquire(blocking=False)  # and the slot was released when the task ended
+    _ACTIVE.release()
 
 
 def test_drive_stops_the_task_and_waits_for_it_when_the_run_is_cancelled():

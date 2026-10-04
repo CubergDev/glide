@@ -105,6 +105,9 @@ class LineBuffer:
         return out
 
 
+_SLOW_COMMANDS = frozenset({"settings_set", "voice_control"})
+
+
 class Session:
     """One connection of the app."""
 
@@ -126,6 +129,8 @@ class Session:
         self._bad = 0
         self._closing = False  # a last message is queued: nothing more is read
         self._reason: str | None = None
+        self._slow: queue.Queue = queue.Queue()  # settings_set / voice_control, one at a time, off the reader
+        self._slow_thread: threading.Thread | None = None
         self.dropped = 0  # messages that were allowed to be lost, and were
 
     @property
@@ -209,6 +214,7 @@ class Session:
                         self.send(wire.error("line_too_long", "a line was over the limit and was dropped"))
                     else:
                         self._line(item)  # type: ignore[arg-type]
+                        self._last_rx = self._clock()  # time spent handling a line is not time the client was quiet
         finally:
             self.close(self._reason or reason)
             writer.join(timeout=1.0)
@@ -271,6 +277,25 @@ class Session:
             if not granted and command.data["decision"] == "approve":
                 log.info("an approval for an unknown, answered or expired request was ignored")
             return
+        if command.type in _SLOW_COMMANDS:
+            # These can block for many seconds (a device, a permission prompt, a join). The reader must keep reading, so
+            # that stop, interrupt, approvals and pongs are never queued behind them; they run in order on one thread.
+            if self._slow_thread is None:
+                self._slow_thread = threading.Thread(target=self._slow_loop, name="glide-app-slow", daemon=True)
+                self._slow_thread.start()
+            self._slow.put(command)
+            return
+        self._dispatch(command)
+
+    def _slow_loop(self) -> None:
+        while not self.closed:
+            try:
+                command = self._slow.get(timeout=self.limits.poll_s)
+            except queue.Empty:
+                continue
+            self._dispatch(command)
+
+    def _dispatch(self, command: wire.Command) -> None:
         try:
             self.server.backend.handle(self, command)
         except Exception as exc:  # a bug in the backend must not take the connection down; the type is all that is said
@@ -346,7 +371,7 @@ class Approvals:
             except Abort:
                 pass  # the request was stopped before or while it waited
             cancelled = control is not None and control.cancelled.is_set()
-            self._settle(pending, "cancelled" if cancelled else "expired")  # only if nothing has settled it
+            self._settle(pending, "cancelled" if cancelled else "expired", override_approved=cancelled)
             return pending.outcome == "approved" and not cancelled and not session.closed
         finally:
             with self._lock:
@@ -374,9 +399,10 @@ class Approvals:
             self._settle(pending, "disconnected")
             pending.wake.set()
 
-    def _settle(self, pending: _Pending, outcome: str) -> None:
+    def _settle(self, pending: _Pending, outcome: str, *, override_approved: bool = False) -> None:
+        """Set the outcome if nothing has. `override_approved`: a cancel that beat the waiter to the answer wins over 'approved'."""
         with self._lock:
-            if pending.outcome is None:
+            if pending.outcome is None or (override_approved and pending.outcome == "approved"):
                 pending.outcome = outcome
 
 

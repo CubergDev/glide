@@ -91,6 +91,8 @@ class EventBus:
             except BaseException as error:
                 with self._lock:
                     self.errors.append({"event_id": event.id, "subscriber_id": identifier, "error_type": type(error).__name__})
+                if not isinstance(error, Exception):
+                    raise  # Ctrl-C and exit are not a subscriber's bug: recorded, then they go on
         return event
 
 
@@ -139,3 +141,5 @@ class SQLiteEventSink:
             self.store.event(scope, event.kind, payload)
         except BaseException as error:
             self.errors.append({"event_id": event.id, "error_type": type(error).__name__})
+            if not isinstance(error, Exception):
+                raise
