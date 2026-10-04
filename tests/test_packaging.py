@@ -40,3 +40,15 @@ def test_pillow_range_admits_no_vulnerable_release():
 def test_locked_pillow_is_a_fixed_release():
     (pillow,) = [p for p in LOCK["package"] if p["name"] == "pillow"]
     assert Version(pillow["version"]) >= PILLOW_FIRST_SAFE
+
+
+def test_build_backend_pin_is_not_a_yanked_release():
+    """F2: hatchling==1.32.1 was yanked on PyPI."""
+    for requirement in requirements(PROJECT["build-system"]["requires"]):
+        assert pinned_version(requirement) not in YANKED_BUILD_BACKENDS.get(requirement.name, set()), (
+            f"{requirement} is yanked on PyPI"
+        )
+
+
+def test_wheel_still_ships_exactly_the_glide_package():
+    assert PROJECT["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["glide"]

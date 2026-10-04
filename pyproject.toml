@@ -77,7 +77,8 @@ glide-webhook-worker = "glide.webhooks.worker:main"
 dev = ["pytest==9.1.1", "ruff==0.16.8"]
 
 [build-system]
-requires = ["hatchling==1.32.1"]
+# Pinned. 1.32.1 was yanked on PyPI ("Broken by change to types"); 1.32.4 is the newest release that is not yanked.
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
