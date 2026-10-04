@@ -794,3 +794,46 @@ def _queued_call(number):
         "allow_actions": False,
         "context": {},
     }
+
+
+def _uncertain(store, identity):
+    call = {
+        "id": identity,
+        "task_id": "t-" + identity,
+        "agent_id": identity,
+        "operation": "execute",
+        "goal": "SENTINEL-goal",
+        "source": "standard",
+        "event_id": identity,
+        "allow_actions": False,
+        "context": {},
+    }
+    store.enqueue("standard", identity, "d-" + identity, call)
+    lease = store.claim(identity, "w")
+    store.finish(identity, "w", identity, lease["lease_token"], "uncertain")
+
+
+def _wait_for(check):
+    for _ in range(200):
+        if check():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_the_service_purges_expired_uncertain_content_at_start_and_on_a_periodic_pass(environment, tmp_path, monkeypatch):
+    from glide.webhooks import app as app_module
+
+    clock = SimpleNamespace(now=1000.0)
+    store = QueueStore(tmp_path / "p.sqlite3", clock=lambda: clock.now, uncertain_retention_s=86400)
+    _uncertain(store, "early")
+    clock.now += 2 * 86400  # already past the limit when the service starts
+    monkeypatch.setattr(app_module, "PURGE_INTERVAL_S", 0.05)
+    with TestClient(create_app(environment.settings, store=store)):
+        assert _wait_for(lambda: store.get("early", "early")["expired_at"] is not None)
+        _uncertain(store, "late")  # becomes uncertain while the service runs
+        assert store.get("late", "late")["call"]["goal"] == "SENTINEL-goal"
+        clock.now += 86400
+        assert _wait_for(lambda: store.get("late", "late")["expired_at"] is not None)
+    assert store.get("late", "late")["call"]["goal"] == "redacted"
+    store.close()

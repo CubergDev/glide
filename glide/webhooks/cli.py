@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from .settings import load_settings
+from .store import LeaseConflict
 
 
 def serve(settings, host: str, port: int) -> None:
@@ -58,4 +59,42 @@ def main(argv=None) -> int:
         serve(settings, args.host, args.port)
     except (ValueError, ImportError, OSError):
         parser.exit(2, "Could not configure the webhook service. See glide/webhooks/README.md.\n")
+    return 0
+
+
+def reconcile(argv=None) -> int:
+    """`glide webhooks reconcile <id> done|not-done|unknown`: the operator's verdict on an uncertain run.
+
+    Writes the verdict, then deletes the run's goal and context at once (unless `record_content` is on). It opens the
+    queue file directly and starts nothing; it never reruns or requeues the task.
+    """
+    from .store import VERDICTS, QueueStore
+
+    parser = argparse.ArgumentParser(
+        prog="glide webhooks reconcile", description="Record what happened to an uncertain run and delete its content"
+    )
+    parser.add_argument("--config", type=Path, default=Path(os.environ.get("GLIDE_WEBHOOK_CONFIG", "webhooks.json")))
+    parser.add_argument("message_id")
+    parser.add_argument("verdict", choices=sorted(VERDICTS), help="done: the write happened; not-done: it did not; unknown")
+    args = parser.parse_args(argv)
+    try:
+        settings = load_settings(args.config)
+        store = QueueStore(
+            Path(settings.database),
+            record_content=settings.record_content,
+            uncertain_retention_s=settings.uncertain_retention_days * 86400,
+        )
+    except (ValueError, OSError):
+        parser.exit(2, "Could not read the webhook configuration or queue. See glide/webhooks/README.md.\n")
+    try:
+        agent = store.agent_of(args.message_id)
+        if agent is None:
+            parser.exit(1, "No such message.\n")
+        try:
+            result = store.reconcile(agent, args.message_id, args.verdict)
+        except LeaseConflict:
+            parser.exit(1, "That message is not uncertain, so there is nothing to reconcile.\n")
+    finally:
+        store.close()
+    print(f"Reconciled {result['message_id']} as {result['status']} ({args.verdict}); its goal and context are deleted.")
     return 0

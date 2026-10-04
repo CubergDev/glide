@@ -11,7 +11,7 @@
     glide inspect [GOAL]           capture the screen and show what the classifier would be sent; `glide-inspect` too
     glide memory ...               local memory administration (off unless [memory] enabled = true)
     glide mcp ...                  serve Glide over MCP and show the MCP settings
-    glide webhooks serve|work ...  the webhook listener and its worker (serve needs the webhooks extra)
+    glide webhooks serve|work|reconcile ...  the webhook listener, its worker, a verdict on an uncertain run
     glide app-server [--socket PATH]  serve the SwiftUI app over a local Unix socket (never a network port)
 
 `memory`, `mcp` and `webhooks` have their own options and help (`glide memory --help`); everything after the
@@ -513,8 +513,8 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return mcp.main(_forward(args))
 
 
-def cmd_webhooks_serve(args: argparse.Namespace) -> int:
-    """`glide webhooks serve`: its `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
+def cmd_webhooks_serve(args: argparse.Namespace, entry: str = "main") -> int:
+    """`glide webhooks serve|reconcile`: their `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
     from .memory.settings import SettingsError, find_config
 
     words = list(args.rest)
@@ -531,7 +531,11 @@ def cmd_webhooks_serve(args: argparse.Namespace) -> int:
                 return 2
     from .webhooks import cli as webhooks
 
-    return webhooks.main(words)
+    return getattr(webhooks, entry)(words)
+
+
+def cmd_webhooks_reconcile(args: argparse.Namespace) -> int:
+    return cmd_webhooks_serve(args, "reconcile")
 
 
 def cmd_webhooks_work(args: argparse.Namespace) -> int:
@@ -668,9 +672,10 @@ def build_parser() -> argparse.ArgumentParser:
     passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)
     passthrough(commands, "mcp", cmd_mcp, "serve Glide over MCP, show the MCP settings (`glide mcp --help`)", config=True)
     webhooks = commands.add_parser("webhooks", help="the webhook listener and its worker (`glide webhooks serve --help`)")
-    parts = webhooks.add_subparsers(dest="webhooks_command", required=True, metavar="serve|work")
+    parts = webhooks.add_subparsers(dest="webhooks_command", required=True, metavar="serve|work|reconcile")
     passthrough(parts, "serve", cmd_webhooks_serve, "receive authenticated webhooks and queue agent requests (webhooks extra)")
     passthrough(parts, "work", cmd_webhooks_work, "consume queued requests, one at a time", config=True)
+    passthrough(parts, "reconcile", cmd_webhooks_reconcile, "record what happened to an uncertain run and delete its content")
     return parser
 
 
