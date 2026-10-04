@@ -27,7 +27,7 @@ from os import PathLike
 from threading import RLock
 from uuid import uuid4
 
-from .contracts import Scope
+from .contracts import SAFE_ID, Scope
 
 _VERSION = 1
 _EVENT_DAYS = 30
@@ -76,6 +76,13 @@ def _identifier(value: str, *, maximum: int = 256) -> str:
     validate_text(value, max_length=maximum)
     if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError("identifier must be nonempty and contain no control characters")
+    return value
+
+
+def _run_id(value: str) -> str:
+    """An opaque run identifier (`run:` + hash from `ingest_run`, or any safe token), never a path or URL."""
+    if not isinstance(value, str) or len(value) > 128 or not SAFE_ID.fullmatch(value):
+        raise ValueError("run id must be an opaque token (letters, digits and _ . : -), never a path or URL")
     return value
 
 
@@ -192,7 +199,7 @@ class Store:
         self._lock = RLock()
         self._closed = False
         self._pid = os.getpid()
-        path = _prepare_path(path)
+        path = self._path = _prepare_path(path)
         self._db = sqlite3.connect(path, timeout=5.0, isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         try:
@@ -330,7 +337,27 @@ class Store:
     def forget(self, scope: Scope, id: str) -> bool:
         parameters = (_identifier(id), *_scope(scope))
         with self._transaction() as db:
-            return db.execute(f"DELETE FROM memories WHERE id=? AND {_ACCESS}", parameters).rowcount == 1
+            forgotten = db.execute(f"DELETE FROM memories WHERE id=? AND {_ACCESS}", parameters).rowcount == 1
+        if forgotten:
+            self._truncate_wal()
+        return forgotten
+
+    def _truncate_wal(self) -> None:
+        """Fold the log into the database and empty it: older frames still hold the text of a deleted row.
+
+        A reader on another connection can keep the log from being emptied (`busy`); then the deletion is real in the
+        database but not yet in the log, and saying nothing would break the promise that forget deletes.
+        """
+        self._check_open()
+        with self._lock:
+            self._check_open()
+            busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        _harden(self._path)
+        if busy:
+            raise sqlite3.OperationalError(
+                "the memory was deleted, but its text may remain in the write-ahead log while another connection reads "
+                "the database; close other readers and the log is emptied when the store closes"
+            )
 
     def event(self, scope: Scope, kind: str, payload: dict) -> str:
         scoped, kind = _scope(scope), _identifier(kind, maximum=128)
@@ -369,7 +396,7 @@ class Store:
 
     def record_outcome(self, scope: Scope, run_id: str, success: bool, summary: str) -> str:
         user, project, _ = _scope(scope)
-        run_id = _identifier(run_id)
+        run_id = _run_id(run_id)
         validate_summary(summary)
         if not isinstance(success, bool):
             raise ValueError("success must be a boolean")

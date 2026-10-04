@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from ._callbacks import require_sync
-from .contracts import Scope
+from .contracts import SAFE_ID, Scope
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,6 @@ class EventBus:
         return event
 
 
-_SAFE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 _PROGRESS_TOKEN = re.compile(r"[0-9a-f]{32}\Z")
 _NUMERIC = frozenset({"duration", "duration_ms", "bytes", "count", "progress", "total", "generation", "pages"})
@@ -117,7 +116,7 @@ class SQLiteEventSink:
                 return
             payload: dict[str, Any] = {"timestamp": event.timestamp}
             for key, value in (("source", event.source), ("correlation_id", event.correlation_id)):
-                if isinstance(value, str) and _SAFE_ID.fullmatch(value):
+                if isinstance(value, str) and SAFE_ID.fullmatch(value):
                     payload[key] = value
             name = event.data.get("name")
             if isinstance(name, str) and _TOOL_NAME.fullmatch(name):
