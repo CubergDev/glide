@@ -1,9 +1,28 @@
 # The legacy browser DOM loop: proof it is not production, and what goes with it
 
-Nothing is deleted by this note. It gives the evidence that `glide/computer/browser/{runner,decide,perceive,report,act}.py`
+This note was written before the removal; the removal is the commit that follows it (user approved). It gives the evidence that `glide/computer/browser/{runner,decide,perceive,report,act}.py`
 (1,397 lines) is not reachable from any entry point, and the exact set to remove together. The proof is a test that keeps
 being true until the removal: `tests/test_process_seams.py` (`test_the_legacy_browser_loop_is_imported_by_nothing_but_itself`,
 `test_nothing_imports_by_a_computed_name_so_the_scan_above_sees_every_import`, `test_no_entry_point_group_loads_a_module_by_name`).
+
+## Re-verified on `consolidation/legacydel` (off `consolidation/07-all`, 6aaffa9)
+
+Done again before the removal, from the tree as it is now, not from the first note:
+
+- `glide/`: no import of `glide.computer.browser.{runner,decide,perceive,report,act}` outside those five files
+  (`test_the_legacy_browser_loop_is_imported_by_nothing_but_itself` passes; `browser/__init__.py` imports only `cdp`).
+  `grep` for `run_goal` finds only `runner.py`. `compose_browser_text` is called only by `runner.py`.
+- Computed names: `importlib`, `__import__`, `runpy`, `exec`, `eval` in `glide/` are `platform_adapter.py` (two literal
+  names), `features.py` (`find_spec`), `importlib.metadata`/`resources` (package data), Qt's `app.exec()` and PIL's
+  `Image.eval`. None builds a module name.
+- Entry points: `pyproject.toml` still has the same five `[project.scripts]` and no other group. `.github/`, `scripts/`,
+  `app/` and `CURRENT.md` name none of the modules.
+- Docs: `docs/ARCHITECTURE.md`, `DECISIONS.md`, `README.md`, `glide.toml.example` name none of them. Only
+  `docs/reviews/PR_REVIEW_FINDINGS.md` (two findings on `runner.py:308` and `act.py:93`, both open) and `docs/history/` do.
+- Tests: new since the first note, `tests/test_writer_injection.py` calls `writer.compose_browser_text` (one call in
+  `run_every_composer`); it goes with the function. `tests/test_process_seams.py::test_every_action_the_legacy_loop_performs_runs_under_dispatch`
+  does not run the loop at all: it runs `glide.computer.actions` (the native engine) and stays, renamed.
+- Baseline: 5369 passed, 16 skipped, 3 xfailed on Python 3.13 before the change.
 
 ## What the loop is
 
