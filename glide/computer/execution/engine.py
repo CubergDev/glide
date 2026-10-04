@@ -253,10 +253,10 @@ class Execution:
             self._loop(ctx, goal)
 
     def _switched(self, switch: SwitchEvent):
-        """A browser provider was unavailable and the next one on the `[browser] fallback` list took its place. It is
-        said on the run's own channel and kept for the report; the reason stays out of both unless content is recorded."""
+        """A browser provider was unavailable and the next one on the `[browser] fallback` list took its place. The
+        provider door has already said so on the run's channel; this keeps it for the report, with its reason only when
+        content is recorded."""
         self.switches.append(switch)
-        self.control.event("switch", f"fallback: browser {switch.from_slot} -> {switch.to_slot} ({switch.kind})")
 
     def _ask(self, ctx, question) -> str:
         """Put one question to the user and keep the exchange. A reply that arrives after a stop is dropped, unrecorded."""
