@@ -44,8 +44,8 @@ def settings(monkeypatch, tmp_path):
     return write
 
 
-def state(outcome, failure=""):
-    return SimpleNamespace(outcome=outcome, failure=failure)
+def state(outcome, failure="", answer=None):
+    return SimpleNamespace(outcome=outcome, failure=failure, answer=answer)
 
 
 def chains(classifier="the chain classifier"):
@@ -67,13 +67,26 @@ def chains(classifier="the chain classifier"):
         ("desktop unavailable", "No permission.", 1),
         ("done", "", None),
         ("dry run", "", None),
-        ("stalled", "", None),
+        # PR10-4175614834: these end the legacy loop with no `failure` text, and none of them did the job
+        ("stalled", "", 1),
+        ("stuck", "", 1),
+        ("step limit", "", 1),
+        ("nothing helps", "", 1),
+        ("low confidence", "", 1),
+        ("generation unavailable", "", 1),
     ],
 )
 def test_every_failed_outcome_exits_nonzero_and_a_stop_exits_130(monkeypatch, tmp_path, offline, outcome, failure, code):
     monkeypatch.setattr(cli, "make_writer", lambda *a: None)
     monkeypatch.setattr(cli, "run", lambda *a, **kw: state(outcome, failure))
     assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == (code or 0)
+
+
+@pytest.mark.parametrize(("achieved", "code"), [(True, 0), (False, 1)])
+def test_a_done_run_exits_by_what_the_writers_answer_says(monkeypatch, tmp_path, offline, achieved, code):
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", lambda *a, **kw: state("done", "", SimpleNamespace(achieved=achieved)))
+    assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == code
 
 
 def test_the_structured_engine_takes_its_classifier_from_the_provider_chains(monkeypatch, tmp_path, offline):

@@ -260,7 +260,7 @@ def computer_run(monkeypatch, config, *flags, outcome="dry run", trusted=True):
 
     def fake_run(cfg, ctx_factory, **kwargs):
         seen.update(cfg=cfg, ctx_factory=ctx_factory, **kwargs)
-        return SimpleNamespace(outcome=outcome, failure="")
+        return SimpleNamespace(outcome=outcome, failure="", answer=None)
 
     monkeypatch.setattr(computer_cli, "run", fake_run)
     monkeypatch.setattr(computer_cli.desktop, "accessibility_trusted", lambda: trusted)

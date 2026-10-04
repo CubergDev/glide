@@ -328,7 +328,7 @@ def test_the_command_line_records_content_only_when_asked(monkeypatch, tmp_path,
 
     def fake_run(cfg, ctx_factory, **kwargs):
         seen.update(cfg=cfg, control=kwargs.get("control"))
-        return SimpleNamespace(outcome="done", failure="")
+        return SimpleNamespace(outcome="done", failure="", answer=None)
 
     monkeypatch.setattr(cli, "run", fake_run)
     cli.main(["a goal", "--out", str(tmp_path), *flags], SimpleNamespace(classifier=lambda: None))

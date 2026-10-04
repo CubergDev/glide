@@ -33,7 +33,22 @@ ABORTED, FAILED = (
     130,
     1,
 )  # exit codes: stopped by the user (the shell's own value for Ctrl-C), and any run that did not do the job
-FAILED_OUTCOMES = {"blocked", "unsupported", "crashed", "provider failure"}  # failures that may carry no `failure` text
+# Every way a run ends without having done the job. Most carry no `failure` text (the legacy loop sets one only when the
+# writer fails), so the outcome alone decides. "done" and "dry run" are the only others, and "done" is still a failure
+# when the writer's own answer says the goal was not reached.
+FAILED_OUTCOMES = {
+    "blocked",
+    "unsupported",
+    "crashed",
+    "provider failure",
+    "generation unavailable",
+    "desktop unavailable",
+    "step limit",
+    "stalled",
+    "stuck",
+    "nothing helps",
+    "low confidence",
+}
 
 
 def _fail(message: str, code: int = 2) -> int:
@@ -152,7 +167,7 @@ def main(argv: list[str] | None, glide_config) -> int:
         return _fail(glide_config.scrub(str(e)))
     if state.outcome.startswith("aborted"):
         return ABORTED
-    if state.failure or state.outcome in FAILED_OUTCOMES:
+    if state.failure or state.outcome in FAILED_OUTCOMES or (state.answer is not None and not state.answer.achieved):
         return FAILED
     return 0
 
