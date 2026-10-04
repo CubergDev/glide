@@ -37,6 +37,7 @@ class PetConfig(FakeConfig):
     """FakeConfig plus what the pet reads from a real GlideConfig: the speech settings and the slots."""
 
     voice = SpeechSettings()  # what a real GlideConfig holds for the voice stack (`config.speech` is the providers' view)
+    speech = voice  # still read by glide/assistant/point_cli.py:194, which has the real config's `voice` to read instead (PR15-4175491833)
 
     def slots(self, role):
         return [SimpleNamespace(name=f"{role}-a", state="ready"), SimpleNamespace(name=f"{role}-b", state="skipped")]
