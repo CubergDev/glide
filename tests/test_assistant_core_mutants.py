@@ -17,10 +17,10 @@ import pytest
 from test_assistant_core import build, spoken, tone
 from test_assistant_fakes import WAIT, FakeLLM, FakeSTT, route_json
 
+from glide.assistant.answer import DATA_CHARS
 from glide.assistant.audio_io import chunked
 from glide.assistant.core import HISTORY_CHARS, MIN_SPEECH_RMS, STOPPED
 from glide.assistant.phrases import say
-from glide.assistant.router import DATA_CHARS
 from glide.assistant.speech import detect_language
 from glide.providers.base import Transcript
 from glide.providers.config import NoUsableProvider
