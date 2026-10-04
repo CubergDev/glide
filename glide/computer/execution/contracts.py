@@ -77,13 +77,19 @@ def public_url(value: str) -> str:
     return redact_address(value) if value else value
 
 
-def canonical_url(value: str) -> str:
+def canonical_url(value: str, *, exact: bool = False) -> str:
+    """The address as destination verification compares it. Ordinary root redirects commonly add `www.` and a trailing
+    slash, so after a dispatched navigation those are ignored; `exact` (a page that is merely already there, with no
+    action behind it) keeps the host as it is and drops only the root path's slash. Never a credential or origin rule."""
     p = urlsplit(value)
-    # Ordinary root redirects commonly add www. This is destination verification,
-    # never a credential or origin authorization rule.
-    host = (p.hostname or "").lower().removeprefix("www.")
+    host = (p.hostname or "").lower()
+    path = p.path
+    if exact:
+        path = "" if path == "/" else path
+    else:
+        host, path = host.removeprefix("www."), path.rstrip("/")
     port = f":{p.port}" if p.port and p.port != {"http": 80, "https": 443}.get(p.scheme) else ""
-    return urlunsplit((p.scheme, host + port, p.path.rstrip("/"), p.query, p.fragment))
+    return urlunsplit((p.scheme, host + port, path, p.query, p.fragment))
 
 
 def observed_link_destination(requested: str, committed: str, declared_canonical: str = "") -> bool:
@@ -397,6 +403,11 @@ def rebind(action: Action, before: Observation, fresh: Observation) -> Action:
         a, b = before.elements.get(old_form.field), fresh.elements.get(old_form.field)
         if not a or not b or a.public() != b.public():
             raise InvalidAction("The query input changed before execution")
+    elif action.kind == "navigate" and not action.target:
+        # Without a target the backend creates a tab (none selected) or navigates the selected one: a tab that
+        # appeared or became active since the choice must not be overwritten by an action chosen without it.
+        if before.active_tab != fresh.active_tab or set(before.tabs) != set(fresh.tabs):
+            raise InvalidAction("The browser tabs changed before navigation")
     elif action.kind in {"tab_close", "tab_switch", "navigate"} and action.target:
         if action.target not in fresh.tabs or before.tabs.get(action.target) != fresh.tabs[action.target]:
             raise InvalidAction("The selected tab changed before execution")
@@ -465,7 +476,8 @@ def effect(m: Milestone, action: Action | None, before: Observation, after: Obse
     """A stable effect ID, or empty. Dispatch receipts alone never prove completion."""
     if not after.ready and m.effect not in {"url", "tab_created", "tab_active", "tab_closed"}:
         return ""
-    if m.effect == "url" and after.browser_front and canonical_url(after.url) == canonical_url(m.value):
+    exact = action is None  # a state that is only observed to be there proves nothing about a different host or path
+    if m.effect == "url" and after.browser_front and canonical_url(after.url, exact=exact) == canonical_url(m.value, exact=exact):
         return digest([after.active_tab, after.url])
     if (
         m.effect == "url"
@@ -508,7 +520,10 @@ def effect(m: Milestone, action: Action | None, before: Observation, after: Obse
         media = [
             item
             for item in after.media.values()
-            if followed_result or (m.target and (item.id == m.target or item.label.casefold() == m.target.casefold()))
+            if followed_result
+            or not m.target  # the planner may leave it empty for a page with a single media element
+            or item.id == m.target
+            or item.label.casefold() == m.target.casefold()
         ]
         if len(media) == 1:
             item = media[0]
@@ -559,9 +574,10 @@ def effect(m: Milestone, action: Action | None, before: Observation, after: Obse
         and action.target in before.tabs
         and (action.target == m.target or before.tabs[action.target] == m.value)
         and action.target not in after.tabs
+        and "tab_close" in after.capabilities  # a failed enumeration also shows no tabs, and proves nothing
     ):
         return digest(["closed", action.target])
-    if m.effect == "scroll" and action and action.kind == "scroll":
+    if m.effect == "scroll" and action and action.kind == "scroll" and before.owner == after.owner:
         a, b = before.containers.get(action.target), after.containers.get(action.target)
         correct_target = a and (
             a.id == m.target or a.label.casefold() == m.target.casefold() or action.target_contract == m.contract
@@ -586,7 +602,8 @@ def effect(m: Milestone, action: Action | None, before: Observation, after: Obse
         return digest(["value", after.owner, m.target, m.value])
     if m.effect == "element_present" and matches:
         return digest(["present", after.owner, m.target])
-    if m.effect == "element_absent" and not matches:
+    if m.effect == "element_absent" and not matches and before.owner == after.owner:
+        # Only the same document can show a removal: a navigation or a tab switch also makes the old element absent.
         old = [e for e in before.elements.values() if e.id == m.target or e.label.casefold() == m.target.casefold()]
         if old:
             return digest(["absent", before.owner, m.target])

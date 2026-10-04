@@ -2,11 +2,24 @@
 
 import json
 import sqlite3
+from dataclasses import replace
 
+import pytest
 from execution_world import Computer, Reasoner, drive, response
 
 from glide.computer.control import RunControl
-from glide.computer.execution.contracts import Action, Element, Milestone, Navigation, Observation
+from glide.computer.execution.contracts import (
+    Action,
+    Container,
+    Element,
+    InvalidAction,
+    Media,
+    Milestone,
+    Navigation,
+    Observation,
+    effect,
+    rebind,
+)
 from glide.computer.execution.progress import Ledger
 
 
@@ -73,3 +86,76 @@ def test_observation_packet_redacts_credentials_in_every_address(monkeypatch):
         assert leaked not in packet
     assert "page=2" in packet and "x=1" in packet  # the rest of the address stays useful
     assert obs.url == page  # the engine itself keeps the raw value
+
+
+def page(owner="doc:1", url="https://example.org/", **kw):
+    return Observation("browser", owner, url, kw.pop("active_tab", "t1"), kw.pop("tabs", {"t1": url}), **kw)
+
+
+def test_media_playing_with_an_empty_target_verifies_the_single_media_element():
+    """PR11-4175426267: the planner may leave the target empty for one media element."""
+    paused, playing = Media("v", "Video", True, False, 4, 0.0), Media("v", "Video", False, False, 4, 1.5)
+    before = page(elements={"play": Element("play", "Play", "button")}, media={"v": paused})
+    after = page(elements={"play": Element("play", "Play", "button")}, media={"v": playing})
+    click = Action("click", before.identity, "play")
+    assert effect(Milestone("m", "Play it", "media_playing"), click, before, after)
+    two = page(media={"v": playing, "w": replace(playing, id="w")})
+    assert not effect(Milestone("m", "Play it", "media_playing"), click, before, two)  # ambiguous stays unverified
+
+
+def test_element_absent_needs_the_same_document():
+    """PR11-4175426270: leaving the page also makes the old element absent; it is not a removal."""
+    delete = {"delete": Element("delete", "Delete", "button")}
+    before = page(elements=delete)
+    milestone = Milestone("m", "Remove it", "element_absent", target="Delete")
+    assert effect(milestone, None, before, page(elements={}))
+    assert not effect(milestone, None, before, page(owner="doc:2", elements={}))
+
+
+def test_targetless_navigation_is_not_rebound_onto_a_tab_that_appeared():
+    """PR11-4175634939: a create-a-tab navigation must not overwrite a tab opened before preflight."""
+    before = Observation("browser", "", "", capabilities={"inspect", "navigate"})
+    action = Action("navigate", before.identity, value="https://example.org/")
+    fresh = Observation(
+        "browser", "doc:1", "https://user.example/", "t9", {"t9": "https://user.example/"}, capabilities={"inspect", "navigate"}
+    )
+    with pytest.raises(InvalidAction):
+        rebind(action, before, fresh)
+    assert rebind(action, before, Observation("browser", "", "", capabilities={"inspect", "navigate"})).kind == "navigate"
+
+
+def test_tab_closed_needs_a_working_tab_inventory():
+    """PR11-4175634943: after a failed enumeration the tabs are empty, which proves nothing about the closed one."""
+    before = page(tabs={"t1": "https://example.org/", "t2": "https://example.net/"}, capabilities={"inspect", "tab_close"})
+    milestone = Milestone("m", "Close it", "tab_closed", target="t2")
+    close = Action("tab_close", before.identity, "t2")
+    working = page(tabs={"t1": "https://example.org/"}, capabilities={"inspect", "tab_close"})
+    failed = page(tabs={}, capabilities={"inspect"})
+    assert effect(milestone, close, before, working)
+    assert not effect(milestone, close, before, failed)
+
+
+def test_scroll_needs_the_same_document():
+    """PR12-4175623612: a farther container of the same id on another document is not this scroll."""
+    top, farther = Container("feed", "Feed", 0, 1000), Container("feed", "Feed", 300, 1000)
+    before = page(containers={"feed": top}, capabilities={"inspect", "scroll"})
+    milestone = Milestone("m", "Scroll", "scroll", target="Feed", value="down")
+    scroll = Action("scroll", before.identity, "feed", "down")
+    assert effect(milestone, scroll, before, page(containers={"feed": farther}, capabilities={"inspect", "scroll"}))
+    assert not effect(milestone, scroll, before, page(owner="doc:2", containers={"feed": farther}))
+
+
+def test_an_existing_page_on_another_host_or_path_does_not_satisfy_a_url_milestone():
+    """PR10-4175602716: www and trailing slashes are ignored after a navigation, never for a page that is merely there."""
+    here = page(url="https://example.test/account")
+    milestone = Milestone("m", "Go", "url", value="https://www.example.test/account/")
+    assert not effect(milestone, None, here, here)
+    assert not effect(Milestone("m", "Go", "url", value="https://example.test/account/"), None, here, here)
+    assert effect(
+        Milestone("m", "Go", "url", value="https://example.test/"),
+        None,
+        page(url="https://example.test"),
+        page(url="https://example.test"),
+    )
+    go = Action("navigate", here.identity, value=milestone.value)
+    assert effect(milestone, go, here, here)  # the redirect to www is still accepted once a navigation was dispatched
