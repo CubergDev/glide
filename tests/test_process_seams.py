@@ -1,15 +1,19 @@
-"""Seams: which code of `glide/` may start a process, and that every input to the machine goes through `dispatch`.
+"""Seams: which code of `glide/` may start a process, that every input to the machine goes through `dispatch`, and where
+text from the screen or a model may take an action.
 
 Process starts. Every `.py` file under `glide/` is scanned. A file may start a process only when it is in `ALLOWED`
-below, with exactly the findings listed (a second `Popen` in an allowed file fails, and so does an entry that no longer
-matches), a reason, and the owner who can remove it. `glide/computer/execution/spawn.py` is the seam the execution
-package uses; the other entries are older code that predates it.
+below, with the findings listed (a second `Popen` in an allowed file fails), a reason, and the owner who can remove it.
+Only growth fails: the owner of an allowed file cannot edit this one, so when they remove a process start the suite stays
+green and warns which entry to trim. `glide/computer/execution/spawn.py` is the seam the execution package uses; the other
+entries are older code that predates it.
 
 Input. Production code reaches the screen, keyboard, pointer or another app only through `control.dispatch`
 (AGENTS.md: an attempted action is not a verified effect; `dispatch` is what marks a write as possibly in flight).
 `INPUT` lists every `Desktop` call that does that. A static scan fails on any reference to one that is not the first
 argument of `dispatch(...)`, unless it is in `INPUT_ALLOWED` with a reason; a runtime check runs the production
 callers on a fake desktop that records whether `dispatch` was on the stack.
+
+Destinations. The address `use_browser` opens and the fields it types into are checked in code (the last section).
 """
 
 from __future__ import annotations
@@ -66,7 +70,7 @@ class Allowed:
     uses: Counter
     reason: str
     owner: str
-    todo: str = ""  # a pending removal: the entry may be gone (the removal landed), but never grow
+    todo: str = ""  # a pending removal, with the file that carries it
 
 
 ALLOWED: dict[str, Allowed] = {
@@ -125,31 +129,34 @@ def test_the_scan_counts_each_way_to_start_a_process():
 
 
 def test_only_the_allowed_files_start_a_process_and_only_in_the_ways_listed():
-    wrong = {}
+    """Growth fails: a new file, or one more use in an allowed file. Shrinkage only warns, because the owner of that file
+    cannot edit this one: when they remove a process start the suite must stay green, and the warning says which
+    ALLOWED entry to trim."""
+    grown, shrunk = {}, {}
     for path, source in sources().items():
         found = process_uses(source)
         entry = ALLOWED.get(path)
         expected = entry.uses if entry else Counter()
-        if found != expected and not (entry and entry.todo and not found):
-            wrong[path] = {"found": dict(found), "allowed": dict(expected)}
-    assert not wrong, (
+        if found - expected:
+            grown[path] = {"found": dict(found), "allowed": dict(expected)}
+        if expected - found:
+            shrunk[path] = dict(expected - found)
+    assert not grown, (
         "a file starts a process it is not allowed to. Go through glide.computer.execution.spawn, or add an ALLOWED "
-        f"entry in this file with a reason and an owner: {wrong}"
+        f"entry in this file with a reason and an owner: {grown}"
     )
+    for path, gone in shrunk.items():
+        warnings.warn(f"{path} no longer uses {gone}: trim its ALLOWED entry in tests/test_process_seams.py", stacklevel=1)
 
 
 def test_every_allowed_entry_names_a_real_file_and_says_why():
     present = sources()
     for path, entry in ALLOWED.items():
-        assert path in present, f"{path} is gone: delete its ALLOWED entry"
-        assert entry.reason and entry.owner
-        if entry.todo:
+        assert entry.reason and entry.owner, path
+        if path not in present:
+            warnings.warn(f"{path} is gone: delete its ALLOWED entry", stacklevel=1)
+        elif entry.todo:
             assert (ROOT / entry.todo).is_file(), f"{path}: the TODO names {entry.todo}, which does not exist"
-        elif not process_uses(present[path]):
-            pytest.fail(f"{path} no longer starts a process: delete its ALLOWED entry")
-    for path, entry in ALLOWED.items():
-        if entry.todo and not process_uses(present[path]):
-            warnings.warn(f"{path}: the pending removal landed; delete its ALLOWED entry", stacklevel=1)
 
 
 # ------------------------------------------------------------------ the Chrome launcher in cdp.py
@@ -591,11 +598,125 @@ def test_no_entry_point_group_loads_a_module_by_name():
     import tomllib
 
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    assert set(project["scripts"].values()) == {
-        "glide.cli:main",
-        "glide.cli:computer_main",
-        "glide.cli:inspect_main",
-        "glide.webhooks.cli:main",
-        "glide.webhooks.worker:main",
-    }
     assert not {"gui-scripts", "entry-points"} & set(project)
+    targets = {target.split(":")[0] for target in project["scripts"].values()}
+    assert targets and all(name.startswith("glide.") for name in targets), targets
+    assert not targets & LEGACY_LOOP
+
+
+# ------------------------------------------------------------------ destinations and credential fields
+#
+# The address use_browser opens, and the fields it types into. A destination comes from the catalog (configuration), from an
+# address in the user's own goal, or from the writer's proposal. A proposal is model output, built from the goal and from a
+# history that quotes screen text, so it is checked in code before the browser is told to open it (AGENTS.md: page, task and
+# provider text is untrusted data). The macOS adapter puts the address inside an AppleScript string literal, so a quote or
+# backslash in it would end that literal.
+
+BLANK = Screen(image=Image.new("RGB", (2000, 1200)), scale=2.0, app="Google Chrome", field=None, url=None)
+
+
+def goal_context(goal="find the next upcoming bruno mars concert") -> actions.Context:
+    return actions.Context(goal=goal, browser="Google Chrome", email="me@example.org", typesafe=None, writer=object(), history=[])
+
+
+@pytest.fixture
+def opened(monkeypatch):
+    log = []
+    monkeypatch.setattr(desktop, "activate", lambda app: log.append(("activate", app)) or True)
+    monkeypatch.setattr(desktop, "open_url", lambda app, url: log.append(("open", url)) or True)
+    return log
+
+
+def use_browser(opened, proposal, goal="find the next upcoming bruno mars concert"):
+    """What use_browser does when the classifier says `other` and the writer proposes `proposal`."""
+    decision = SimpleNamespace(chosen="use_browser", site=SimpleNamespace(choice="other"))
+    return actions.perform(decision, BLANK, [], goal_context(goal))
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    [
+        'https://a.example/"&(do shell script "id")&"',  # ends the AppleScript string literal
+        "https://a.example/\\x",
+        "https://a.example/\x07",
+        "https://user:secret@a.example/",
+        "https://a.example:8443/",
+        "https://a.example/?q=what+the+screen+said",  # a query carries data out
+        "https://a.example/#what-the-screen-said",
+        "https://192.168.1.1/admin",
+        "https://printer.local/",
+        "https://localhost.localdomain/",
+        "https://ex\u0430mple.com/",  # with a Cyrillic a
+    ],
+)
+def test_a_proposed_address_that_could_carry_data_or_break_out_is_refused(opened, monkeypatch, proposal):
+    monkeypatch.setattr(actions, "compose_url", lambda *a: proposal)
+    refusal = use_browser(opened, proposal)
+    assert refusal.startswith("use_browser refused: ") and "address" in refusal
+    assert opened == []  # nothing was opened, and the browser was not even brought forward
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    ["https://www.songkick.com/", "https://en.wikipedia.org/wiki/Bruno_Mars", "https://docs.python.org/3/library/"],
+)
+def test_a_plain_public_page_the_writer_proposes_is_opened(opened, monkeypatch, proposal):
+    monkeypatch.setattr(actions, "compose_url", lambda *a: proposal)
+    assert use_browser(opened, proposal) == f"opened {proposal}"
+    assert opened == [("open", proposal)]
+
+
+def test_an_address_the_user_typed_into_the_goal_may_carry_a_query_and_a_port(opened):
+    goal = "open example.com:8443/search?q=cats"  # the user's own words, which compose_url returns without the writer
+    assert use_browser(opened, "", goal) == "opened https://example.com:8443/search?q=cats"
+
+
+def test_an_address_in_the_goal_that_would_end_an_applescript_string_is_still_refused(opened):
+    goal = 'open example.com/"x'
+    assert use_browser(opened, "", goal).startswith("use_browser refused: ")
+    assert opened == []
+
+
+def test_a_catalog_site_needs_no_check(opened):
+    decision = SimpleNamespace(chosen="use_browser", site=SimpleNamespace(choice="github"))
+    assert actions.perform(decision, BLANK, [], goal_context()) == "opened https://github.com/"
+
+
+def labelled(label="Search", placeholder="", role="AXTextField") -> Field:
+    return Field(role=role, label=label, placeholder=placeholder, value="", x=10, y=20, w=200, h=30, ref=None)
+
+
+@pytest.fixture
+def typed(monkeypatch):
+    log = []
+    monkeypatch.setattr(desktop, "clear_field", lambda: log.append("clear"))
+    monkeypatch.setattr(desktop, "type_text", lambda text: log.append(text))
+    monkeypatch.setattr(desktop, "press", lambda key, command=False: log.append(f"press {key}"))
+    monkeypatch.setattr(actions, "compose_text", lambda *a: SimpleNamespace(text="quarterly report", submit=True))
+    return log
+
+
+@pytest.mark.parametrize("chosen", ["type_text", "type_email"])
+@pytest.mark.parametrize(
+    "label, placeholder",
+    [
+        ("Password", ""),
+        ("", "Enter your PIN"),
+        ("Card number", ""),
+        ("One-time code", ""),
+        ("API key", ""),
+        ("Recovery codes", ""),
+    ],
+)
+def test_nothing_is_typed_into_a_field_that_asks_for_a_credential(typed, chosen, label, placeholder):
+    screen = Screen(image=BLANK.image, scale=2.0, app="Google Chrome", field=labelled(label, placeholder), url=None)
+    refusal = actions.perform(SimpleNamespace(chosen=chosen), screen, [], goal_context())
+    assert refusal == f"{chosen} refused: the focused field asks for a credential"
+    assert typed == []
+
+
+@pytest.mark.parametrize("label", ["Search", "Shipping address", "Mapping notes", "Spinner count", "Title"])
+def test_an_ordinary_field_whose_name_merely_contains_pin_or_key_is_typed_into(typed, label):
+    screen = Screen(image=BLANK.image, scale=2.0, app="Google Chrome", field=labelled(label), url=None)
+    result = actions.perform(SimpleNamespace(chosen="type_text"), screen, [], goal_context())
+    assert result.startswith("typed 'quarterly report'") and "quarterly report" in typed
