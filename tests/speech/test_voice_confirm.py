@@ -298,3 +298,33 @@ def test_a_window_is_one_use_even_when_two_answers_race():
     for t in threads:
         t.join(WAIT)
     assert sum(1 for p in winners if p is not None) == 1
+
+
+def test_two_threads_starting_turns_at_once_both_stay_in_the_list():
+    """audit2 finding 6: `_start` (loop thread) and `confirm` (UI thread) lost a turn from `_turns`."""
+    loop = VoiceLoop.__new__(VoiceLoop)
+    barrier = threading.Barrier(2)
+
+    class Slow:
+        """A live earlier turn whose liveness check is where the two callers overlap."""
+
+        def is_alive(self):
+            try:
+                barrier.wait(0.3)
+            except threading.BrokenBarrierError:
+                pass  # serialised by a lock: the other caller cannot be here at the same time
+            return True
+
+    earlier = SimpleNamespace(thread=Slow())
+    loop._turns = [earlier]
+    loop._turns_lock = threading.Lock()
+    hold = threading.Event()
+    loop._work = lambda turn: hold.wait(WAIT)  # a running worker, so it is not filtered out as finished
+    turns = [SimpleNamespace(thread=None), SimpleNamespace(thread=None)]
+    callers = [threading.Thread(target=loop._start, args=(t,)) for t in turns]
+    for c in callers:
+        c.start()
+    for c in callers:
+        c.join(WAIT)
+    hold.set()
+    assert all(t in loop._turns for t in turns)

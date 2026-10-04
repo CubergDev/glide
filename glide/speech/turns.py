@@ -353,6 +353,7 @@ class VoiceLoop:
         self._commands: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._turn: _Turn | None = None
         self._turns: list[_Turn] = []
+        self._turns_lock = threading.Lock()  # `_start` runs on the loop thread and, from `confirm`, on the UI's
         self._merging = 0  # frames of quiet left in the merge window; 0 when not merging
         self._output_faults = 0  # how many the person has been told of: once is enough
         self._skip_tail = False  # an overlong utterance was discarded: what is left of it is not a request
@@ -696,8 +697,9 @@ class VoiceLoop:
 
     def _start(self, turn: _Turn, target: Callable[[_Turn], None] | None = None) -> None:
         turn.thread = threading.Thread(target=target or self._work, args=(turn,), name="glide-voice-turn", daemon=True)
-        self._turns = [t for t in self._turns if t.thread is not None and t.thread.is_alive()] + [turn]
-        turn.thread.start()
+        with self._turns_lock:
+            self._turns = [t for t in self._turns if t.thread is not None and t.thread.is_alive()] + [turn]
+            turn.thread.start()  # inside the lock: another caller must not see this turn not yet alive and drop it
 
     def _end_turn(self) -> None:
         turn, self._turn = self._turn, None
