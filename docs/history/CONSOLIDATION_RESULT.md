@@ -1,3 +1,5 @@
+> **Historical document (4 October 2026).** This is the review's own report, written before any integration was done. It describes the workspace as it was then, not as it is now: statements such as "not started", "not yet" or "no integration has been done" are out of date, and the paths it names for the old layout may not exist. Current documents: [README](../../README.md) (what Glide is and how to run it), [ARCHITECTURE](../ARCHITECTURE.md) (how it is built), [DECISIONS](../DECISIONS.md) (decisions D0-D18 and their status), [LIVE_CHECKS](../LIVE_CHECKS.md) (what only a person can verify) and [CURRENT](../../CURRENT.md) (one-screen status). The rules in [AGENTS.md](../../AGENTS.md) always apply.
+
 # Consolidation result
 
 Date: 4 Oct 2026. Status: **review and decisions complete; integration not started.** The final Mac and Windows source batches (944 files) were supplied after the review and are **not reviewed**. The plan for the next agent is in `HANDOFF.md`.

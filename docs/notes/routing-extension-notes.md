@@ -36,5 +36,5 @@ the request path**. This note lists only what the single router could reuse. Not
 ## Open for the router work
 
 Where the boundary between a quick spoken answer and the frontier "reason" route sits was never defined by the
-user (HANDOFF section 5); this extension does not answer it either. An offline routing evaluation set remains the
+user (`docs/history/HANDOFF.md` section 5); this extension does not answer it either. An offline routing evaluation set remains the
 way to tune it.

@@ -1,3 +1,5 @@
+> **Historical document (4 October 2026).** This is the task text the consolidation started from. It describes the workspace as it was then, not as it is now: statements such as "not started", "not yet" or "no integration has been done" are out of date, and the paths it names for the old layout may not exist. Current documents: [README](../../README.md) (what Glide is and how to run it), [ARCHITECTURE](../ARCHITECTURE.md) (how it is built), [DECISIONS](../DECISIONS.md) (decisions D0-D18 and their status), [LIVE_CHECKS](../LIVE_CHECKS.md) (what only a person can verify) and [CURRENT](../../CURRENT.md) (one-screen status). The rules in [AGENTS.md](../../AGENTS.md) always apply.
+
 # Consolidation task
 
 Merge the current workspace and every supplied local variant into one coherent, working Glide implementation. Preserve all useful capabilities, configurations, tests and documentation. Compare every variant, resolve overlapping implementations, and remove stale duplication only after retaining useful information.
