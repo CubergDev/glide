@@ -227,16 +227,25 @@ def test_the_codes_an_error_carries_are_kept_but_a_bool_is_not_one_and_a_string_
 # -- the runtime snapshot ------------------------------------------------------------------------------------------------
 
 
-def test_the_runtime_lists_glide_settings_and_never_a_credential_or_another_variable(monkeypatch):
-    monkeypatch.setenv("GLIDE_MODE", "quiet")
+def test_the_runtime_lists_the_names_of_glide_settings_never_a_value_nor_another_variable(monkeypatch):
+    # A value cannot be known to be harmless (glide.toml lets any capitals-only name hold a provider key), so only the
+    # NAMES of GLIDE_* variables are reported: a key under a harmless-looking name cannot leak through this snapshot.
+    monkeypatch.setenv("GLIDE_MODE", "quiet-value")
+    monkeypatch.setenv("GLIDE_ACME", "sk-live-0123456789abcdef")
     monkeypatch.setenv("GLIDE_API_KEY", "should-not-be-listed")
     monkeypatch.setenv("UNRELATED_SETTING", "nope")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-other-0123456789")
     monkeypatch.setattr("sys.argv", ["/some/where/glide", "--flag"])
     runtime = d._runtime()
     assert runtime["entrypoint"] == "glide"
-    assert {k: v for k, v in runtime["settings"].items() if k in {"GLIDE_MODE", "GLIDE_API_KEY", "UNRELATED_SETTING"}} == {
-        "GLIDE_MODE": "quiet"
-    }
+    settings = runtime["settings"]
+    assert isinstance(settings, list) and settings == sorted(settings)
+    assert {"GLIDE_MODE", "GLIDE_ACME", "GLIDE_API_KEY"} <= set(settings)
+    assert all(name.startswith("GLIDE_") for name in settings)
+    rendered = json.dumps(runtime)
+    for value in ("quiet-value", "sk-live-0123456789abcdef", "should-not-be-listed", "nope", "sk-other-0123456789"):
+        assert value not in rendered
+    assert "UNRELATED_SETTING" not in rendered and "OPENAI_API_KEY" not in rendered
     assert "httpx" in runtime["packages"] and runtime["python"] and runtime["platform"]
     monkeypatch.setattr("sys.argv", [""])
     assert d._runtime()["entrypoint"] == ""
