@@ -574,7 +574,12 @@ class Assistant:
             return False
 
     def _ask_user(self, task: ComputerTask, question: str, language: str | None) -> None:
-        """A task has a question for the user, on the task's thread: show it and say it. The task waits for `answer_pending`."""
+        """A task has a question for the user, on the task's thread: show it and say it. The task waits for `answer_pending`.
+
+        A task that was stopped between its own check and this call has no question any more: showing it would leave a
+        stale question on screen that nothing is waiting on."""
+        if task.stop_requested:
+            return
         self.io.show(question)
         speaker = self._speaker_or_none()
         if speaker is not None:

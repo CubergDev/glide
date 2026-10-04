@@ -520,6 +520,19 @@ def test_a_correction_that_outlasts_the_wait_for_the_dropped_task_is_told_it_is_
         assert first.wait(WAIT)
 
 
+def test_a_question_from_a_task_stopped_a_moment_ago_is_not_shown_or_said(tmp_path):
+    # PR9-4175419795: a stop between the task's own check and the callback used to leave a stale question on screen
+    rig = build(tmp_path, llm=llm_of(Model()))
+    task = ComputerTask("g", act=False, config=object(), folder=tmp_path)
+    rig.assistant._ask_user(task, "Which one?", None)
+    assert rig.shown == ["Which one?"]  # the control case: a live task's question is shown
+    rig.shown.clear()
+    task.stop()
+    rig.assistant._ask_user(task, "Which other one?", None)
+    rig.assistant.wait_idle(WAIT)
+    assert rig.shown == [] and "Which other one?" not in spoken(rig)
+
+
 def test_by_default_a_task_never_asks(tmp_path, asking):
     rig = assistant_that_asks(tmp_path, [COMPUTER], clarify=False)
     reply = rig.assistant.handle_text("open the file", wait=False)
