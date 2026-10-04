@@ -220,9 +220,11 @@ class PetCore:
     def send_text(self, text: str) -> bool:
         """Handle a typed request on a worker thread. False when there is nothing to send or it is too long."""
         text = text.strip()
-        if not text or len(text) > MAX_TEXT or self._closed:
+        if not text or len(text) > MAX_TEXT:
             return False
         assistant = self._assistant()
+        if assistant is None:  # closed: no assistant is made for a window that is gone
+            return False
         self._emit("transcript", role="user", text=text, partial=False)
         threading.Thread(target=self._handle_text, args=(assistant, text, self.act), name="glide-pet-turn", daemon=True).start()
         return True
@@ -382,9 +384,11 @@ class PetCore:
 
     # -- plumbing --------------------------------------------------------------------------------
 
-    def _assistant(self) -> PetAssistant:
-        """Where a typed request goes: the voice session's assistant while one runs, else the text one."""
+    def _assistant(self) -> PetAssistant | None:
+        """Where a typed request goes: the voice session's assistant while one runs, else the text one. None once closed."""
         with self._lock:
+            if self._closed:
+                return None
             if self._voice is not None:
                 return self._voice.assistant
             if self._text is None:

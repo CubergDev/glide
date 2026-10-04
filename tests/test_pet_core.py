@@ -376,6 +376,19 @@ def test_the_assistant_factory_passes_on_whatever_options_the_voice_stack_gives_
     core.close()
 
 
+def test_nothing_is_created_for_a_typed_request_once_the_core_is_closed(tmp_path):
+    """PR15-4175586927: `send_text` checked `_closed` outside the lock and then asked `_assistant()`, which never rechecked, so a
+    close in between left a fresh assistant that nothing tracked or stopped."""
+    core, _ = make_core(tmp_path)
+    made = []
+    original = core._make_assistant
+    core._make_assistant = lambda *a, **kw: (made.append(1), original(*a, **kw))[1]
+    core.close()
+    assert core._assistant() is None and made == []
+    assert core.send_text("hello") is False and made == [] and core._text is None
+    core.drain()
+
+
 def test_closing_twice_is_harmless(tmp_path):
     core, config = make_core(tmp_path)
     core.close()
