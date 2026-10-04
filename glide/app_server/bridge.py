@@ -304,6 +304,9 @@ class AppBridge:
         with self._lock:
             self._thinking_until = 0.0
         command = (GOAL_PREFIX_ACT if act else GOAL_PREFIX_LOOK) + goal
+        if len(command) > wire.MAX_COMMAND_CHARS:  # the person approves what they can read: never a cut-off of what runs
+            self._warn("That request is too long to approve in full, so it was not run. Say it shorter.")
+            return False
         return server.approvals.ask("input" if act else "screen", command)
 
     # -- reading the assistant ----------------------------------------------------------------------
