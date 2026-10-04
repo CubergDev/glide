@@ -561,3 +561,15 @@ def test_an_output_fault_is_said_once_and_without_content():
     r.device.on_frame = lambda left: setattr(r.device, "output_faults", max(0, 4 - left))  # 0, 1, 2, 3: only ever more
     run(r)
     assert r.warned == ["The speaker reported a problem; Glide's speech may have been cut off or garbled."]
+
+
+def test_a_loop_that_ends_on_its_own_says_so_to_its_owner_and_one_that_is_stopped_does_not():
+    told = []
+    r = rig([QUIET, DeviceFault("Microphone overflow")], ScriptedSTT([]))
+    r.loop.on_failure = told.append
+    r.loop.run()
+    assert told == ["Microphone overflow"]
+    r = rig([QUIET, QUIET], ScriptedSTT([]))
+    r.loop.on_failure = told.append
+    r.loop.run()  # the script ends and stops the loop, as stop() would
+    assert told == ["Microphone overflow"]

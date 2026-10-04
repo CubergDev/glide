@@ -285,6 +285,7 @@ class PetCore:
             with self._lock:
                 registered = not self._abandoned(epoch)
                 if registered:
+                    loop.on_failure = lambda _message: self._voice_ended(loop)
                     loop.start()  # under the lock: a stop cannot fall between the check and the first frame
                     self._voice = loop
         except Exception as exc:  # AudioUnavailable, ConfigError, VadError: each says what is missing and never a key
@@ -358,6 +359,17 @@ class PetCore:
             threading.Thread(target=self._end_voice, args=(voice,), name="glide-pet-stop", daemon=True).start()
             self._emit("mic", open=False, detail="stopped")
         return voice
+
+    def _voice_ended(self, loop) -> None:
+        """The loop ended on its own (a device fault; the loop has already said why): the microphone is closed, in the view
+        too, and the slot is free, so the next start builds a new session instead of resuming a dead one."""
+        with self._lock:
+            if self._voice is not loop:
+                return  # already stopped, or replaced
+            self._voice_epoch += 1
+            self._voice = None
+        threading.Thread(target=self._end_quietly, args=(loop,), name="glide-pet-stop", daemon=True).start()
+        self._emit("mic", open=False, detail="failed")
 
     def _end_voice_now(self) -> None:
         self._pop_voice()

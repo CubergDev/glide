@@ -369,6 +369,7 @@ class VoiceLoop:
         self._local = threading.local()
         self._thread: threading.Thread | None = None
         self.failure: str | None = None
+        self.on_failure: Callable[[str], None] | None = None  # told, on the loop's thread, when listening ended on its own
         self._io = assistant.io
         # with `act`, a request to use the machine runs as a dry run until the person says the phrase (approval.py)
         self._approval = (
@@ -475,6 +476,8 @@ class VoiceLoop:
         self._assistant.io.warn(message)
         with contextlib.suppress(Exception):
             self._device.pause_input()
+        if self.on_failure is not None:
+            self.on_failure(message)
 
     def _note_output_faults(self) -> None:
         """The speaker had trouble (an underflow): what was said may have been cut or garbled. Said once, never counted aloud."""

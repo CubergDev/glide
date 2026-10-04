@@ -266,6 +266,7 @@ class FakeLoop:
     def __init__(self, assistant) -> None:
         self.assistant = assistant
         self.calls: list[str] = []
+        self.on_failure = None  # set by the pet, called by a real loop when it ends on its own
 
     def start(self):
         self.calls.append("start")
@@ -454,6 +455,39 @@ def test_a_stop_during_the_build_is_known_to_the_stack_before_it_opens_the_micro
     core.start_voice()  # a later session is ready
     assert wait_until(lambda: len(asked) == 2 and core.voice_active)
     assert asked == [False, True]
+    core.close()
+
+
+def test_a_voice_loop_that_ends_on_its_own_closes_the_microphone_in_the_view_and_frees_the_slot(tmp_path):
+    """PR15-4175491828: nothing watched the loop thread, so a device fault left the view saying the microphone was live and
+    start_voice resumed a dead loop."""
+    core, _, built = voice_core(tmp_path)
+    core.start_voice()
+    events_until(core, lambda es: ("mic", "") in types(es))
+    loop = built[0].loop
+    core.drain()
+    loop.on_failure("Microphone overflow; the incomplete command was discarded.")
+    assert wait_until(lambda: loop.calls[-1:] == ["stop"])
+    assert not core.voice_active
+    assert [e.data for e in core.drain() if e.type == "mic"] == [{"open": False, "detail": "failed"}]
+    view = PetView()
+    view.apply(PetEvent("mic", {"open": True}))
+    view.apply(PetEvent("mic", {"open": False, "detail": "failed"}))
+    assert not view.mic
+    core.start_voice()  # a new session is built, not the dead one resumed
+    assert wait_until(lambda: len(built) == 2 and core.voice_active)
+    assert "resume" not in loop.calls
+    core.close()
+
+
+def test_a_failure_of_a_loop_that_was_already_replaced_or_stopped_is_ignored(tmp_path):
+    core, _, built = voice_core(tmp_path)
+    core.start_voice()
+    events_until(core, lambda es: ("mic", "") in types(es))
+    core.stop()
+    core.drain()
+    built[0].loop.on_failure("late")
+    assert core.drain() == []
     core.close()
 
 
