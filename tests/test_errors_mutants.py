@@ -94,12 +94,31 @@ def _status_error(code: int, headers: dict[str, str]) -> httpx.HTTPStatusError:
 
 @pytest.mark.parametrize(
     ("header", "expected"),
-    [("7", 7.0), ("2.5", 2.5), ("1.2.3", None), ("Wed, 21 Oct 2026 07:28:00 GMT", None), ("", None), ("-3", None)],
+    [
+        ("7", 7.0),
+        ("2.5", 2.5),
+        ("1.2.3", None),
+        ("not a date at all", None),
+        ("inf", None),
+        ("nan", None),
+        ("", None),
+        ("-3", 0.0),  # a negative wait is no wait, never a negative sleep
+        ("Wed, 21 Oct 2015 07:28:00 GMT", 0.0),  # a date already past is no wait
+    ],
 )
 def test_retry_after_is_read_when_it_is_a_number_and_never_raises_when_it_is_not(header, expected):
     error = from_exception(_status_error(429, {"retry-after": header}), provider="p")
     assert isinstance(error, ProviderError) and error.kind == "rate_limit"
     assert error.retry_after == expected
+
+
+def test_retry_after_given_as_an_http_date_is_the_seconds_until_that_date_and_never_negative():
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    soon = format_datetime(datetime.now(UTC) + timedelta(seconds=120), usegmt=True)
+    error = from_exception(_status_error(429, {"retry-after": soon}), provider="p")
+    assert error.retry_after is not None and 100 <= error.retry_after <= 120
 
 
 def test_an_http_status_error_without_retry_after_has_none():
