@@ -8,15 +8,21 @@ documentation may name a vendor as an example. Any other string is code and is c
 Rules (the `rule` of a finding):
 
 - `model-id`: claude-*, gpt-*, gemini-*, deepseek-*, llama, mistral, qwen, grok, o1/o3/o4 style, vendor/model slugs,
-  ElevenLabs `scribe_*` and `eleven_*` model ids, `jev-*`.
+  ElevenLabs `scribe_*` and `eleven_*` model ids, `jev-*`, and any non-empty string assigned to a model-named field
+  (`model`, `DEFAULT_MODEL`, `model_id`), because a new vendor's id matches none of the patterns.
 - `endpoint`: a URL or bare hostname that names a vendor API (a known vendor domain, or an `api.`, `auth.`, `login.`
-  ... host), or any URL with a path. A plain site address such as `https://github.com/` is a destination, not an
-  endpoint, and passes. Loopback and reserved hosts pass. Wire paths an adapter appends to a configured base
+  ... host), or any URL with a path, or any URL whose host is an IP address. A plain site address such as
+  `https://github.com/` is a destination, not an endpoint, and passes. Loopback, documentation-range addresses and the
+  RFC 2606 / 6761 test names (`.test`, `.example`, `.invalid`, `.localhost`) pass; `.local` and `.internal` do not, since
+  those resolve to real services. Wire paths an adapter appends to a configured base
   (`/chat/completions`, `/v1/messages`) are the adapter's protocol, not a hard-coded endpoint, and are not checked.
 - `oauth`: issuer, authorize, token and JWKS URLs, `.well-known` paths, scopes, and OAuth client ids and secrets.
-- `price`: a price per token or per million tokens, in text or as a number assigned to a price-like name.
+- `price`: a price per token or per million tokens, in text or as a number (or constant arithmetic such as
+  `3 / 1_000_000`) assigned to a price-like name.
 - `voice-id`: a literal voice id, or a non-empty string assigned to a voice-like name or parameter default.
-- `secret`: something shaped like an API key. Such a finding never prints the value.
+- `secret`: something shaped like an API key, or a non-empty string assigned to a credential-named field (`api_key`,
+  `token`, `password`, `secret`, `access_key`; not `api_key_env`, which holds a variable's name). Such a finding never
+  prints the value.
 
 Exceptions are explicit and listed below, each with a reason, and nothing is allowlisted silently:
 
@@ -35,6 +41,7 @@ To add an exception, add an `Exception_` with a reason a reviewer can judge. Do 
 from __future__ import annotations
 
 import ast
+import ipaddress
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -101,14 +108,19 @@ _MODEL_RE = re.compile("(?:" + "|".join(f"(?:{p})" for p in _MODEL_PATTERNS) + r
 _O_SERIES_WHOLE = re.compile(r"o[1-9]", re.IGNORECASE)  # the whole string is "o1", "o3", ...
 
 _HOST = r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}"
+_IP_HOST = r"\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]"
 _URL_RE = re.compile(
-    rf"(?<![\w.@/-])(?P<scheme>(?:https?|wss?)://)?(?P<host>{_HOST})(?::\d+)?(?P<path>/[^\s\"'<>)\]}}]*)?(?![\w-])",
+    rf"(?<![\w.@/-])(?P<scheme>(?:https?|wss?)://)?(?P<host>{_HOST}|{_IP_HOST})(?::\d+)?(?P<path>/[^\s\"'<>)\]}}]*)?(?![\w-])",
     re.IGNORECASE,
 )
 # Without a scheme only these endings count as a hostname, so "self.io" and "os.path" are not mistaken for one.
 _BARE_TLDS = frozenset({"com", "ai", "io", "net", "org", "dev", "app", "cloud", "xyz"})
 _LOCAL_HOSTS = frozenset({"localhost", "localhost.localdomain"})
-_RESERVED_SUFFIXES = (".local", ".localhost", ".invalid", ".test", ".example", ".internal")
+# Written out, not `is_private` / `is_reserved`, whose answers have changed between Python patch releases.
+_DOCUMENTATION_NETS = tuple(
+    ipaddress.ip_network(net) for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
+)
+_RESERVED_SUFFIXES = (".localhost", ".invalid", ".test", ".example")  # not .local or .internal: real LAN names
 _RESERVED_DOMAINS = ("example.com", "example.org", "example.net")
 VENDOR_DOMAINS = (
     "openai.com",
@@ -162,7 +174,10 @@ _VOICE_ID_WHOLE = re.compile(r"[A-Za-z0-9]{20,22}")  # ElevenLabs voice ids look
 
 # Names whose string (or number) value is vendor configuration. Anchored so that `voice_env` or `client_id_env`
 # (an environment variable's name) are not caught.
-_VOICE_NAME = re.compile(r"(?:^|_)voice(?:_?ids?)?s?$", re.IGNORECASE)
+_VOICE_NAME = re.compile(r"(?:^|_)voice(?:_?(?:ids?|names?))?s?$", re.IGNORECASE)
+_MODEL_NAME = re.compile(r"(?:^|_)models?(?:_?ids?)?$", re.IGNORECASE)
+# A credential's value, not the name of the environment variable that holds it (`api_key_env` does not end this way).
+_SECRET_NAME = re.compile(r"(?:^|_)(?:api_?key|secret|password|passwd|token|access_?key|private_?key)$", re.IGNORECASE)
 _OAUTH_NAME = re.compile(
     r"(?:^|_)(?:client_?(?:id|secret)|issuer|authori[sz](?:e|ation)_(?:url|uri|endpoint)|token_(?:url|uri|endpoint)"
     r"|auth_url|jwks(?:_url|_uri)?|(?:oauth_)?scopes?)$",
@@ -177,6 +192,14 @@ _PRICE_NAME = re.compile(
 def _classify_url(match: re.Match[str]) -> str | None:
     """A token for the matched URL or hostname if it names a vendor endpoint, else None."""
     scheme, host, path = match.group("scheme"), match.group("host").lower(), match.group("path") or ""
+    if host[0].isdigit() or host[0] == "[":  # an IP literal; without a scheme it is a version number, not an address
+        try:
+            address = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            return None
+        if not scheme or address.is_loopback or address.is_unspecified or any(address in n for n in _DOCUMENTATION_NETS):
+            return None
+        return match.group(0).rstrip(".,;:")
     tld = host.rsplit(".", 1)[-1]
     if not scheme and tld not in _BARE_TLDS:
         return None
@@ -235,6 +258,9 @@ def _leaves(value: ast.AST | None) -> Iterator[ast.Constant]:
         return
     if isinstance(value, ast.Constant):
         yield value
+    elif isinstance(value, ast.BinOp | ast.UnaryOp):
+        if (number := _fold(value)) is not None:
+            yield ast.copy_location(ast.Constant(number), value)
     elif isinstance(value, ast.Dict):
         for item in value.values:
             yield from _leaves(item)
@@ -254,6 +280,36 @@ def _leaves(value: ast.AST | None) -> Iterator[ast.Constant]:
         and len(value.args) >= 2
     ):
         yield from _leaves(value.args[1])
+
+
+def _fold(node: ast.AST) -> int | float | None:
+    """The number a constant arithmetic expression (`3 / 1_000_000`, `-15.0`) stands for; None for anything else."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, int | float) and not isinstance(node.value, bool) else None
+    try:
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
+            inner = _fold(node.operand)
+            return None if inner is None else -inner if isinstance(node.op, ast.USub) else inner
+        if isinstance(node, ast.BinOp):
+            left, right = _fold(node.left), _fold(node.right)
+            if left is None or right is None:
+                return None
+            match node.op:
+                case ast.Add():
+                    return left + right
+                case ast.Sub():
+                    return left - right
+                case ast.Mult():
+                    return left * right
+                case ast.Div():
+                    return left / right
+                case ast.FloorDiv():
+                    return left // right
+                case ast.Pow() if abs(right) <= 64:
+                    return left**right
+    except ArithmeticError:  # division by zero, overflow
+        pass
+    return None
 
 
 def _target_name(target: ast.AST) -> str | None:
@@ -310,10 +366,16 @@ def scan_source(source: str, path: str) -> list[Hit]:
             if id(leaf) in skip:
                 continue
             if isinstance(leaf.value, str) and leaf.value.strip():
+                value = leaf.value.strip()
+                withheld = f"{name} = <value withheld>"
                 if _VOICE_NAME.search(name):
-                    add("voice-id", f"{name} = {leaf.value.strip()!r}", leaf.lineno)
-                if _OAUTH_NAME.search(name):
-                    add("oauth", f"{name} = {leaf.value.strip()!r}", leaf.lineno)
+                    add("voice-id", f"{name} = {value!r}", leaf.lineno)
+                if _OAUTH_NAME.search(name):  # a client id is public; a client secret is never printed
+                    add("oauth", withheld if _SECRET_NAME.search(name) else f"{name} = {value!r}", leaf.lineno)
+                elif _SECRET_NAME.search(name):
+                    add("secret", withheld, leaf.lineno)
+                if _MODEL_NAME.search(name):
+                    add("model-id", value, leaf.lineno)
             elif isinstance(leaf.value, int | float) and not isinstance(leaf.value, bool) and leaf.value:
                 if _PRICE_NAME.search(name):
                     add("price", f"{name} = {leaf.value!r}", leaf.lineno)
@@ -348,6 +410,19 @@ def reconcile(hits: Iterable[Hit], exceptions: Iterable[Exception_]) -> list[str
 # Legitimate literals that stay. Empty today. A fixed trust anchor (for example the Google JWKS URL a webhook
 # verifier pins) goes here with the reason it must be a constant and why configuration would be unsafe.
 ALLOWLIST: tuple[Exception_, ...] = (
+    Exception_(
+        "glide/computer/execution/dom.py",
+        "secret",
+        "SECRET = <value withheld>",
+        "A regular expression, injected into the page script, that recognises password-like field names so their values are "
+        "never read. It holds no credential.",
+    ),
+    Exception_(
+        "glide/routing/decision.py",
+        "model-id",
+        "stop_model",
+        "WHY_STOP_MODEL is a routing reason code that says the stop came from the model, not the id of any model.",
+    ),
     Exception_(
         "glide/computer/config.py",
         "endpoint",
@@ -567,6 +642,13 @@ def test_a_bare_o_series_id_is_caught_only_as_a_whole_string(model):
         "http://models.internal.corp.com/v1/chat/completions",
         "https://models.acme-host.com/some/path",
         "https://console.typesafe.ai/",
+        "https://model-host.local/v1",  # mDNS names resolve to real LAN services
+        "https://models.internal/v1",
+        "https://34.1.2.3/v1",
+        "http://10.0.0.5:8080/v1/chat",
+        "http://169.254.169.254/latest/meta-data",
+        "https://[2001:4860:4860::8888]/v1",
+        "wss://34.1.2.3:443/stream",
     ],
 )
 def test_endpoints_are_caught(text):
@@ -596,6 +678,70 @@ def test_oauth_named_assignments_are_caught():
     assert "oauth" in _rules('SCOPES = ("read", "write")\n')
 
 
+def test_an_oauth_secret_is_caught_and_never_printed():
+    value = "opaque-Zx9-secret-value"
+    hits = scan_source(f"client_secret = {value!r}\n", "glide/x.py")
+    assert {h.rule for h in hits} == {"oauth"}
+    assert value not in "".join(str(h) for h in hits)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'API_KEY = "opaque-value-123"\n',
+        'password = "hunter2hunter2"\n',
+        'call(api_key="opaque-value-123")\n',
+        'def connect(token="opaque-value-123"): ...\n',
+        'conf = {"access_key": "opaque-value-123"}\n',
+        'self.auth_token = "opaque-value-123"\n',
+        'SECRET = "opaque-value-123"\n',
+        'api_key = options.get("api_key", "opaque-value-123")\n',
+    ],
+)
+def test_credentials_assigned_to_key_named_fields_are_caught_and_never_printed(source):
+    hits = scan_source(source, "glide/x.py")
+    assert {h.rule for h in hits} == {"secret"}
+    assert "opaque-value-123" not in str(hits) and "hunter2hunter2" not in str(hits)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'API_KEY_ENV = "OPENAI_API_KEY"\n',
+        'token_env = "GLIDE_TOKEN"\n',
+        'api_key = ""\n',
+        "api_key = None\n",
+        "token = next(tokens)\n",
+        'def f(api_key: str | None = None, password=""): ...\n',
+        'x = {"token_count": "12"}\n',
+    ],
+)
+def test_key_named_fields_that_hold_no_credential_are_not_flagged(source):
+    assert scan_source(source, "glide/x.py") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'DEFAULT_MODEL = "vendor-new"\n',
+        'call(model="custom-v2")\n',
+        'def f(model_id="custom-v2"): ...\n',
+        'cfg = {"model": "custom-v2"}\n',
+        'model = options.get("model", "custom-v2")\n',
+    ],
+)
+def test_model_named_fields_are_caught_whatever_the_id_looks_like(source):
+    assert "model-id" in _rules(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ['MODEL_ENV = "GLIDE_MODEL"\n', 'model = ""\n', "model = None\n", "def f(model: str | None = None): ...\n"],
+)
+def test_model_named_fields_that_name_no_model_are_not_flagged(source):
+    assert scan_source(source, "glide/x.py") == []
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -606,10 +752,29 @@ def test_oauth_named_assignments_are_caught():
         'HELP = "costs $3 per million tokens"\n',
         'HELP = "$0.25/1M tokens"\n',
         "def f(price_per_token=0.000003): ...\n",
+        "PRICE_PER_TOKEN = 3 / 1_000_000\n",
+        "price_in = 1.5 * 2\n",
+        "PRICE_OUT = -(15.0)\n",
+        "price_in = 3 * 10**-6\n",
+        "RATES = {'price_in': 3 / 1e6}\n",
     ],
 )
 def test_prices_are_caught(source):
     assert "price" in _rules(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "price_cents = price * 100\n",
+        "price = 0 / 5\n",
+        "price = 1 / 0\n",
+        "price = count + 1\n",
+        "price = 2 ** 100\n",
+    ],  # a huge power is not a price
+)
+def test_arithmetic_that_is_not_a_constant_price_is_not_flagged(source):
+    assert scan_source(source, "glide/x.py") == []
 
 
 @pytest.mark.parametrize(
@@ -623,6 +788,9 @@ def test_prices_are_caught(source):
         'voices = {"en": "abc", "fr": "def"}\n',
         'voice = options.get("voice", "alloy")\n',
         'voice = chosen or "alloy"\n',
+        'DEFAULT_VOICE_NAME = "Samantha"\n',
+        'voice_names = ["Samantha"]\n',
+        'def speak(voice_name="Samantha"): ...\n',
     ],
 )
 def test_voice_ids_are_caught(source):
@@ -698,6 +866,17 @@ def test_only_the_docstring_position_is_skipped():
         "cost = 2\n",
         'price_text = "free"\n',
         "tokens = 1000\n",
+        'URL = "http://[::1]:8080/v1"\n',
+        'URL = "http://0.0.0.0:8000"\n',
+        'URL = "https://192.0.2.1/v1"\n',  # documentation ranges (RFC 5737, RFC 3849)
+        'URL = "http://198.51.100.7:9000/v1"\n',
+        'URL = "http://203.0.113.9/v1"\n',
+        'URL = "http://[2001:db8::1]/v1"\n',
+        'URL = "https://model-host.test/v1"\n',
+        'URL = "http://svc.localhost:8000/v1"\n',
+        'VERSION = "34.1.2.3"\n',  # no scheme: a version number, not an address
+        'VERSION = "1.2.3.4"\n',
+        'VOICE_NAME_ENV = "GLIDE_VOICE_NAME"\n',
     ],
 )
 def test_ordinary_code_is_not_flagged(source):
