@@ -488,12 +488,6 @@ D6_DEBT: tuple[Exception_, ...] = (
     Exception_(
         "glide/providers/stt.py",
         "model-id",
-        "scribe_v2",
-        "DEFAULT_BATCH_MODEL is a default model id in the adapter; D6 wants it in configuration.",
-    ),
-    Exception_(
-        "glide/providers/stt.py",
-        "model-id",
         "scribe_v2_realtime",
         "DEFAULT_REALTIME_MODEL is a default model id in the adapter; D6 wants it in configuration.",
     ),

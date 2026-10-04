@@ -50,10 +50,9 @@ BATCH_PATH = "/v1/speech-to-text"  # POST, multipart/form-data
 REALTIME_PATH = "/v1/speech-to-text/realtime"  # websocket; https becomes wss, http becomes ws
 AUTH_HEADER = "xi-api-key"  # the key goes here and nowhere else, never into the URL
 
-# Fallbacks only, used when the configuration names no model. The batch endpoint and the realtime socket
-# take different model ids, so the configured one is mapped: "scribe_v2_realtime" drives the socket and
+# A fallback only, used when the configuration names no model. The batch endpoint and the realtime socket
+# take different model ids, so the configured one is mapped: an id ending in "_realtime" drives the socket and
 # its batch twin is the same id without the suffix, and the other way round.
-DEFAULT_BATCH_MODEL = "scribe_v2"
 DEFAULT_REALTIME_MODEL = "scribe_v2_realtime"
 REALTIME_SUFFIX = "_realtime"
 
