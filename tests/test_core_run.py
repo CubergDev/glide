@@ -102,6 +102,28 @@ def test_a_model_that_fails_before_any_write_is_not_uncertain(monkeypatch, tmp_p
     assert state.outcome == "provider failure" and not state.uncertain and state.readback == "not needed"
 
 
+def test_an_event_listener_that_fails_never_costs_the_run_its_verification(monkeypatch, tmp_path):
+    # PR4-4175590955: 'progress' is emitted right after a write was dispatched; a broken pipe there must not crash the run
+    events = []
+
+    def broken_pipe(event):
+        events.append(event.kind)
+        raise BrokenPipeError("the terminal went away")
+
+    world = one_page()
+    world.install(monkeypatch)
+    classifier = FakeTypeSafe(scripted(("scroll_down", None), ("done", None)))
+    state = runner.run(
+        RunConfig("Find", tmp_path, act=True, delay=0),
+        lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
+        control=RunControl("task", broken_pipe),
+    )
+    assert state.outcome == "done" and len(state.history) == 1
+    assert world.ticks == 2 and "progress" in events  # the screen was captured again after the action
+    assert events[0] == "accepted" and events[-1] == "completed"  # and the listener was still told how it ended
+
+
 def test_a_stop_during_a_re_decision_after_a_writer_focus_dispatches_nothing_more(monkeypatch, tmp_path):
     control = RunControl("task")
     calls = []

@@ -157,7 +157,14 @@ class RunControl:
         return outcome.result()
 
     def event(self, kind: str, text: str = "", **kwargs) -> None:
-        self.emit(TaskEvent(self.task_id, kind, text, **kwargs))
+        """Report to whoever listens. A listener that fails (a terminal whose pipe closed) never takes the run with it:
+        the 'progress' event is sent right after a write, and a crash there would skip the check of what the write did."""
+        try:
+            self.emit(TaskEvent(self.task_id, kind, text, **kwargs))
+        except Exception as error:
+            from . import diagnostics
+
+            diagnostics.event("event_sink_failed", kind=kind, error=type(error).__name__)
 
 
 _CURRENT: contextvars.ContextVar[RunControl | None] = contextvars.ContextVar("run_control", default=None)
