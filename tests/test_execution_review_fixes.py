@@ -159,3 +159,71 @@ def test_an_existing_page_on_another_host_or_path_does_not_satisfy_a_url_milesto
     )
     go = Action("navigate", here.identity, value=milestone.value)
     assert effect(milestone, go, here, here)  # the redirect to www is still accepted once a navigation was dispatched
+
+
+def test_a_satisfied_milestone_then_a_write_with_one_step(monkeypatch, tmp_path):
+    """PR10-4175602709: the satisfied URL is recorded without an action, then the one step is the write."""
+    computer = Computer()
+    planner = Reasoner(
+        [
+            response(
+                Milestone("here", "Be on the page", "url", value="https://example.org"),
+                Milestone("tabs", "Open a tab", "tab_created", value="https://example.net"),
+            )
+        ]
+    )
+    state = drive(monkeypatch, tmp_path, computer, planner, steps=1)
+    assert state.outcome == "done" and [a.kind for a in computer.actions] == ["tab_create"]
+
+
+def test_an_invalid_budget_is_still_written_to_run_json(monkeypatch, tmp_path):
+    """PR10-4175602711: a run refused before it starts leaves a report saying so."""
+    state = drive(monkeypatch, tmp_path / "out", Computer(), Reasoner([]), steps=0)
+    assert state.outcome == "blocked"
+    report = json.loads((tmp_path / "out" / "run.json").read_text())
+    assert (
+        report["outcome"] == "blocked"
+        and report["failure_code"] == "invalid_budget"
+        and "Invalid execution budget" in report["failure"]
+    )
+
+
+def test_a_failing_close_neither_skips_the_backend_nor_crashes_a_finished_run(monkeypatch, tmp_path):
+    """PR10-4175625126: ledger.close() raising still closes the backend, and the run's state is returned."""
+    computer = Computer()
+    original = Ledger.close
+
+    def broken(self):
+        original(self)
+        raise sqlite3.ProgrammingError("close failed")
+
+    monkeypatch.setattr(Ledger, "close", broken)
+    state = drive(
+        monkeypatch,
+        tmp_path,
+        computer,
+        Reasoner([response(Milestone("nav", "Reach", "url", value="https://example.net"))]),
+    )
+    assert state.outcome == "done" and computer.closed and (tmp_path / "run.json").exists()
+
+
+def test_a_page_with_hundreds_of_controls_still_offers_its_search_form():
+    """PR10-4175413700: the choice limit applies to the filtered actions of a query milestone."""
+    from glide.computer.execution import policy
+    from glide.computer.execution.query import QueryForm
+
+    buttons = {f"b{i}": Element(f"b{i}", f"Button {i}", "button") for i in range(300)}
+    field = Element("q", "Search", "searchbox", "", True, search=True)
+    form = QueryForm("f", "q", "https://example.org/search", "q", ())
+    obs = Observation(
+        "browser",
+        "doc:1",
+        "https://example.org/",
+        "t",
+        {"t": "https://example.org/"},
+        {**buttons, "q": field},
+        forms={"f": form},
+        capabilities={"inspect", "click", "type", "key", "navigate"},
+    )
+    found = policy.candidates(Milestone("m", "Search", "query_submitted", target="Search", value="cats"), obs)
+    assert any(a.parameter_source.startswith("form:") for a in found)

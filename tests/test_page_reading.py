@@ -162,3 +162,10 @@ def test_the_script_is_one_fixed_expression_built_from_the_same_limits():
 )
 def test_the_script_only_reads(forbidden):
     assert not re.search(forbidden, PAGE_SCRIPT), "the page reader must stay read-only"
+
+
+def test_the_reader_skips_text_whose_element_or_ancestor_is_fully_transparent():
+    """PR12-4175598279: opacity:0 text and links are not visible, so they are not evidence. The script is fixed text
+    that only a browser can run, so this pins what it checks."""
+    assert "getComputedStyle(el).opacity==='0'" in PAGE_SCRIPT
+    assert "faded(el.parentElement)" in PAGE_SCRIPT and "&& !faded(el)" in PAGE_SCRIPT

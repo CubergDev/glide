@@ -66,6 +66,17 @@ def _flat(value):
     return " ".join(value.split())
 
 
+def _spoken(text):
+    """What is said aloud: the sentence without any address (the written answer keeps them)."""
+    return _flat(ADDRESS.sub("", text))
+
+
+def _names(address, url):
+    """True when `address`, as ADDRESS matched it, is the whole of the known `url`: equal, or cut at a character the
+    pattern cannot match."""
+    return url == address or (url.startswith(address) and ADDRESS.fullmatch(url[: len(address) + 1]) is None)
+
+
 class Supervisor:
     def __init__(self, goal, route, budget, *, tools, search_url=""):
         self.goal, self.route, self.tools, self.search_url = goal, route, tools, search_url
@@ -73,7 +84,8 @@ class Supervisor:
         self.calls = 0
         self.sources = [{"id": REQUEST, "origin": "request", "title": "User request", "url": "", "text": goal, "links": []}]
         self.completed = []
-        self.replies = []
+        self.replies = []  # question + "\nUser: " + reply, as the model sees the exchange
+        self.answers = []  # the user's replies alone: the only part of an exchange that can authorise an address
         self.feedback = ""
         self.browser_goal = ""
         self.batch_ids = set()
@@ -137,6 +149,7 @@ class Supervisor:
         checkpoint()
         reply = _text(reply, 2000, required=True)
         self.replies.append(question + "\nUser: " + reply)
+        self.answers.append(reply)
         return reply
 
     # -- what the model is shown -------------------------------------------------------------------------------
@@ -238,7 +251,10 @@ class Supervisor:
         if not page["text"].strip():
             self.feedback = "The current page returned no readable text. Open another relevant source or report the access limit."
             return
-        if any(s["url"] == page["url"] and s["text"] == page["text"] for s in self.sources):
+        if known := next((s for s in self.sources if s["url"] == page["url"] and s["text"] == page["text"]), None):
+            # The same text can carry different anchors; their destinations still become known (and nothing else changes).
+            new = [link for link in page["links"] if link not in known["links"]]
+            known["links"].extend(new)
             self.feedback = "This exact page content has already been collected; use it or visit a different source."
             return
         page["id"], page["origin"] = f"s{len(self.sources)}", "page"
@@ -260,7 +276,7 @@ class Supervisor:
         """Every destination research may open: the user's own words, the search page, what is open, what was read."""
         candidates = {
             *self.tools.urls_in(self.goal),
-            *(u for reply in self.replies for u in self.tools.urls_in(reply)),
+            *(u for reply in self.answers for u in self.tools.urls_in(reply)),
             self.search_url,
             observed.url,
             *observed.tabs.values(),
@@ -313,7 +329,7 @@ class Supervisor:
             raise InvalidAction("The research model returned an empty answer.")
         research = self.route != "reason"
         sources = {s["id"]: s for s in self.sources}
-        used, rendered, spoken = [], [], []
+        used, rendered, spoken, statements = [], [], [], []
         for claim in data["claims"]:
             if not isinstance(claim, dict) or set(claim) != {"text", "citations"}:
                 raise InvalidAction("The research model returned an invalid claim.")
@@ -336,28 +352,31 @@ class Supervisor:
                     used.append(identity)
                 refs.append(str(used.index(identity) + 1))
             rendered.append(statement + (" [" + ", ".join(dict.fromkeys(refs)) + "]" if refs else ""))
-            spoken.append(statement)
+            spoken.append(_spoken(statement))
+            statements.append(statement)
         if research and not any(sources[k]["origin"] == "page" for k in used):
             raise InvalidAction("This research task needs evidence from a page that was actually read.")
         if data["limitations"]:
             rendered.append("Limitations: " + data["limitations"])
-            spoken.append("Limitations: " + data["limitations"])
+            spoken.append(_spoken("Limitations: " + data["limitations"]))
+            statements.append(data["limitations"])
         if research:
-            self.check_addresses(spoken)
+            self.check_addresses(statements)
         for i, identity in enumerate(used, 1):
             source = sources[identity]
             # Citation addresses always come from the adapter, never generated answer text.
             location = source["url"] if source["origin"] == "page" else "User-provided text"
-            rendered.append(f"[{i}] {_flat(source['title'])} — {location}")
+            title = ADDRESS.sub("[address removed]", _flat(source["title"]))  # a page's title is not an address we vouch for
+            rendered.append(f"[{i}] {title} — {location}")
         return Answer("\n\n".join(rendered), True, spoken_text=" ".join(spoken))
 
     def check_addresses(self, passages):
         """A research answer may name only addresses of pages that were read, or links seen on them."""
         known = {url.casefold() for url in self.read_urls() | {link["url"] for s in self.sources for link in s["links"]}}
-        # Letter case is not a different address, and a prefix is enough: a pattern that stops at a closing bracket
-        # cuts such an address short. A different scheme or host is still a different address.
+        # Letter case is not a different address. The pattern stops at a character an address may contain (a closing
+        # bracket, a quote), so a shorter match is accepted only when the known address continues with that character.
         named = (address.rstrip(".,;:!?").casefold() for passage in passages for address in ADDRESS.findall(passage))
-        if any(not any(url.startswith(address) for url in known) for address in named):
+        if any(not any(_names(address, url) for url in known) for address in named):
             raise InvalidAction("The research answer named an address that was not read.")
 
     def finish(self, writer, data, packet):

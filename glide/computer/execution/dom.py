@@ -53,6 +53,7 @@ DOCUMENT_CHANGED = (
     "Inspected target navigated or closed",
     "request deadline exceeded",
 )
+ISOLATED_WORLD = "glide"
 KEYS = {
     "return": ("Enter", 13),
     "escape": ("Escape", 27),
@@ -89,13 +90,24 @@ LABEL = (
     "||{0}.getAttribute('title')||{0}.id||{0}.tagName).trim().slice(0,160)"
 )
 SECRET = "/password|one.?time|otp|cvv|card number|api[ _-]?key|secret|token/i"
+# What the page itself declares a field to be (autocomplete) counts as much as what it is labelled.
+SECRET_KIND = r"/(^|\s)(one-time-code|cc-[a-z-]+|current-password|new-password)(\s|$)/i"
+# The successful controls of a form, read from its elements. `new FormData(form)` would fire the page's own
+# `formdata` listeners during what must stay a passive read.
+FORM_VALUES = (
+    "(f=>[...f.elements].filter(c=>c.name&&!c.matches(':disabled')&&!['OUTPUT','OBJECT'].includes(c.tagName)"
+    "&&!['file','submit','button','image','reset'].includes(c.type)&&(!['checkbox','radio'].includes(c.type)||c.checked))"
+    ".flatMap(c=>c.tagName==='SELECT'?[...c.selectedOptions].map(o=>[c.name,o.value]):[[c.name,c.value]]))"
+)
 
-SNAPSHOT = r"""(() => {
+SNAPSHOT = (
+    r"""(() => {
   if (!window.__glideNodes) window.__glideNodes = {ids:new WeakMap(),refs:new Map(),next:0};
   const s=window.__glideNodes;
   const id=el=>{if(!s.ids.has(el))s.ids.set(el,String(++s.next));const k=s.ids.get(el);s.refs.set(k,el);return k;};
   const visible=el=>{const r=el.getBoundingClientRect(),st=getComputedStyle(el);return r.width>0&&r.height>0&&st.display!=='none'&&st.visibility!=='hidden';};
   const label=el=>__LABEL__;
+  const secretField=el=>el.type==='password'||__SECRET_KIND__.test(el.getAttribute('autocomplete')||'')||__SECRET__.test(label(el));
   const disclosure=el=>{
     if(el.tagName==='SUMMARY'&&el.parentElement?.tagName==='DETAILS')return {expanded:el.parentElement.open,controls:[id(el.parentElement)]};
     if(!['A','BUTTON'].includes(el.tagName)&&el.getAttribute('role')!=='button')return {};
@@ -116,7 +128,7 @@ SNAPSHOT = r"""(() => {
     if(items.length>=160) break; if(!visible(el))continue;
     const r=el.getBoundingClientRect(); if(r.top<0||r.bottom>innerHeight||r.left<0||r.right>innerWidth)continue;
     const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);if(hit!==el&&!el.contains(hit))continue;
-    const secret=el.type==='password'||__SECRET__.test(label(el));
+    const secret=secretField(el);
     items.push({id:id(el),label:label(el),role:el.getAttribute('role')||el.tagName.toLowerCase(),
       typeable:!el.readOnly&&el.matches('input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]),textarea,[contenteditable=true]'),secret,
       enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.matches('[role=status],[role=alert],[role=dialog]'),
@@ -134,9 +146,11 @@ SNAPSHOT = r"""(() => {
     containers.push({id:id(el),label:label(el),position:el.scrollTop,maximum:el.scrollHeight-el.clientHeight});
   }
   const focused=document.activeElement,focus=focused?id(focused):'';
-  if(focused&&!items.some(e=>e.id===focus)&&focused.matches('input,textarea,[contenteditable=true]')) {
-    const secret=focused.type==='password'||__SECRET__.test(label(focused));
-    items.push({id:focus,label:label(focused),role:'textbox',typeable:false,secret,enabled:false,
+  // A frame or a shadow host hides what has the focus: it is reported as a secret field, so no key goes into it.
+  const opaque=!!focused&&(['IFRAME','FRAME'].includes(focused.tagName)||!!focused.shadowRoot);
+  if(focused&&!items.some(e=>e.id===focus)&&(opaque||focused.matches('input,textarea,[contenteditable=true]'))) {
+    const secret=opaque||secretField(focused);
+    items.push({id:focus,label:label(focused),role:opaque?'frame':'textbox',typeable:false,secret,enabled:false,
       value:secret?null:(focused.value??focused.innerText),x:0,y:0,shortcuts:[]});
   }
   const forms=[];
@@ -144,10 +158,10 @@ SNAPSHOT = r"""(() => {
     if(forms.length>=32)break;
     if(form.method.toLowerCase()!=='get')continue;
     const fields=[...form.elements];
-    if(fields.some(e=>e.type==='password'||__SECRET__.test((e.name||'')+' '+label(e))))continue;
+    if(fields.some(e=>secretField(e)||__SECRET__.test(e.name||'')))continue;
     const editable=fields.filter(e=>(e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&['text','search','email','url','tel','number'].includes(e.type)))&&e.name&&!e.disabled&&!e.readOnly);
     if(editable.length!==1||!items.some(i=>i.id===s.ids.get(editable[0])&&i.typeable&&i.enabled&&!i.secret))continue;
-    const field=editable[0], values=[...new FormData(form)].filter(([k,v])=>k!==field.name&&typeof v==='string');
+    const field=editable[0], values=__FORM_VALUES__(form).filter(([k,v])=>k!==field.name);
     if(values.length>32||values.some(([k,v])=>k.length>128||v.length>2048))continue;
     forms.push({id:id(form),field:id(field),action:form.action,parameter:field.name,values});
   }
@@ -155,8 +169,12 @@ SNAPSHOT = r"""(() => {
     id:id(el),label:label(el),paused:el.paused,ended:el.ended,ready_state:el.readyState,current_time:el.currentTime}));
   const keep=new Set([...items.map(e=>e.id),...items.flatMap(e=>e.controls||[]),...containers.map(c=>c.id),...forms.map(f=>f.id),...media.map(m=>m.id),focus]);
   for(const [key,node] of s.refs)if(!node.isConnected||!keep.has(key))s.refs.delete(key);
-  return {url:location.href,canonical_url:document.querySelector('link[rel~="canonical"][href]')?.href||'',document_id:String(performance.timeOrigin),items,containers,forms,media,focus,ready:document.readyState!=='loading'};
-})()""".replace("__LABEL__", LABEL.format("el")).replace("__SECRET__", SECRET)
+  return {url:location.href,canonical_url:document.querySelector('link[rel~="canonical"][href]')?.href||'',document_id:String(performance.timeOrigin),items,containers,forms,media,focus,ready:document.readyState!=='loading',foreground:document.visibilityState!=='hidden'};
+})()""".replace("__LABEL__", LABEL.format("el"))
+    .replace("__SECRET_KIND__", SECRET_KIND)
+    .replace("__SECRET__", SECRET)
+    .replace("__FORM_VALUES__", FORM_VALUES)
+)
 # After input, wait (bounded) for the page to paint its reaction before the next snapshot; a combobox gets longer.
 SETTLE = (
     "(() => new Promise(resolve => {const e=window.__glideNodes?.refs.get(__FIELD__);"
@@ -168,11 +186,14 @@ SETTLE = (
     "if(++frames>=2&&(!combo||options.some(o=>{const r=o.getBoundingClientRect();return r.width>0&&r.height>0&&r.top<innerHeight&&r.bottom>0})))finish();"
     "else requestAnimationFrame(check)};requestAnimationFrame(check)}))()"
 )
-DOCUMENT = "({url:location.href,document_id:String(performance.timeOrigin),ready:document.readyState!=='loading'})"
+DOCUMENT = (
+    "({url:location.href,document_id:String(performance.timeOrigin),ready:document.readyState!=='loading',"
+    "foreground:document.visibilityState!=='hidden'})"
+)
 FORM_GUARD = (
     "(p=>{const f=window.__glideNodes?.refs.get(p.form),e=window.__glideNodes?.refs.get(p.field);"
     "if(!f?.isConnected||!e?.isConnected||e.form!==f||e.disabled||e.readOnly||f.method.toLowerCase()!=='get'||f.action!==p.action||e.name!==p.parameter)throw Error('changed form');"
-    "const values=[...new FormData(f)].filter(([k,v])=>k!==e.name&&typeof v==='string');"
+    "const values=" + FORM_VALUES + "(f).filter(([k,v])=>k!==e.name);"
     "if(JSON.stringify(values)!==JSON.stringify(p.values))throw Error('changed values');})(__DETAILS__)"
 )
 CLICK_GEOMETRY = (
@@ -189,7 +210,7 @@ CLICK_HIT = (
 TYPE_GUARD = (
     "const label=" + LABEL.format("e") + ";"
     "if(label!==__EXPECTED__||e.disabled||e.type==='password'||e.getAttribute('aria-disabled')==='true'"
-    "||" + SECRET + ".test(label))throw Error('unavailable');"
+    "||" + SECRET_KIND + ".test(e.getAttribute('autocomplete')||'')||" + SECRET + ".test(label))throw Error('unavailable');"
 )
 
 
@@ -212,7 +233,11 @@ def on_element(target: str, body: str) -> str:
 class BrowserBackend:
     transport = "cdp"
     passive_inspection = True
-    suppress_origin = False
+    suppress_origin = True  # Chrome refuses any Origin header the launch flags did not allow; a client without one is accepted
+    # The fixed scripts run in an isolated world of their own, so a page that replaces its own prototypes or `window`
+    # properties cannot answer the staleness, hit-test and credential guards. A provider whose bridge cannot run in a
+    # given context says so by turning this off.
+    isolated_world = True
 
     def __init__(self, endpoint, target=""):
         try:
@@ -224,6 +249,7 @@ class BrowserBackend:
     def _initialize(self, target):
         """Common observed-page state, independent of browser/session transport."""
         self.owned_tab = target == "new"
+        self.deselected = False  # the selected tab was closed: the next one is chosen explicitly, never adopted
         self.target = "" if self.owned_tab else target
         self.browser = self.page = None
         self.page_id = ""
@@ -264,15 +290,22 @@ class BrowserBackend:
         )
 
     def check(self):
-        """Whether the provider can be reached: a passive connection, no tab opened and nothing sent to a page."""
+        """Whether the provider can be reached and still has the tab it was told to use: a passive connection and a
+        read of the tab list, no tab opened and nothing sent to a page."""
         self.connect()
+        try:
+            listed = self.targets() if self.target else {}
+        except (CDPError, OSError, websocket.WebSocketException) as error:
+            raise BrowserConnectionError(self.transport, self.origin, error) from error
+        if self.target and self.target not in listed:
+            raise DesktopError("The selected browser tab is not open; choose a fresh target")
 
     def attach(self):
         if self.page_id != self.target:
             if self.page:
                 self.page.close()
             attached = self.browser.call("Target.attachToTarget", {"targetId": self.target, "flatten": True})
-            self.page = AttachedPage(self.browser, attached["sessionId"])
+            self.page = AttachedPage(self.browser, attached["sessionId"], isolated=self.isolated_world)
             self.page_id = self.target
 
     def connection_lost(self, error):
@@ -327,12 +360,17 @@ class BrowserBackend:
         try:
             self.connect()
             targets = self.targets()
-            if not targets or (self.owned_tab and not self.target):
+            if not targets or (not self.target and (self.owned_tab or self.deselected)):
                 self.target = ""
+                # No page is selected. An owned-tab task sees none of the user's tabs; after a close, the remaining
+                # ones are listed so one can be switched to. A working inventory is what proves a tab is gone.
+                tabs = {} if self.owned_tab else {k: v.get("url", "") for k, v in targets.items()}
                 return Observation(
                     "browser",
                     self.origin,
-                    capabilities={"inspect", "tab_create", "navigate", "query_form"},
+                    tabs=tabs,
+                    capabilities={"inspect", "tab_create", "tab_close", "navigate", "query_form"}
+                    | ({"tab_switch"} if tabs else set()),
                     available_after_navigation=BROWSER_CAPABILITIES.copy(),
                 )
             self._select_target(targets)
@@ -430,6 +468,7 @@ class BrowserBackend:
             media={m["id"]: Media(**m) for m in data.get("media", [])},
             navigation=navigation,
             canonical_url=data.get("canonical_url", "") if safe_url(data.get("canonical_url", "")) else "",
+            foreground=bool(data.get("foreground", True)),
         )
 
     # -- writes: never retried ----------------------------------------------------------------------------------
@@ -487,12 +526,13 @@ class BrowserBackend:
             return self.target if action.kind == "tab_create" else receipt
         if action.kind == "tab_switch":
             self.browser.call("Target.activateTarget", {"targetId": action.target})
-            self.target = action.target
+            self.target, self.deselected = action.target, False
             return self.target
         if action.kind == "tab_close":
             self.browser.call("Target.closeTarget", {"targetId": action.target})
             if self.target == action.target:
-                self.target = next(iter(self.targets()), "")
+                # Which of the tabs left comes next is a choice: none is adopted (that could be a tab of the user's).
+                self.target, self.deselected = "", True
             return action.target
         if action.kind == "navigate":
             return self._navigate_action(action, observed)
@@ -554,19 +594,33 @@ class BrowserBackend:
 class AttachedPage:
     """A flattened page session sharing the existing browser websocket."""
 
-    def __init__(self, browser, session_id):
-        self.browser, self.session_id = browser, session_id
+    def __init__(self, browser, session_id, *, isolated=False):
+        self.browser, self.session_id, self.isolated = browser, session_id, isolated
+        self.context = None  # the isolated world's execution context in the current document
 
     def call(self, method, params=None):
         return self.browser.call(method, params, session_id=self.session_id)
 
+    def _world(self):
+        """The isolated world of the page's top frame, made again after every navigation (it dies with the document)."""
+        if not self.isolated:
+            return {}
+        if self.context is None:
+            frame = self.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+            self.context = self.call("Page.createIsolatedWorld", {"frameId": frame, "worldName": ISOLATED_WORLD})[
+                "executionContextId"
+            ]
+        return {"contextId": self.context}
+
     def evaluate(self, expression, *, await_promise=False):
         try:
             result = self.call(
-                "Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": await_promise}
+                "Runtime.evaluate",
+                {"expression": expression, "returnByValue": True, "awaitPromise": await_promise, **self._world()},
             )
         except CDPError as error:
             if any(marker in str(error) for marker in DOCUMENT_CHANGED):
+                self.context = None
                 raise PageEvaluationError(
                     {"text": "Execution context changed during evaluation", "protocol_error": str(error)}
                 ) from error

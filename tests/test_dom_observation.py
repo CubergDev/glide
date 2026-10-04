@@ -14,7 +14,7 @@ import pytest
 
 from glide.computer.control import RunControl, checkpoint, controlled
 from glide.computer.execution import dom
-from glide.computer.execution.contracts import Action, Element, Observation
+from glide.computer.execution.contracts import Action, Element, InvalidAction, Observation, validate
 from glide.computer.models import Abort, DesktopError
 
 URL = "https://example.org/start"
@@ -36,6 +36,10 @@ class FakeBrowser:
             return {"targetInfos": [{"type": "page", "targetId": t, "url": u} for t, u in self.tabs.items()]}
         if method == "Target.attachToTarget":
             return {"sessionId": "session-" + params["targetId"]}
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "main"}}}
+        if method == "Page.createIsolatedWorld":
+            return {"executionContextId": 7}
         if method == "Runtime.evaluate":
             if self.evaluate:
                 return {"result": {"value": self.evaluate(params["expression"])}}
@@ -140,7 +144,14 @@ def test_inspection_connects_attaches_and_reads_without_creating_anything():
     browser = FakeBrowser()
     backend = backend_on(browser)
     backend.inspect()
-    assert browser.methods == ["Target.getTargets", "Target.attachToTarget", "Runtime.evaluate"]
+    # The page's scripts run in an isolated world (PR11-4175603646): made once, before the first evaluation.
+    assert browser.methods == [
+        "Target.getTargets",
+        "Target.attachToTarget",
+        "Page.getFrameTree",
+        "Page.createIsolatedWorld",
+        "Runtime.evaluate",
+    ]
     assert browser.calls[-1][2] == "session-tab"  # the page session, not the browser one
     backend.inspect()
     assert browser.methods.count("Target.attachToTarget") == 1  # attached once
@@ -270,7 +281,7 @@ def test_a_click_is_checked_against_the_observed_label_and_the_point_before_it_i
     ]
 
 
-def test_a_tab_is_created_empty_then_navigated_and_closing_the_selected_one_selects_another():
+def test_a_tab_is_created_empty_then_navigated_and_closing_the_selected_one_selects_none():
     browser = FakeBrowser(tabs={"tab": URL, "other": "https://example.net"})
     backend = backend_on(browser, target="")
     backend.target = "tab"
@@ -281,7 +292,10 @@ def test_a_tab_is_created_empty_then_navigated_and_closing_the_selected_one_sele
     assert backend.navigation.requested_url == "https://example.net/new" and backend.target == "created"
     after = Observation("browser", "tab:doc", URL, "tab", dict(browser.tabs), capabilities={"tab_close"})
     backend.execute(Action("tab_close", after.identity, "created"), after)
-    assert backend.target == "tab" and "created" not in browser.tabs  # another open tab, not the closed one
+    # PR11-4175573503: no other open tab is adopted (it could be the user's); the next read lists what is left.
+    assert backend.target == "" and "created" not in browser.tabs
+    left = backend.inspect()
+    assert left.tabs == {"tab": URL, "other": "https://example.net"} and {"tab_switch", "tab_close"} <= left.capabilities
 
 
 def test_pending_input_makes_the_next_read_wait_for_the_page_to_settle():
@@ -313,3 +327,105 @@ def test_a_page_the_selected_tab_cannot_be_read_is_not_ready_for_reading(monkeyp
     monkeypatch.setitem(sys.modules, "glide.computer.execution.reading", module)
     with pytest.raises(DesktopError, match="not ready to read"):
         backend.read_page()
+
+
+def test_closing_the_owned_tab_never_adopts_a_tab_of_the_user():
+    """PR11-4175573503: after the owned tab is closed, the next targetless navigation creates a tab again."""
+    browser = FakeBrowser(tabs={"user": "https://example.net"})
+    backend = backend_on(browser, target="new")
+    first = backend.inspect()
+    assert first.tabs == {} and backend.target == ""  # an owned-tab task does not see the user's tabs
+    obs = Observation("browser", "x", capabilities={"navigate", "tab_close"})
+    backend.execute(Action("navigate", obs.identity, value="https://example.org/a"), obs)
+    assert backend.target == "created"
+    shown = Observation("browser", "x", URL, "created", {"created": URL, "user": "x"}, capabilities={"tab_close"})
+    backend.execute(Action("tab_close", shown.identity, "created"), shown)
+    assert backend.target == ""
+    after = backend.inspect()
+    assert after.tabs == {} and "tab_close" in after.capabilities  # nothing of the user's, and the close can be proved
+    backend.execute(Action("navigate", after.identity, value="https://example.org/b"), after)
+    assert [m for m in browser.methods].count("Target.createTarget") == 2 and "user" in browser.tabs
+
+
+def test_the_selected_tab_must_still_be_open_for_the_provider_check_to_pass():
+    """PR11-4175634934: a reachable endpoint without the configured tab is unavailable, so a fallback can take over."""
+    backend = backend_on(FakeBrowser(tabs={"other": URL}), target="gone")
+    with pytest.raises(DesktopError, match="not open"):
+        backend.check()
+    backend_on(FakeBrowser(tabs={"gone": URL}), target="gone").check()
+    backend_on(FakeBrowser(tabs={"x": URL}), target="").check()
+
+
+def test_a_hidden_selected_tab_is_not_the_foreground_tab():
+    """PR11-4175634941: a tab_active milestone is not met by a background tab that was merely selected."""
+    from glide.computer.execution.contracts import Milestone, effect
+
+    backend = backend_on(FakeBrowser(snapshot={"foreground": False}))
+    hidden = backend.inspect()
+    assert hidden.foreground is False and hidden.active_tab == "tab"
+    step = Milestone("m", "Show it", "tab_active", target="tab")
+    assert effect(step, None, hidden, hidden) == ""
+    assert effect(step, None, backend_on(FakeBrowser()).inspect(), backend_on(FakeBrowser()).inspect())
+    assert "document.visibilityState" in dom.SNAPSHOT and "document.visibilityState" in dom.DOCUMENT
+
+
+def test_a_field_the_page_declares_a_one_time_code_or_card_number_is_secret():
+    """PR11-4175634950: autocomplete is consulted by the snapshot and by the type guard, not only the label."""
+    assert "getAttribute('autocomplete')" in dom.SNAPSHOT and "one-time-code" in dom.SNAPSHOT
+    assert dom.SNAPSHOT.count("secretField(") >= 3  # items, the focused field, and the form scan
+    assert "one-time-code" in dom.TYPE_GUARD and "cc-" in dom.TYPE_GUARD
+
+
+def test_a_focused_frame_or_shadow_host_is_reported_as_a_secret_field():
+    """PR11-4175634952: the field inside cannot be seen, so no key may go to it (the key guard refuses a secret focus)."""
+    assert "'IFRAME','FRAME'" in dom.SNAPSHOT and "focused.shadowRoot" in dom.SNAPSHOT
+    assert "const secret=opaque||secretField(focused)" in dom.SNAPSHOT
+    secret = item("f1", "Payment", "frame", secret=True, enabled=False)
+    obs = backend_on(FakeBrowser(snapshot={"items": [secret], "focus": "f1"})).inspect()
+    assert obs.elements["f1"].secret
+    with pytest.raises(InvalidAction, match="credential"):
+        validate(Action("key", obs.identity, value="a"), obs)
+
+
+def test_reading_a_form_does_not_construct_form_data():
+    """PR11-4175426275: `new FormData(form)` fires the page's `formdata` listeners during a passive read."""
+    assert "FormData" not in dom.SNAPSHOT and "FormData" not in dom.FORM_GUARD
+    assert ":disabled" in dom.FORM_GUARD and "c.checked" in dom.SNAPSHOT
+
+
+def test_every_script_runs_in_the_isolated_world_and_it_is_remade_after_a_navigation():
+    """PR11-4175603646: a page that patches its own prototypes or ids cannot answer the guards; the world dies with the document."""
+    browser = FakeBrowser()
+    backend = backend_on(browser)
+    backend.inspect()
+    backend.inspect(controls=False)
+    evaluations = [p for m, p, _ in browser.calls if m == "Runtime.evaluate"]
+    assert len(evaluations) == 2 and all(p["contextId"] == 7 for p in evaluations)
+    assert browser.methods.count("Page.createIsolatedWorld") == 1
+    created = [p for m, p, _ in browser.calls if m == "Page.createIsolatedWorld"]
+    assert created == [{"frameId": "main", "worldName": "glide"}]  # no universal access to the page's world
+    real = browser.call
+
+    def gone(method, params=None, *, session_id=None):
+        if method == "Runtime.evaluate" and params["contextId"] == 7:
+            raise dom.CDPError("Runtime.evaluate: Cannot find context with specified id")
+        return real(method, params, session_id=session_id)
+
+    browser.call = gone
+    with pytest.raises(dom.PageEvaluationError):
+        backend.page.evaluate("1")
+    assert backend.page.context is None  # the next read makes a fresh world
+    browser.call = real
+    backend.inspect()
+    assert browser.methods.count("Page.createIsolatedWorld") == 2
+
+
+def test_a_provider_that_cannot_use_a_context_evaluates_in_the_page_world():
+    from glide.computer.execution.obscura import ObscuraBackend
+
+    browser = FakeBrowser()
+    backend = ObscuraBackend("http://127.0.0.1:9222", "tab")
+    backend.browser = browser
+    backend.inspect()
+    assert "Page.createIsolatedWorld" not in browser.methods
+    assert all("contextId" not in p for m, p, _ in browser.calls if m == "Runtime.evaluate")

@@ -86,6 +86,18 @@ class SetupServer:
     def child_env(self) -> dict[str, str]:
         return {**self.env, **self.keys}
 
+    # Hooks a subclass (the control panel) overrides: the page, what a GET may read, and the sweep over every response.
+    def render(self) -> str:
+        return render_page(self.session, self.nonce)
+
+    def read(self, name: str, query: dict) -> dict:
+        raise model.SetupError("unknown call")
+
+    def scrub_response(self, text: str) -> str:
+        for value in self.keys.values():
+            text = text.replace(value, "[key]").replace(json.dumps(value)[1:-1], "[key]")
+        return text
+
     # -- API ------------------------------------------------------------------------------------
 
     def state(self) -> dict:
@@ -206,7 +218,7 @@ def _make_handler(app: SetupServer):
             self.wfile.write(body)
 
         def _json(self, code: int, data: dict) -> None:
-            self._send(code, json.dumps(data).encode(), "application/json")
+            self._send(code, app.scrub_response(json.dumps(data)).encode(), "application/json")
 
         def _local(self) -> bool:
             own = f"127.0.0.1:{app.port}"
@@ -225,15 +237,24 @@ def _make_handler(app: SetupServer):
             parts = urlsplit(self.path)
             if parts.path == "/api/state":
                 return self._json(200, app.state()) if self._authed() else self._json(403, {"error": "no session"})
+            if parts.path.startswith("/api/read/"):
+                if not self._authed():
+                    return self._json(403, {"error": "no session"})
+                try:
+                    return self._json(200, app.read(parts.path.removeprefix("/api/read/"), parse_qs(parts.query)))
+                except model.SetupError as e:
+                    return self._json(400, {"error": str(e)})
+                except Exception as e:
+                    return self._json(500, {"error": type(e).__name__})
             token = (parse_qs(parts.query).get("t") or [""])[0]
             if parts.path != "/" or app.spent or not hmac.compare_digest(token, app.url_token):
-                return self._json(403, {"error": "this link was already used; run glide setup again"})
+                return self._json(403, {"error": "this link was already used; run the command again"})
             app.spent = True
             csp = (
                 f"default-src 'none'; script-src 'nonce-{app.nonce}'; style-src 'nonce-{app.nonce}'; "
                 "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             )
-            page = render_page(app.session, app.nonce).encode()
+            page = app.render().encode()
             self._send(200, page, "text/html; charset=utf-8", {"Content-Security-Policy": csp})
 
         def do_POST(self):

@@ -9,6 +9,7 @@
     glide status                   the chains: slots, pins, resting slots, recent switches
     glide computer GOAL [--act]    drive the screen toward a goal (a dry run without --act); `glide-computer` too
     glide inspect [GOAL]           capture the screen and show what the classifier would be sent; `glide-inspect` too
+    glide panel [--no-open]        a local control panel: providers, chains, features, chat, files, status
     glide memory ...               local memory administration (off unless [memory] enabled = true)
     glide mcp ...                  serve Glide over MCP and show the MCP settings
     glide webhooks serve|work|reconcile ...  the webhook listener, its worker, a verdict on an uncertain run
@@ -116,6 +117,12 @@ def _doctor(config, live: bool) -> int:
     report = features.feature_report(config)
     for name, _, line in report:
         print(f"  {name:<9}{clean(line, config)}")
+    from .assistant.tasks import DEFAULT_RUNS_DIR
+
+    marker = DEFAULT_RUNS_DIR / "unresolved-write"
+    if marker.is_file():
+        print(f"\nwarning: {marker} exists: a write was sent and its effect never seen. Glide will not act again until you")
+        print("look at the screen and the run folder, then delete that file (or clear it in `glide panel`, Status).")
     return 1 if doctor.failed(rows) or not engine_ok or not all(ok for _, ok, _ in report) else 0
 
 
@@ -527,6 +534,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return setup_main(_forward(args))
 
 
+def cmd_panel(args: argparse.Namespace) -> int:
+    from .panel.cli import main as panel_main
+
+    return panel_main(_forward(args))
+
+
 def cmd_memory(args: argparse.Namespace) -> int:
     from .memory import cli as memory
 
@@ -712,6 +725,13 @@ def build_parser() -> argparse.ArgumentParser:
     passthrough(commands, "inspect", cmd_inspect, "capture the screen and show what the classifier would be sent")
     passthrough(
         commands, "setup", cmd_setup, "first-run wizard: writes glide.toml, never a key (`glide setup --text`)", config=True
+    )
+    passthrough(
+        commands,
+        "panel",
+        cmd_panel,
+        "a persistent local control panel: providers, chains, features, chat, files, status",
+        config=True,
     )
     passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)
     passthrough(commands, "mcp", cmd_mcp, "serve Glide over MCP, show the MCP settings (`glide mcp --help`)", config=True)

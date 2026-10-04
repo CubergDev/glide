@@ -206,6 +206,7 @@ class Observation:
     available_after_navigation: set[str] = field(default_factory=set)
     navigation: Navigation | None = None
     canonical_url: str = ""
+    foreground: bool = True  # the selected tab is not known to be hidden (a background tab is not the active one)
 
     def packet(self):
         return {
@@ -563,6 +564,7 @@ def effect(m: Milestone, action: Action | None, before: Observation, after: Obse
         return digest(["created", receipt])
     if (
         m.effect == "tab_active"
+        and after.foreground
         and after.active_tab in after.tabs
         and (after.active_tab == m.target or after.tabs[after.active_tab] == m.value)
     ):

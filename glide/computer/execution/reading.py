@@ -25,8 +25,10 @@ SKIPPED = 'script,style,noscript,template,input,textarea,select,[contenteditable
 _SCRIPT = r"""(() => {
   const root=document.body||document.documentElement, chunks=[], links=[];
   const skip='__SKIPPED__';
+  const clear=new WeakMap();  // an element is invisible when it or any ancestor has opacity 0
+  const faded=el=>{if(!el)return false;if(!clear.has(el))clear.set(el,getComputedStyle(el).opacity==='0'||faded(el.parentElement));return clear.get(el);};
   const visible=el=>el && !el.closest(skip) && el.getClientRects().length>0
-    && !['hidden','collapse'].includes(getComputedStyle(el).visibility);
+    && !['hidden','collapse'].includes(getComputedStyle(el).visibility) && !faded(el);
   const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
   let node, size=0, visited=0;
   while((node=walker.nextNode()) && ++visited<=__NODES__ && size<__TEXT__) {

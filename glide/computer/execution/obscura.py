@@ -12,6 +12,7 @@ class ObscuraBackend(BrowserBackend):
     # Obscura refuses browser-origin WebSockets. Its native clients omit Origin;
     # the loopback host/port checks remain identical to the CDP provider.
     suppress_origin = True
+    isolated_world = False  # not known to implement Page.createIsolatedWorld; scripts run in the page's own world
 
     def select_all(self):
         # Obscura does not implement Chromium's selectAll editor command. Select the

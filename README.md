@@ -47,6 +47,27 @@ first. A key you paste is held in the wizard's memory for the optional test and 
 anywhere. A test sends one tiny request, spends a few tokens, and only runs when you click it. The "where to get a key"
 links live in `glide/setup/keys.toml`; check the provider's site, pages move.
 
+## The control panel: `glide panel`
+
+```
+glide panel [--no-open] [--config PATH] [--idle-minutes N] [--runs DIR]
+```
+
+A local page (127.0.0.1, random port, a link that works once, then a session header; Host and Origin are checked, changes
+are POST-only, no external assets) that stays open after `glide setup`. Tabs: Providers (the built-ins plus your own
+OpenAI-compatible or classifier endpoints, key status by presence only, a Test button that spends tokens and only runs on
+a click), Roles and chains (ordered slots with free-text model ids and the chain policy, the loader's one-line error
+shown inline), Features and safety (computer control and detailed recording are OFF by default, the engine is legacy until
+you choose otherwise), Chat / Ask (the real assistant; computer tasks start as a dry run that you approve, a real run
+needs a second confirm, Stop reaches the running task, and an uncertain outcome is shown as "completion unknown; nothing
+was retried"), Files (off by default; plan, preview, approve by typing the plan hash, run, undo) and Status (offline
+doctor, last runs, and the unresolved-run marker with how to clear it after you have looked).
+
+Changes go to glide.toml only after a visible diff and a confirm; the old file is backed up first, and comments in the file
+are not kept. The panel shows whether it is editing the project-local or the user-level file. A key pasted into the page is
+held in this process's memory only and is never written or echoed. Panel-only switches live in a `[panel]` table
+(`glide/panel/settings.py`). Nothing here is a substitute for the live checks in `docs/LIVE_CHECKS.md`.
+
 ## Set up
 
 ```sh

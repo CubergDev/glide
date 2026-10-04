@@ -20,6 +20,7 @@ two names.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import sqlite3
@@ -185,7 +186,8 @@ class Execution:
         self.switches: list[SwitchEvent] = []  # browser providers replaced before the first action, in order
         # The plan and what has been used of the budgets.
         self.steps, self.revision, self.recoveries, self.questions = [], 0, 0, 0
-        self.clarifications, self.routes, self.bindings = [], [], {}
+        self.dispatches = 0  # actions sent: what `--steps` limits
+        self.clarifications, self.answers, self.routes, self.bindings = [], [], [], {}
         # The operation in progress, kept for the read-only reconciliation after a stop.
         self.operation = self.step = self.action = self.before = None
         self.receipt, self.verification_step, self.op_started = "", None, 0.0
@@ -216,7 +218,7 @@ class Execution:
             or not 1 <= cfg.research_calls <= MAX_RESEARCH_CALLS
             or not 0 <= cfg.min_confidence <= 1
         ):
-            return self._blocked_early("Invalid execution budget or readiness deadline; no action was issued.")
+            return self._blocked_early("Invalid execution budget or readiness deadline; no action was issued.", "invalid_budget")
         try:
             cfg.out.mkdir(parents=True, exist_ok=True)
             if cfg.journal:
@@ -225,7 +227,7 @@ class Execution:
                 cfg.out / "progress.sqlite3", self.control.task_id, cfg.journal / "unresolved-write" if cfg.journal else None
             )
         except (OSError, sqlite3.Error):
-            return self._blocked_early("The task journal is unavailable; no action was issued.")
+            return self._blocked_early("The task journal is unavailable; no action was issued.", "journal_unavailable")
         try:
             self._execute()
         except (Abort, KeyboardInterrupt) as error:
@@ -242,8 +244,12 @@ class Execution:
             self._report()
         return state
 
-    def _blocked_early(self, failure) -> RunState:
-        self.state.outcome, self.state.failure = "blocked", failure
+    def _blocked_early(self, failure, code) -> RunState:
+        """Refused before anything ran: still said in run.json when the output directory can be made."""
+        self.state.outcome, self.state.failure, self.failure_code = "blocked", failure, code
+        with contextlib.suppress(OSError):
+            self.cfg.out.mkdir(parents=True, exist_ok=True)
+            diagnostics.write_private(self.cfg.out / "run.json", json.dumps(diagnostics.redact(self._summary()), indent=2))
         return self.state
 
     # -- the run ----------------------------------------------------------------------------------------------
@@ -257,7 +263,7 @@ class Execution:
         with self.classifier_factory() as classifier:
             ctx = metered(self.ctx_factory(classifier, state.history), state.calls)
             scope = self._scope(ctx)
-            goal = cfg.goal + ("\n\nClarifications:\n" + "\n\n".join(self.clarifications) if self.clarifications else "")
+            goal = self._goal()
             # Analysis and authoring need no browser, CDP or desktop capture.
             observed = no_browser()
             if scope.workflow != "reason":
@@ -285,7 +291,14 @@ class Execution:
         if not reply:
             raise InvalidAction("Clarification was declined")
         self.clarifications.append(question + "\nUser: " + reply)
+        self.answers.append(reply)
         return reply
+
+    def _goal(self):
+        """The request with the exchange so far, for the models. Only the request and the replies are the user's words."""
+        goal = self.cfg.goal
+        shown = goal + ("\n\nClarifications:\n" + "\n\n".join(self.clarifications) if self.clarifications else "")
+        return grounding.Request(shown, stated="\n".join([goal, *self.answers]))
 
     def _scope(self, ctx):
         cfg = self.cfg
@@ -333,7 +346,7 @@ class Execution:
             self.supervisor = research.Supervisor(
                 cfg.goal, route, cfg.research_calls, tools=RESEARCH_TOOLS, search_url=browser_settings.current().search_url
             )
-            self.supervisor.replies = list(self.clarifications)
+            self.supervisor.replies, self.supervisor.answers = list(self.clarifications), list(self.answers)
             self.supervisor.questions = self.questions
         elif quick and not question:
             self.steps = quick
@@ -361,17 +374,27 @@ class Execution:
 
     def _loop(self, ctx, goal):
         cfg, state, ledger, supervisor = self.cfg, self.state, self.ledger, self.supervisor
-        for _ in range(cfg.steps):
+        # `--steps` limits actions sent. A pass that sends none (an effect already there, a stale target, a replan) is
+        # not an action: those passes are bounded by their own budgets (the replan limit, the stale limit, the plan's
+        # size) and, as a last net, by MAX_STEPS. A supervisor pass costs a step, as it spends a model call.
+        spent = idle = 0
+        while spent < cfg.steps and idle < MAX_STEPS:
             checkpoint()
             self.step = next((s for s in self.steps if ledger.count(s.id) < s.quantity), None)
             if self.step is None:
                 if not supervisor:
                     break
+                spent += 1
                 if self._supervise(ctx):
                     return
                 continue
+            sent = self.dispatches
             if self._advance(ctx, goal):
                 return
+            if self.dispatches > sent:
+                spent += 1
+            else:
+                idle += 1
         else:
             state.outcome = "step limit"
             state.failure = "The execution budget ended before all requested effects were verified."
@@ -582,6 +605,7 @@ class Execution:
         if is_query:
             self.bindings[step.id] = self.verification_step
         self.operation = ledger.begin(step, action)
+        self.dispatches += 1
         self.receipt = ""
         self.op_started = time.perf_counter()
         if self.first_action is None and action.kind != "inspect":
@@ -786,9 +810,12 @@ class Execution:
             except OSError:
                 state.failure += " Diagnostic output could not be saved."
         finally:
-            ledger.close()
+            # A close that fails must neither skip the other nor turn a finished run into a crash.
+            with contextlib.suppress(Exception):
+                ledger.close()
             if self.backend:
-                self.backend.close()
+                with contextlib.suppress(Exception):
+                    self.backend.close()
 
     def _summary(self) -> dict:
         cfg, state, supervisor = self.cfg, self.state, self.supervisor

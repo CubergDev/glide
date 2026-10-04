@@ -343,7 +343,7 @@ def test_a_five_token_chat_through_the_real_adapter_is_one_small_request():
     assert row.detail.endswith("reasoning_effort=low accepted")
     (request,) = seen
     body = json.loads(request.content)
-    assert body["max_tokens"] == 5 and body["messages"] == [{"role": "user", "content": "Reply with the single word: ok"}]
+    assert body["max_tokens"] == 16 and body["messages"] == [{"role": "user", "content": "Reply with the single word: ok"}]
     assert str(request.url) == "https://api.openai.com/v1/chat/completions"
     assert all(key not in str(request.url) for key in KEYS.values())  # keys go in a header, never in the URL
 
@@ -351,7 +351,7 @@ def test_a_five_token_chat_through_the_real_adapter_is_one_small_request():
 def test_a_model_that_spends_its_five_tokens_thinking_still_counts_as_reached():
     (row,) = probe_real(lambda request: completion("", finish="length"))
     assert row.status == "ok"
-    assert row.detail.startswith("reached, but the reply was cut at 5 tokens")
+    assert row.detail.startswith("reached, but the reply was cut at 16 tokens")
 
 
 def test_a_refused_reasoning_effort_is_reported_as_dropped():

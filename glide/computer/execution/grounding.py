@@ -30,7 +30,22 @@ class Literals:
     needs_plan: bool = False
 
 
+class Request(str):
+    """The request as a model is shown it, with the questions asked and the replies given. `stated` is what the user
+    wrote: the request and the replies. Only that part can name an address, a quoted text or a count."""
+
+    def __new__(cls, shown, *, stated):
+        text = super().__new__(cls, shown)
+        text.stated = stated
+        return text
+
+
+def stated(goal):
+    return getattr(goal, "stated", goal)
+
+
 def extract(goal):
+    goal = stated(goal)
     data, spans = Literals(), []
     for match in QUOTES.finditer(goal):
         spans.append(match.span())
