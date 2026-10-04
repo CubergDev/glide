@@ -18,11 +18,12 @@ over `RunControl.closing_on_cancel` and `checkpoint`, and nothing more:
   here: `test_httpx_alone_has_what_the_helper_reads` in tests/test_cancel_wire.py fails loudly, over a real loopback
   socket, the day a new httpcore moves them.
 
-What a cancel cannot reach: a request that is still being connected (DNS, TCP, TLS) has no connection in the pool
-yet, so `Call.abort` finds nothing to shut and the thread making it stays inside httpx until its connect timeout or
-until the connection arrives. Through a chain the caller is released at once all the same (chain.py runs the call on a
-thread it can abandon), and `http.open_response` closes the connection that arrives late and ends that call as the
-cancel, so nothing is sent on it and no answer is used.
+What a cancel cannot reach: a request that is still being connected (DNS, TCP, TLS) or still waiting for a free
+pool slot has no connection in the pool yet, so `Call.abort` finds nothing to shut and the thread making it stays
+inside httpx until its connect timeout or until a connection arrives. Through a chain the caller is released at once
+all the same (chain.py runs the call on a thread it can abandon). The request is not sent when the connection does
+arrive: `Call` is httpcore's `trace` hook and checks the control just before the first byte of the request is
+written, so it ends as the cancel having transmitted nothing, and no answer is used.
 
 An adapter raises only `ProviderError`, so a cancel leaves here as kind "cancelled" (errors.py). What the closed
 connection makes httpx raise afterwards is still mapped by the adapter as usual; the chain (chain.py) turns anything
@@ -86,10 +87,22 @@ def abort_response(response: httpx.Response) -> None:
 class Call:
     """One httpx request, as far as a cancel is concerned. Pass `extensions` to the request, `abort` to `closing`."""
 
-    def __init__(self, client: httpx.Client) -> None:
+    def __init__(self, client: httpx.Client, provider: str = "") -> None:
         self._client = client
         self._token = object()
-        self.extensions: dict[str, object] = {"glide_call": self._token}  # httpcore carries these to its own Request
+        self._provider = provider
+        self._control = current_control()  # the one this request belongs to, wherever httpcore runs it
+        # httpcore carries these to its own Request: the token finds the connection, `trace` is told how it is going
+        self.extensions: dict[str, object] = {"glide_call": self._token, "trace": self._trace}
+
+    def _trace(self, event: str, info: object) -> None:
+        """httpcore tells us each step it takes. Before the request line and headers go out, a cancelled request stops.
+
+        A request that waited for a pool slot or a connection gets here after the user may have stopped it; closing a
+        socket cannot help a request that had none, so this is the last point where nothing has been sent yet.
+        """
+        if event.endswith("send_request_headers.started") and self._control is not None and self._control.cancelled.is_set():
+            raise cancelled(self._provider, self._control.reason)
 
     def socket(self) -> object | None:
         """The socket of the connection that carries this request, or None when there is none yet or it cannot be found.
