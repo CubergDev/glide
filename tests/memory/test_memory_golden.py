@@ -9,6 +9,7 @@ is a behaviour change and needs a decision.
 """
 
 import asyncio
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -553,6 +554,7 @@ def test_observe_user_saves_only_direct_preference_sentences():
     text = (
         "I prefer short answers. Remember that my name is Ada.\n"
         "> I prefer quoted text\n"
+        "> Someone said hello. I prefer what is quoted here\n"
         "```\nremember that this is code\n```\n"
         "~~~\ni prefer a tilde fence\n~~~\n"
         "Please remember the milk\n"
@@ -741,6 +743,33 @@ def test_store_refusals_are_pinned():
     assert jsonable(results) == expected("store")["refusals"]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "key sk-" + "a" * 20,
+        "key sk-proj-" + "a" * 20,
+        "AKIA" + "A" * 16,
+        "ASIA" + "B" * 16,
+        "ghp_" + "a" * 24,
+        "github_pat_" + "a" * 24,
+        "xoxb-1234567890-abcdef",
+        "Authorization: Bearer abcdefghijklmnop",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "postgres://admin:hunter22@db.internal/app",
+        "password = hunter2",
+        "api_key: abcdef",
+        "client secret=abcdef",
+        'refresh_token":"abcdef"',
+    ],
+)
+def test_every_credential_shape_the_scanner_knows_is_refused_without_echo(text):
+    with tempfile.TemporaryDirectory() as directory:
+        store = Store(Path(directory) / "state.sqlite")
+        message = refusal(lambda: store.remember(SCOPE, "k", text))
+    assert message == "ValueError: text appears to contain credentials; redact them first"
+
+
 class Clock:
     """A clock the test moves by hand, so expiry and ordering never depend on how fast the machine is."""
 
@@ -812,3 +841,23 @@ def test_events_are_scoped_trimmed_and_newest_first(monkeypatch):
         store.event(SCOPE, "fresh", {})
         view["old_rows_are_deleted_by_the_next_write"] = store._db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     assert jsonable(view) == expected("store")["events"]
+
+
+# ---- the shipped examples and the command line ------------------------------------------------------------------
+
+
+def test_the_shipped_example_catalog_loads_and_a_preview_uses_it(tmp_path):
+    import glide.memory
+    from glide.memory.cli import main as memory_cli
+
+    root = Path(glide.memory.__file__).parent / "catalog_examples"
+    catalog = Catalog(root, enabled_plugins=frozenset({"writing", "mcp-demo"}))
+    assert [skill["id"] for skill in catalog.skills()] == ["clear-writing"]
+    assert catalog.tool_ids() == frozenset({"mcp:demo/lookup"})
+
+    environ = {"GLIDE_MEMORY": "1", "GLIDE_DATA_DIR": str(tmp_path / "data")}
+    out = io.StringIO()
+    words = ["plan", "draft an email reply", "--catalog", str(root), "--plugin", "writing", "--model", "m", "--window", "5000"]
+    code = memory_cli([*words, "--stage", "write"], environ=environ, home=tmp_path, out=out, err=io.StringIO())
+    preview = json.loads(out.getvalue())
+    assert code == 0 and preview["skills"] == ["clear-writing"] and "State the main point early" in preview["context"]
