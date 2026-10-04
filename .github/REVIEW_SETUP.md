@@ -195,3 +195,10 @@ These come from the independent security review of the workflows. They are repos
 3. **Claude review is read-only on purpose.** The agent has the inline-comment tool, `gh pr view`/`gh pr diff` and
    read-only `git`; it has no `gh pr comment`, no `gh api`, no `/proc` and no `.git` access, so a prompt-injected PR
    cannot post the job's environment or token. If you add a tool, re-check that it cannot write free text.
+
+## Reviewer model and effort
+
+The Claude review runs **Opus 5.5 at high effort** on every non-fork, non-draft pull request (owner's request, 4 Oct 2026).
+The model id is the default of the repository variable `CLAUDE_REVIEW_MODEL` (workflow `claude-review.yml`): to change it,
+set that variable (Settings > Secrets and variables > Actions > Variables); no file edit is needed. Effort is `--effort high`
+in the same file. Every push to a PR re-reviews and spends subscription usage; the large stacked PRs cost the most.

@@ -140,9 +140,11 @@ jobs:
             6. Post each new finding as an inline comment with the inline comment tool. You have no other way
                to write: do not try to post a summary. If there are no findings, post nothing.
 
-          # No --model flag: model ids are configuration, never code (AGENTS.md); the action's default applies.
-          # To pin one, add `--model <id>` here from a decision recorded outside this file.
+          # The reviewer is Opus 5.5 at high effort, as the owner asked on 4 Oct 2026. The model id is configuration,
+          # not package code: it is the DEFAULT of the repository variable CLAUDE_REVIEW_MODEL, so changing the model
+          # never needs a file edit (set the variable). The value is only ever a repository variable, never PR text.
           claude_args: |
+            --model ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-opus-5-5' }}
             --effort high
             --max-turns 80
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Read,Glob,Grep,LS,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git show:*),Bash(git log:*),Bash(git blame:*)"
