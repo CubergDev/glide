@@ -139,6 +139,8 @@ class PointMode:
                 self._preview(selection)
             elif not self._open(selection, writer, question, voice, cancel):
                 selection.close()
+                if not self.holding:
+                    self._emit("closed")  # `selected` drew a pin; with no session behind it the view must not keep it
         except PointUnavailable as error:  # our own sentences: protected field, nothing under the pointer
             self._emit("error", text=str(error), closed=True)
         except Exception:  # the adapters' errors can name the screen; the person gets the fixed sentence

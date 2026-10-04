@@ -231,6 +231,18 @@ def test_a_voice_stack_that_cannot_start_leaves_no_pin_held():
     assert not rig.mode.holding and "selected" in rig.kinds()
 
 
+def test_a_voice_stack_that_cannot_start_takes_the_pin_off_the_view_too():
+    """PR15-4175491845: `selected` had drawn the pin and 'Pinned: ...', then nothing said it was gone, though `holding` was False."""
+    rig = Rig(voice=False)
+    rig.start("", share=True, voice=True)
+    rig.settle()
+    assert not rig.mode.holding and rig.kinds()[-1] == "closed"
+    view = PetView()
+    for e in rig.events:
+        view.apply(PetEvent("point", e))
+    assert view.pin is None and view.target == ""
+
+
 def test_nothing_is_written_or_logged(tmp_path, monkeypatch, caplog):
     monkeypatch.chdir(tmp_path)
     caplog.set_level(logging.DEBUG)
