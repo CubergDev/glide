@@ -62,9 +62,17 @@ speech (glide voice): microphone -> VAD -> VoiceLoop -+--> Assistant
   count a milestone only when a fresh observation shows its effect. `research` and `reason` go to the supervisor
   (`research.py`): the model plans and writes, the browser only reads and navigates, and every citation must quote a
   page read in this run. The backend comes from `providers.make_backend` (CDP, native, Obscura or Playwright CLI).
-  **Today the engine is reached only by `glide computer GOAL --engine structured`.** The assistant's computer tasks
-  (`ask`, `chat`, `listen`, `voice`) build their `RunConfig` without an engine and so use the legacy loop. The engine's
-  own `decide` and the assistant's router are two separate routers (decision D9 is open).
+  **Which engine runs is one setting, `engine` = `legacy` or `structured`, and the default is `legacy`.** One resolver
+  (`computer.config.engine`, through `features.engine_for`) reads `--engine` (on `ask`, `chat`, `listen`, `voice`,
+  `computer`, and the pet), else the app's or the pet's toggle, else `GLIDE_ENGINE`, else `[computer] engine` in
+  `glide.toml`, else `legacy`; a bad value is a one-line error. A front end puts its choice on the configuration
+  (`engine_choice`) and `ComputerTask` turns it into `RunConfig.engine` (with the `[browser]` and `[research]` settings
+  for the structured one), so every path that runs a task, webhooks included, uses the same answer. The default stays
+  `legacy` because the structured engine has not been qualified live, and the audit rated the legacy loop weaker on
+  untrusted screen text; flipping the default is the user's decision after the live checks in `docs/LIVE_CHECKS.md`.
+  `glide doctor`, the `glide computer` header, the app's settings and the pet's badge say which engine is active, and
+  `run.json` records it (never content). The engine's own `decide` and the assistant's router are two separate routers
+  (decision D9 is open).
 - **Webhooks** do not go through the assistant: the worker takes a queued `agent.task.requested` call, and only with
   `--allow-desktop`, a yes for that run, and (to click or type) `--act` plus the source's `allow_actions`, hands it to a
   `ComputerExecutor`.
