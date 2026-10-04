@@ -37,7 +37,7 @@ import websocket
 from . import interrupt
 from .base import Audio, ProviderSpec, STTClient, Transcript
 from .chain import Chain
-from .errors import ProviderError, redact, snippet, status_error
+from .errors import ProviderError, safe_text, snippet, status_error
 from .http import streaming, translate
 
 # ---------------------------------------------------------------------------------------------------
@@ -230,10 +230,23 @@ def is_error_event(kind: str) -> bool:
     return kind in ERROR_EVENT_KINDS or kind.endswith("_error")
 
 
-def error_for_event(event: Event, provider: str, key: str = "") -> ProviderError:
-    """The error for a server error event. The event's text may quote the key, which is cut out."""
+def _texts(value: object) -> Iterator[str]:
+    """Every string in a configured option (a keyterms list, say), for a reply that quotes the session's setup."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _texts(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _texts(item)
+
+
+def error_for_event(event: Event, provider: str, key: str = "", configured: object = None) -> ProviderError:
+    """The error for a server error event. The event's text may quote the key, a long token or the session's
+    configured options (`configured`); those are cut out."""
     kind = ERROR_EVENT_KINDS.get(event.type, UNKNOWN_ERROR_KIND)
-    said = snippet(redact(event.error, [key], "***"))
+    said = snippet(safe_text(event.error, [key], _texts(configured), "***"))
     return ProviderError(f"{provider} reported {event.type}: {said}".rstrip(": "), kind=kind, provider=provider)
 
 
@@ -331,6 +344,7 @@ class _HTTPAdapter:
                     provider=self.name,
                     headers=response.headers,
                     secrets=[self._key],
+                    request_texts=list(_texts(data)),  # a free-text `prompt` field, or any other string sent
                     mark="***",
                 )
             try:
@@ -609,7 +623,7 @@ class _Run:
             except queue.Empty:
                 break
             if isinstance(item, Event) and is_error_event(item.type):
-                return error_for_event(item, self.client.name, self.client._key)
+                return error_for_event(item, self.client.name, self.client._key, self.client._realtime_params)
             if isinstance(item, (_Closed, _Broken)):
                 break
         return _socket_error(self.client.name, exc)
@@ -656,7 +670,7 @@ class _Run:
             raise _socket_error(name, item.exc)
         assert isinstance(item, Event)
         if is_error_event(item.type):
-            raise error_for_event(item, name, self.client._key)
+            raise error_for_event(item, name, self.client._key, self.client._realtime_params)
         if item.type == EVENT_PARTIAL:
             self.asm.partial = item.text.strip()
             text = self.asm.text

@@ -206,6 +206,12 @@ def cut_excerpts(text: str, request_texts: Iterable[str], mark: str = "[redacted
     return "".join(out)
 
 
+def safe_text(text: str, secrets: Iterable[str] = (), request_texts: Iterable[str] = (), mark: str = "[redacted]") -> str:
+    """`text` made safe to show in an error: the secrets, long tokens and any quoted part of the request cut out."""
+    request_texts = tuple(request_texts)
+    return cut_excerpts(echoed(scrub(text, secrets, mark), request_texts, mark), request_texts, mark)
+
+
 def status_error(
     status: int,
     body: str,
