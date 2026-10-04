@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 runs/
+inspections/
 .pytest_cache/
 .ruff_cache/
 config.toml
@@ -16,3 +17,15 @@ consolidation-inputs/
 CONSOLIDATION_SESSION.json
 REVIEW_COVERAGE.json
 review-evidence/
+
+# Private runtime state: webhook queue (goals, mail excerpts) and its key, local config, recorded run files
+.glide-webhooks/
+*.sqlite3
+*.sqlite3-*
+*.sqlite3.key
+glide.toml
+webhooks.toml
+events.jsonl
+events.previous.jsonl
+diagnostic.json
+failure.md

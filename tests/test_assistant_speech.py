@@ -261,3 +261,11 @@ def test_first_audio_is_timed_from_mark():
     assert speaker.first_audio_at is None
     speaker.say("Hi.")
     assert wait_until(lambda: speaker.first_audio_at is not None)
+
+
+def test_nothing_is_said_after_close_and_the_tts_is_not_called():
+    """audit2 finding 3: a task ending after close() spoke into a closed player and called the provider."""
+    speaker, tts, _, _, _ = make_speaker()
+    speaker.close()
+    assert speaker.say("The task may have left a write half done.") is False
+    assert tts.calls == [] and speaker._lane is None

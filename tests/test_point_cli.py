@@ -17,6 +17,7 @@ from glide.assistant.point_ask import capture_point
 from glide.assistant.point_voice import PointAssistant
 from glide.computer.platform_adapter import using
 from glide.computer.writer import WriterError
+from glide.speech.settings import SpeechSettings as VoiceSettings
 
 SECRET = "selected secret and private provider body"
 
@@ -209,6 +210,8 @@ def test_a_voice_session_binds_the_pin_to_the_assistant_answers_a_spoken_questio
     out = capsys.readouterr()
     assert code == 130 and out.out.strip() == "This is error 0007. Check the connection."
     assert made["settings"].headset is True and made["settings"].silence_ms == 900 and made["act"] is False
+    # r2 seams 3: the settings are the voice stack's (config.voice), not the providers' view: build_voice reads stop_phrases
+    assert isinstance(made["settings"], VoiceSettings) and made["settings"].stop_phrases == ()
     assert isinstance(made["loop"].assistant, PointAssistant) and made["loop"].calls == ["start", "stop"]
 
 

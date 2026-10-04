@@ -1204,3 +1204,24 @@ def test_real_library_nothing_listening_is_transport(loopback):
     error = first(client)
     assert error.kind == "transport"
     assert_clean(error)
+
+
+# -- R2 audit: free text a server may quote ------------------------------------------------------------
+
+
+def test_a_server_error_that_quotes_the_prompt_field_does_not_repeat_it():
+    prompt = "Earlier in this conversation the user asked about the transfer to Dmitri Volkov."
+
+    def handler(request):
+        return httpx.Response(400, json={"error": {"message": f"Invalid 'prompt': {prompt}"}})
+
+    with pytest.raises(ProviderError) as caught:
+        openai(handler).transcribe(AUDIO, prompt=prompt)
+    assert "Volkov" not in str(caught.value) and "Invalid" in str(caught.value)
+
+
+def test_an_error_event_does_not_repeat_a_long_token_or_the_configured_keyterms():
+    blob = "A" * 90
+    event = stt.Event("input_error", error=f"bad {blob} near Dmitri Volkov Savings Account in keyterms")
+    error = stt.error_for_event(event, "p", KEY, {"keyterms": ["Dmitri Volkov Savings Account"]})
+    assert blob not in str(error) and "Volkov" not in str(error)

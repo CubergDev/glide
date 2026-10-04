@@ -1,4 +1,5 @@
 import json
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -354,3 +355,38 @@ def test_refused_restore_has_no_keyboard_fallback(monkeypatch):
     monkeypatch.setattr(desktop, "ax_set_value", lambda *a: False)
     monkeypatch.setattr(desktop, "clear_field", lambda: pytest.fail("must not clear the current focus"))
     assert not actions.restore_field(field(ref=object()), "new query")
+
+
+# Audit 2 finding 0: a press the app has started but not answered must not be followed by a pixel click.
+@pytest.mark.skipif(sys.platform != "darwin", reason="patches the macOS accessibility framework")
+def test_a_press_that_timed_out_is_unknown_and_never_followed_by_a_click(screen, calls, monkeypatch):
+    from glide.computer import macos
+    from glide.computer.models import DesktopError
+    from glide.computer.platform_adapter import dispatching
+
+    monkeypatch.setattr(macos.AS, "AXUIElementPerformAction", lambda ref, action: macos.AX_ERROR_CANNOT_COMPLETE)
+    monkeypatch.setattr(macos, "check_abort", lambda: None)
+    with dispatching(), pytest.raises(DesktopError, match="unknown"):
+        macos.ax_press(object())
+    real = macos.ax_press
+
+    def press(ref):
+        with dispatching():
+            return real(ref)
+
+    monkeypatch.setattr(desktop, "ax_press", press)
+    item = Item(3, "Place order", 1.0, 100.0, 100.0, 300.0, 140.0, role="button", source="ax")
+    with pytest.raises(DesktopError):
+        click_item(item, replace(screen, ax_refs={3: object()}))
+    assert calls == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="patches the macOS accessibility framework")
+def test_a_definite_refusal_still_reads_as_false(monkeypatch):
+    from glide.computer import macos
+    from glide.computer.platform_adapter import dispatching
+
+    monkeypatch.setattr(macos.AS, "AXUIElementPerformAction", lambda ref, action: -25206)  # ActionUnsupported
+    monkeypatch.setattr(macos, "check_abort", lambda: None)
+    with dispatching():
+        assert macos.ax_press(object()) is False

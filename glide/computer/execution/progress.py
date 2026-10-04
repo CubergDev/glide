@@ -4,6 +4,7 @@ import os
 import sqlite3
 import time
 import uuid
+from pathlib import Path
 
 from ..control import checkpoint
 from ..diagnostics import event
@@ -20,8 +21,9 @@ class Ledger:
     new task id per invocation, so the id cannot identify a restarted run.
     """
 
-    def __init__(self, path, task_id):
+    def __init__(self, path, task_id, marker=None):
         self.task_id = task_id
+        self.marker = Path(marker) if marker else None  # shared by every run of one user: see `begin`
         self.keys: dict[str, str] = {}  # planner id -> the key stored in the file, for this run only
         os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         self.db = sqlite3.connect(path)
@@ -58,12 +60,31 @@ class Ledger:
 
     def begin(self, step, action):
         op = str(uuid.uuid4())
+        if self.marker:
+            # Every run has a folder of its own, so its journal cannot tell a later run that a write never reported its
+            # result. This file does: created exclusively before the write, removed once its effect is observed. A crash
+            # or kill in between leaves it, and no acting run starts until an operator has looked and removed it.
+            try:
+                fd = os.open(self.marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                raise InvalidAction(self.marked()) from None
+            with os.fdopen(fd, "w") as f:
+                f.write(op)
         with self.db:
             self.db.execute(
                 "INSERT INTO operations(id,task,milestone,action_hash,status) VALUES(?,?,?,?,?)",
                 (op, self.task_id, self.key(step.id), action.identity, "pending"),
             )
         return op
+
+    def marked(self) -> str:
+        """Why an acting run must not start, or '' when no earlier write is unreported."""
+        if self.marker and self.marker.exists():
+            return (
+                "An earlier write never reported its result. Check the screen, then remove "
+                f"{self.marker} to continue; nothing was done in this run"
+            )
+        return ""
 
     def finish(self, operation, step, effect_id, elapsed, operation_effect=""):
         with self.db:
@@ -73,6 +94,12 @@ class Ledger:
                 "UPDATE operations SET status=?, elapsed=? WHERE id=?",
                 ("verified" if effect_id or operation_effect else "no_effect", elapsed, operation),
             )
+        if self.marker:
+            try:
+                if self.marker.read_text() == operation:
+                    self.marker.unlink()
+            except OSError:
+                pass
 
     def observe_effect(self, step, effect_id):
         with self.db:

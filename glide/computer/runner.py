@@ -80,6 +80,9 @@ class RunConfig:
     execution_browser: str = ""
     readiness_timeout: float = DEFAULT_READINESS_TIMEOUT
     research_calls: int = DEFAULT_RESEARCH_CALLS  # structured engine: the most model calls a research task may use
+    # The folder every run of one user shares (the parent of each run folder). A write that never reported its result
+    # leaves a marker there that blocks the next acting run until an operator removes it. None: no cross-run guard.
+    journal: Path | None = None
 
     @property
     def replay(self) -> bool:
@@ -613,6 +616,8 @@ def repeating(state: RunState, what: str, waiting: bool, log: Log) -> bool:
     if state.repeats >= MAX_REPEATS:
         log(f"  {MAX_REPEATS} actions in a row already taken on the same screen; stopping")
         state.outcome = "stalled"
+        # An unchanged screen after a click is the unknown-outcome case, not proof it did nothing: say so, so it is not retried.
+        state.uncertain, state.readback = True, "the same action was repeated on an unchanged screen; completion unknown"
         return True
     return False
 

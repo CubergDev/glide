@@ -47,7 +47,7 @@ speech = [
 # system library, no compiler). Without it, `echo_canceller = "auto"` falls back to a numpy filter from the `speech`
 # extra, and says so. Candidates evaluated and not chosen are listed in docs/voice-echo-cancellation.md.
 aec = ["livekit>=1.1.20,<2"]
-# The PySide6 pet. Nothing on this branch imports it: the pet code lands with the pet branch, which is why the extra stays.
+# The PySide6 pet and point-to-ask (glide/ui). Only those import it.
 # Optional until the SwiftUI pet exists (decision D11). Cocoa must match the core's pyobjc pins.
 ui = [
     "PySide6>=6.10,<7",

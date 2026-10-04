@@ -125,6 +125,8 @@ def test_a_wait_is_neither_a_repeat_nor_something_the_classifier_is_told_it_trie
     assert not repeating(state, "clicked 'Buy'", False, lines.append)  # one repeat is a warning shot
     assert repeating(state, "clicked 'Buy'", False, lines.append) and state.outcome == "stalled"
     assert tried_here(state) == ["clicked 'Buy'"] * MAX_REPEATS + ["clicked 'Buy'"]
+    # Audit 2 #9: a click that left the screen as it was has an unknown outcome; the stop says so.
+    assert state.uncertain and state.readback.endswith("completion unknown")
 
 
 def test_the_step_record_carries_the_stop_rules_standing(screen, make_item):

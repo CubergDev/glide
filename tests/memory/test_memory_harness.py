@@ -360,11 +360,14 @@ class AsyncHarnessTests(Fixture, unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(entered.wait(), 1)
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
+        with self.assertRaises(asyncio.CancelledError) as raised:
             await task
         self.assertEqual(count, 1)
         finished = next(e for e in self.store.events(self.scope) if e["kind"] == "tool_finished")
         self.assertTrue(finished["payload"]["cancelled"])
+        # Audit 2 #8: the call had been sent, so the cancellation says its outcome is unknown, for the host and the audit.
+        self.assertTrue(finished["payload"]["outcome_unknown"])
+        self.assertIs(getattr(raised.exception, "outcome_unknown", False), True)
 
 
 if __name__ == "__main__":
