@@ -912,13 +912,14 @@ def test_drive_stops_the_task_on_any_interruption_not_only_on_abort(interruption
     assert task.stopped == 1
 
 
-def test_a_keyboard_interrupt_ends_the_lease_instead_of_leaving_it_to_expire():
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_a_keyboard_interrupt_or_exit_ends_the_lease_instead_of_leaving_it_to_expire(interruption):
     transport = OfflineTransport()
 
     def handler(message, control):
-        raise KeyboardInterrupt
+        raise interruption
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(interruption):
         worker.run_one(transport, **handlers_for(transport, handler))
     [result] = completed(transport)
     assert result["outcome"] == "cancelled" and result["note"] == worker.NOTE_INTERRUPTED
