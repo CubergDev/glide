@@ -15,8 +15,9 @@ import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -171,7 +172,12 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
     google = google_verifier
     if google is None and any(s.provider == "gmail" for s in sources.values()):
         google = GoogleVerifier()
+    # Two fixed buckets. `ingress` is for traffic anyone can send (health checks, callbacks, failed bearer checks);
+    # `agent_limit` is for requests that already passed bearer verification. Unauthenticated floods can therefore
+    # never make a worker's heartbeat or completion answer 429 (a lost lease becomes an uncertain run).
     global_limit = Limiter(settings.requests_per_minute)
+    agent_limit = Limiter(settings.requests_per_minute)
+    ingress = Depends(global_limit.admit)
     source_limits = {sid: Limiter(settings.source_requests_per_minute) for sid in sources}
 
     @asynccontextmanager
@@ -182,7 +188,11 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         path = Path(settings.database)
         owned = store is None
         app.state.queue = store or QueueStore(
-            path, settings.max_pending, settings.max_events, record_content=settings.record_content
+            path,
+            settings.max_pending,
+            settings.max_events,
+            record_content=settings.record_content,
+            receipt_retention_s=settings.receipt_retention_days * 86400,
         )
         try:
             yield
@@ -197,7 +207,6 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(global_limit.admit)],
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
     if check_only:
@@ -216,13 +225,13 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
             error, lambda request, exc, d=detail, s=status, h=headers: JSONResponse({"detail": d}, s, headers=h or None)
         )
 
-    @app.get("/healthz")
+    @app.get("/healthz", dependencies=[ingress])
     def health():
         return {"status": "ok"}
 
     # -- provider callbacks -------------------------------------------------------------------------------------
 
-    @app.post("/webhooks/{provider}/{source_id}", status_code=202)
+    @app.post("/webhooks/{provider}/{source_id}", status_code=202, dependencies=[ingress])
     async def callback(request: Request, provider: str, source_id: str):
         source = sources.get(source_id)
         if source is None or source.provider != provider:
@@ -259,7 +268,13 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         """Authenticate before anything else is read: the bearer, its issuer, audience, agent id and scope."""
 
         def check(request: Request, agent_id: str):
-            return verifier.verify(bearer(request.headers), agent_id, scope)
+            try:
+                principal = verifier.verify(bearer(request.headers), agent_id, scope)
+            except AuthError:
+                global_limit.admit()  # a failed attempt is anyone's traffic: it spends the ingress bucket, not the agents'
+                raise
+            agent_limit.admit()
+            return principal
 
         return Depends(check)
 
@@ -280,8 +295,15 @@ def create_app(settings: ServerSettings, *, store=None, google_verifier=None, se
         return queue(request).claim(agent_id, principal.subject, settings.lease_seconds)
 
     @app.get("/v1/agents/{agent_id}/messages")
-    def messages(request: Request, agent_id: str, principal=READER):
-        return queue(request).messages(agent_id)
+    def messages(
+        request: Request,
+        agent_id: str,
+        status: Literal["pending", "leased", "completed", "blocked", "cancelled", "failed", "uncertain"] | None = None,
+        limit: int = Query(50, ge=1, le=100),
+        principal=READER,
+    ):
+        """Newest first. `status=uncertain` finds the rows that block the agent, however many newer ones are queued."""
+        return queue(request).messages(agent_id, limit=limit, status=status)
 
     @app.get("/v1/agents/{agent_id}/messages/{message_id}")
     def one_message(request: Request, agent_id: str, message_id: str, principal=READER):

@@ -48,6 +48,7 @@ import threading
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
+from importlib import resources
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -63,7 +64,7 @@ from .errors import ProviderError, redact
 from .llm import LLM
 from .stt import STT
 from .tts import TTS
-from .writer_client import ChainWriter
+from .writer_client import ChainWriter, UnavailableFacade
 
 log = logging.getLogger("glide.config")
 
@@ -132,39 +133,11 @@ OWN_TABLES = ("memory", "mcp", "webhooks", "browser", "research")
 KNOWN_TABLES = ("providers", "llm", "stt", "tts", "classifier", "speech", *OWN_TABLES)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
-# Used when no glide.toml is found, and for any role a file leaves out. It lives here, not in a data file,
-# because glide.toml.example sits outside the package and is not shipped with it. The model ids are the team's
-# starting point and are unverified until `glide doctor --live` has run with real keys. A test keeps these
-# chains identical to the example's.
-DEFAULT_TOML = """
-[llm.fast]
-chain = [
-  { provider = "openrouter", model = "deepseek/deepseek-v4.1-flash", options = { reasoning_effort = "low" } },
-  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
-  { provider = "gemini", model = "gemini-3.5-flash-lite", options = { reasoning_effort = "low" } },
-]
-
-[llm.smart]
-chain = [
-  { provider = "openai", model = "gpt-6.1-sol", options = { reasoning_effort = "low" } },
-  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
-]
-
-[stt]
-chain = [
-  { provider = "elevenlabs", model = "scribe_v2_realtime" },
-  { provider = "openai", model = "gpt-transcribe" },
-]
-
-[tts]
-chain = [
-  { provider = "elevenlabs", model = "eleven_v4_turbo", options = { timeout = 8 } },
-  "macos_say",
-]
-
-[classifier]
-chain = ["typesafe:jev-latest", "llm.fast"]
-"""
+# Used when no glide.toml is found, and for any role a file leaves out. They are data (default.toml, shipped inside
+# the package because glide.toml.example sits outside it), never code: the model ids in it are the team's starting
+# point and are unverified until `glide doctor --live` has run with real keys. A test keeps these chains identical
+# to the example's.
+DEFAULT_TOML = resources.files(__package__).joinpath("default.toml").read_text(encoding="utf-8")
 
 
 class ConfigError(ValueError):
@@ -772,7 +745,8 @@ class GlideConfig:
             slots = [Slot(i.name, _Lent(i.client, i.name) if family == "classifier" else i.client) for i in ready]
             chain = Chain(role, slots, self.roles[role].policy, on_event=self._dispatch)
             self._pin_from_environment(role, chain)
-            facade = {"llm": LLM, "stt": STT, "tts": TTS, "classifier": ChainedClassifier}[family](chain)
+            extra = {"deadline_s": self.roles[role].deadline_s} if family == "llm" else {}
+            facade = {"llm": LLM, "stt": STT, "tts": TTS, "classifier": ChainedClassifier}[family](chain, **extra)
             self._facades[role] = facade
             return facade
 
@@ -814,11 +788,19 @@ class GlideConfig:
         return ChainWriter(
             self.llm("fast"),
             self.llm("smart"),
-            planner=self.llm("planner"),
-            research=self.llm("research"),
+            planner=self._optional_llm("planner"),
+            research=self._optional_llm("research"),
             timeout=timeout,
             deadlines=deadlines,
         )
+
+    def _optional_llm(self, role: str) -> Any:
+        """The facade of planner or research. A chain the file gave it that has no usable slot (a missing key) fails
+        only the requests that need it; fast and smart, which every task needs, are still required by `writer`."""
+        try:
+            return self.llm(role)
+        except NoUsableProvider as error:
+            return UnavailableFacade(str(error))
 
     def chain(self, role: str) -> Chain:
         """The chain of a role, for status, pinning and events. Raises ConfigError when no slot is usable."""

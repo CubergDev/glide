@@ -58,6 +58,32 @@ class HarnessTests(Fixture, unittest.TestCase):
         self.assertTrue(finished["payload"]["ok"])
         self.assertEqual(finished["payload"]["call_id"], "first")
 
+    def test_a_tool_call_id_that_could_carry_a_url_or_text_is_refused_before_anything_is_audited(self):
+        """PR5-4175258138: a model-supplied id reaches the persisted tool_started/tool_finished events."""
+        for bad in ("https://x/y?token=1", "copied user text", "a/b", "x" * 129, ""):
+            with self.subTest(call_id=bad[:20]), self.assertRaisesRegex(ValueError, "fresh identifiers"):
+                self.harness.dispatch(
+                    self.scope,
+                    "echo",
+                    lambda _, bad=bad: Reply(calls=(ToolCall(bad, "local:echo", {"value": 1}),)),
+                    grants=self.grants,
+                    authorize=lambda *_: True,
+                )
+        self.assertEqual(self.effects, [])
+        self.assertFalse([e for e in self.store.events(self.scope) if e["kind"].startswith("tool_")])
+
+    def test_tool_results_reach_the_next_model_call_marked_untrusted(self):
+        """PR5-4175632616: a tool's output is data from outside, never an instruction."""
+        seen = []
+
+        def model(request):
+            seen.append(request.trajectory)
+            return Reply(calls=(ToolCall("first", "local:echo", {"value": 1}),)) if len(seen) == 1 else Reply("done")
+
+        self.harness.dispatch(self.scope, "echo", model, grants=self.grants, authorize=lambda *_: True)
+        [entry] = [item for item in seen[1] if item["role"] == "tool"]
+        self.assertEqual(entry["trust"], "untrusted")
+
     def test_denial_has_no_effect(self):
         bundle = self.bundle()
         with self.assertRaises(PermissionError):

@@ -18,7 +18,7 @@ from uuid import uuid4
 from ._callbacks import adrive, drive
 from ._json import bounded_json
 from .catalog import Catalog
-from .contracts import Model, Plan, Policy, Scope, Tool
+from .contracts import SAFE_ID, Model, Plan, Policy, Scope, Tool
 from .events import invocation
 from .planning import plan
 from .store import Store, validate_text
@@ -41,7 +41,9 @@ class Reply:
 class Request:
     plan: Plan
     goal: str
-    # Ephemeral assistant/tool turns; the host translates these to its provider's protocol.
+    # Ephemeral assistant/tool turns; the host translates these to its provider's protocol. A tool turn's result is
+    # data a tool or a remote server produced (`"trust": "untrusted"`): the host must frame it as data for the model,
+    # never as instructions.
     trajectory: tuple[dict[str, Any], ...]
     max_output_tokens: int
 
@@ -111,11 +113,15 @@ def _check_reply(reply: object) -> None:
 
 
 def _check_call_shapes(calls: tuple, seen: set[str]) -> None:
-    """Every call has a fresh identifier (1 to 128 characters, unused this dispatch), a tool id and an argument object."""
+    """Every call has a fresh identifier (a safe 1 to 128 character one, unused this dispatch), a tool id and arguments.
+
+    The identifier is model-supplied and is written to the audit events, so it may not carry a URL or copied text.
+    """
     if any(
         not isinstance(call, ToolCall)
         or not isinstance(call.id, str)
-        or not 1 <= len(call.id) <= 128
+        or len(call.id) > 128
+        or not SAFE_ID.fullmatch(call.id)
         or not isinstance(call.tool_id, str)
         or not isinstance(call.arguments, dict)
         or call.id in seen
@@ -478,7 +484,13 @@ class Harness:
                         asynchronous=asynchronous,
                     )
                     trajectory.append(
-                        {"role": "tool", "call_id": call["id"], "tool_id": call["tool_id"], "result": _json_copy(result)}
+                        {
+                            "role": "tool",
+                            "call_id": call["id"],
+                            "tool_id": call["tool_id"],
+                            "trust": "untrusted",
+                            "result": _json_copy(result),
+                        }
                     )
             raise ValueError("model/tool turn budget exhausted")  # unreachable while the checks above hold; a hard stop
 

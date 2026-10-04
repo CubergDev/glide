@@ -805,10 +805,22 @@ def _strip_think(text: str) -> str:
 
 class LLM:
     """The LLM as the rest of Glide sees it: a chain of clients behind the same two methods, so no caller knows
-    which vendor answered. A failure moves on to the next client and is recorded on `chain.events`."""
+    which vendor answered. A failure moves on to the next client and is recorded on `chain.events`.
 
-    def __init__(self, chain: Chain[LLMClient]):
+    `deadline_s` (from `[llm.<role>] deadline_s`) is the longest one request through this facade may take. It only ever
+    shortens: a call that names no `timeout` gets the smaller of it and the adapter's default, and one that names a
+    longer `timeout` is cut down to it.
+    """
+
+    def __init__(self, chain: Chain[LLMClient], deadline_s: float | None = None):
         self.chain = chain
+        self.deadline_s = deadline_s
+
+    def _capped(self, kw: dict) -> dict:
+        if self.deadline_s is None:
+            return kw
+        asked = DEFAULT_TIMEOUT_S if kw.get("timeout") is None else kw["timeout"]
+        return {**kw, "timeout": min(asked, self.deadline_s)}
 
     def chat(self, messages: Sequence[dict], *, hedge: bool | None = None, **kw) -> ChatResult:
         """`kw` are those of `LLMClient.chat`. `ChatResult.provider` is the name of the slot that answered.
@@ -817,11 +829,13 @@ class LLM:
         does nothing otherwise; True asks for that explicitly and False never races. A chat is safe to run twice.
         """
         race = self.chain.policy.hedge_after_s is not None if hedge is None else hedge
+        kw = self._capped(kw)
         return self.chain.call(lambda slot: replace(slot.client.chat(messages, **kw), provider=slot.name), hedge=race)
 
     def stream(self, messages: Sequence[dict], **kw) -> Iterator[str]:
         """Text deltas, from the first slot that produces one. Once a delta has been yielded a failure is a
         ProviderError of kind "stream" and nothing else is tried: the caller has already used what came before."""
+        kw = self._capped(kw)
         return self.chain.stream(lambda slot: slot.client.stream(messages, **kw))
 
 

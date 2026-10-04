@@ -30,7 +30,7 @@ def open_response(
 ) -> httpx.Response:
     """Send one request (`url`, `headers`, `json`, ... as `httpx.Client.build_request` takes them) and return the
     response, its body unread; the caller closes it. httpx errors are raised as they are."""
-    call = interrupt.Call(client)
+    call = interrupt.Call(client, provider)
     built = client.build_request(method, timeout=timeout, extensions=call.extensions, **request)
     with interrupt.closing(call.abort, provider):  # a model's answer is awaited here, before any header
         response = client.send(built, stream=True)

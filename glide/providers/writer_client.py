@@ -40,6 +40,22 @@ RESEARCH_PREFIX = "research"
 CUT_SHORT = frozenset({"length", "content_filter", "error"})
 
 
+class UnavailableFacade:
+    """Stands where an optional role has no usable slot: every request to it fails visibly, nothing else is affected.
+
+    `chat` raises an `unsupported` ProviderError carrying the role's own reason (variable names, never a key), which
+    `ChainWriter` turns into `GenerationUnavailable` for that request only.
+    """
+
+    chain = None
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def chat(self, *args, **kwargs):
+        raise ProviderError(self._reason, kind="unsupported")
+
+
 class ChainWriter:
     """The writer's one call, `generate`, routed through the LLM facades by the request's role.
 

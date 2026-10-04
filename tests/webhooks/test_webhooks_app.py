@@ -574,14 +574,14 @@ def test_the_source_must_match_the_provider_in_the_path(environment):
         assert env.client.post(path, content=b"{}", headers={"Content-Type": "application/json"}).status_code == 404
 
 
-def test_an_enabled_mcp_source_has_no_receiver_and_queues_nothing(environment):
+def test_an_enabled_mcp_source_is_refused_when_the_configuration_is_checked(environment):
+    """PR7-4175264713: --check-config must not call a source valid that can only answer 400."""
     env = environment
     sources = [*env.data["sources"], {"id": "events", "enabled": True, "provider": "mcp", "agent_id": "team"}]
-    with app_with(env, None, sources=sources) as client:
-        response = client.post("/webhooks/mcp/events", json={"anything": 1})
-        assert response.status_code == 400 and response.json() == {"detail": "Invalid callback payload."}
-        assert client.post("/webhooks/mcp/events", content=b"x", headers={"Content-Type": "text/plain"}).status_code == 415
-    assert not env.store.messages("team")
+    with pytest.raises(ValueError, match="no receiver"):
+        ServerSettings.model_validate_json(json.dumps({**env.data, "sources": sources}))
+    disabled = [*env.data["sources"], {"id": "events", "enabled": False, "provider": "mcp", "agent_id": "team"}]
+    assert ServerSettings.model_validate_json(json.dumps({**env.data, "sources": disabled}))
 
 
 def test_outlook_validation_handshake_rules(environment):
@@ -734,3 +734,63 @@ def test_the_body_reader_bounds_size_encoding_and_declared_length():
         with pytest.raises(TranslationError):
             run_body([b"x"], headers)
     assert run_body([b"x"], [("content-encoding", "identity")]) == b"x"
+
+
+def test_unauthenticated_floods_cannot_starve_a_workers_authenticated_requests(environment):
+    """PR7-4175586392: heartbeats and completions answered 429 would make a worker drop its lease."""
+    env = environment
+    settings = ServerSettings.model_validate_json(json.dumps({**env.data, "requests_per_minute": 3}))
+    with TestClient(create_app(settings, store=env.store)) as client:
+        assert [client.get("/healthz").status_code for _ in range(4)] == [200, 200, 200, 429]
+        bad = {"Authorization": "Bearer not-a-token"}
+        assert client.post("/v1/agents/team/claim", headers=bad).status_code == 429  # the flood is limited ...
+        for _ in range(3):  # ... and the worker, with a valid token, is not
+            assert client.post("/v1/agents/team/claim", headers=auth(env)).status_code == 200
+        assert client.post("/v1/agents/team/claim", headers=auth(env)).status_code == 429  # its own bucket still caps it
+        assert client.get("/healthz").status_code == 429
+
+
+def test_the_listing_can_filter_by_status_so_a_blocking_uncertain_task_is_never_hidden(environment):
+    """PR7-4175586402: more than 50 newer messages must not hide the row that blocks the agent."""
+    env = environment
+    clock = SimpleNamespace(now=1000.0)
+    env.store.clock = lambda: clock.now
+    first = github(
+        env,
+        identity="d0",
+        body=json.dumps(
+            {
+                "action": "opened",
+                "repository": {"full_name": "team/repo"},
+                "sender": {"login": "a", "type": "User"},
+                "issue": {"number": 1, "title": "t", "body": "b"},
+            }
+        ).encode(),
+    )
+    blocked = first.json()["deliveries"][0]["message_id"]
+    lease = env.store.claim("team", "worker", 60)
+    env.store.finish("team", "worker", blocked, lease["lease_token"], "uncertain")
+    for number in range(2, 62):
+        clock.now += 1
+        env.store.enqueue("github", f"e{number}", f"d{number}", {**_queued_call(number)})
+    default = env.client.get("/v1/agents/team/messages", headers=auth(env)).json()
+    assert len(default) == 50 and blocked not in [item["message_id"] for item in default]
+    found = env.client.get("/v1/agents/team/messages?status=uncertain", headers=auth(env)).json()
+    assert [item["message_id"] for item in found] == [blocked]
+    assert len(env.client.get("/v1/agents/team/messages?limit=100", headers=auth(env)).json()) == 61
+    for bad in ("status=bogus", "limit=0", "limit=101", "limit=x"):
+        assert env.client.get(f"/v1/agents/team/messages?{bad}", headers=auth(env)).status_code == 422
+
+
+def _queued_call(number):
+    return {
+        "id": f"m{number}",
+        "task_id": f"t{number}",
+        "agent_id": "team",
+        "operation": "execute",
+        "goal": "Summarize.",
+        "source": "github",
+        "event_id": f"e{number}",
+        "allow_actions": False,
+        "context": {},
+    }

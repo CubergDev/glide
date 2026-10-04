@@ -19,6 +19,17 @@ from .contracts import AgentCall, TranslationError, build_call, clip_bytes
 
 _REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}\Z")
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?\Z")
+
+
+def is_repository(name: object) -> bool:
+    """`owner/name` as GitHub spells it (and not `.` or `..` as the name)."""
+    return isinstance(name, str) and bool(_REPOSITORY.fullmatch(name)) and name.split("/")[1] not in {".", ".."}
+
+
+def is_login(name: object) -> bool:
+    return isinstance(name, str) and bool(_LOGIN.fullmatch(name))
+
+
 _SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 _TIME = re.compile(r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})\Z")
 _GITHUB_ACTIONS = {
@@ -79,7 +90,7 @@ def _number(value: object) -> int:
 
 def _repository(payload: dict, allowed: tuple[str, ...]) -> str:
     name = _text(_object(payload.get("repository")).get("full_name"))
-    if name not in allowed or not _REPOSITORY.fullmatch(name) or name.split("/")[1] in {".", ".."}:
+    if name not in allowed or not is_repository(name):
         raise TranslationError("GitHub repository is not allowed.")
     return name
 
@@ -87,7 +98,7 @@ def _repository(payload: dict, allowed: tuple[str, ...]) -> str:
 def _sender(payload: dict) -> tuple[str, str]:
     sender = _object(payload.get("sender"))
     login, kind = _text(sender.get("login")), _text(sender.get("type"))
-    if not _LOGIN.fullmatch(login) or kind not in {"User", "Bot", "Organization"}:
+    if not is_login(login) or kind not in {"User", "Bot", "Organization"}:
         raise TranslationError("Invalid GitHub sender.")
     return login, kind
 

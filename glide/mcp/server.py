@@ -12,15 +12,15 @@ What it offers is decided by the host that builds it, never by the remote client
   Glide registers no such tool; the machine-driving loop is never exposed implicitly.
 - The scope (user, project, session) is fixed by the host. Arguments from the client are data: bounded, checked
   against the tool's schema, and never used to pick another scope or to grant anything.
-- Errors a client can see are our own short messages or the exception type; internals, paths and stack traces
-  are not sent. Tool results are not retried and no call replays a write.
+- Errors a client can see are our own short messages (`ToolInputError`) or the exception type; the text of any
+  other exception, internals, paths and stack traces are not sent. Tool results are not retried and no call
+  replays a write.
 """
 
 from __future__ import annotations
 
 import inspect
 import json
-import re
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from importlib import metadata
@@ -36,7 +36,6 @@ MAX_MESSAGE_BYTES = 1048576
 MCP_MEMORY_MAX_TEXT = 500
 MCP_MEMORY_MAX_COUNT = 50
 MCP_MEMORY_KEY_PREFIX = "mcp:"
-_PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR = -32700, -32600, -32601, -32602, -32603
 _JSON_TYPES = {
@@ -47,6 +46,23 @@ _JSON_TYPES = {
     "object": dict,
     "array": list,
 }
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError("non-finite JSON number")  # NaN, Infinity and -Infinity are not JSON
+
+
+def _decode(line: str) -> Any:
+    """`json.loads` for the wire: no NaN/Infinity, and a nesting bomb is a ValueError like any other bad JSON."""
+    try:
+        return json.loads(line, parse_constant=_reject_constant)
+    except RecursionError:
+        raise ValueError("JSON is nested too deeply") from None
+
+
+def _encode(message: dict[str, Any]) -> str:
+    """One response line. ASCII-only, so a lone surrogate in an echoed id or a result cannot break the UTF-8 writer."""
+    return json.dumps(message, allow_nan=False) + "\n"
 
 
 def _version() -> str:
@@ -67,7 +83,8 @@ class ServerTool:
 
 
 class ToolInputError(ValueError):
-    """The arguments do not fit the tool's schema. The message is safe to show the client."""
+    """The arguments do not fit the tool or its schema. The message is Glide's own text and is shown to the client;
+    the text of every other exception (a plain `ValueError` can quote its input) is not."""
 
 
 def check_arguments(schema: dict[str, Any], arguments: Any) -> dict[str, Any]:
@@ -81,8 +98,7 @@ def check_arguments(schema: dict[str, Any], arguments: Any) -> dict[str, Any]:
     for key, value in arguments.items():
         if key not in properties:
             if schema.get("additionalProperties") is False:
-                # the name is the client's own text: shown back only when it is a plain identifier
-                raise ToolInputError(f"unknown argument {key!r}" if _PLAIN_NAME.match(key) else "unknown argument")
+                raise ToolInputError("unknown argument")  # the name is the client's own text: never echoed
             continue
         wanted = properties[key].get("type")
         expected = _JSON_TYPES.get(wanted) if isinstance(wanted, str) else None
@@ -110,6 +126,17 @@ def _feedback(text: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
+def _check_property_types(tool: ServerTool) -> None:
+    """Refuse a schema the argument check cannot enforce: a property `type` outside `_JSON_TYPES` would pass anything."""
+    properties = tool.input_schema.get("properties", {})
+    if not isinstance(properties, dict):
+        raise ValueError(f"tool {tool.name!r} needs a properties object")
+    for key, spec in properties.items():
+        wanted = spec.get("type") if isinstance(spec, dict) else None
+        if not isinstance(spec, dict) or ("type" in spec and not (isinstance(wanted, str) and wanted in _JSON_TYPES)):
+            raise ValueError(f"tool {tool.name!r} property {key!r} needs a plain JSON type ({', '.join(_JSON_TYPES)})")
+
+
 class GlideMCPServer:
     def __init__(
         self,
@@ -124,6 +151,7 @@ class GlideMCPServer:
                 raise ValueError(f"duplicate tool name {tool.name!r}")
             if not isinstance(tool.input_schema, dict) or tool.input_schema.get("type") != "object":
                 raise ValueError(f"tool {tool.name!r} needs an object input schema")
+            _check_property_types(tool)
             self._tools[tool.name] = tool
         self._approve, self._instructions = approve, instructions
         self._initialized = False
@@ -200,7 +228,7 @@ class GlideMCPServer:
             if inspect.isawaitable(value):
                 value = await value
             text = json.dumps(value, ensure_ascii=False, allow_nan=False)
-        except ValueError as error:  # our own validation messages (never the client's text echoed from storage)
+        except ToolInputError as error:  # a handler's own validation message; any other error shows its type only
             return _ok(identifier, _feedback(str(error)))
         except Exception as error:
             return _ok(identifier, _feedback(f"the tool failed ({type(error).__name__})"))
@@ -222,11 +250,14 @@ def memory_tools(store: Store, scope: Scope, *, write: bool = False) -> list[Ser
     def remember(arguments: dict) -> dict:
         text, key = arguments["text"], MCP_MEMORY_KEY_PREFIX + arguments["key"]
         if len(text) > MCP_MEMORY_MAX_TEXT:
-            raise ValueError(f"a remote note is limited to {MCP_MEMORY_MAX_TEXT} characters")
+            raise ToolInputError(f"a remote note is limited to {MCP_MEMORY_MAX_TEXT} characters")
         notes = {row["key"] for row in store.memories(scope) if row["source"] == "mcp"}
         if key not in notes and len(notes) >= MCP_MEMORY_MAX_COUNT:
-            raise ValueError(f"at most {MCP_MEMORY_MAX_COUNT} remote notes may be kept; ask the user to clear some")
-        return {"id": store.remember(scope, key, text, kind="note", source="mcp", level=arguments.get("level", "project"))}
+            raise ToolInputError(f"at most {MCP_MEMORY_MAX_COUNT} remote notes may be kept; ask the user to clear some")
+        try:  # the store's refusals (credentials, bounds) are fixed Glide text; the host picks the level, never the client
+            return {"id": store.remember(scope, key, text, kind="note", source="mcp", level="project")}
+        except ValueError as error:
+            raise ToolInputError(str(error)) from None
 
     def forget(arguments: dict) -> dict:
         own = any(row["id"] == arguments["id"] and row["source"] == "mcp" for row in store.memories(scope))
@@ -251,7 +282,6 @@ def memory_tools(store: Store, scope: Scope, *, write: bool = False) -> list[Ser
                     "properties": {
                         "key": {"type": "string"},
                         "text": {"type": "string"},
-                        "level": {"type": "string", "enum": ["user", "project", "session"]},
                     },
                     "required": ["key", "text"],
                     "additionalProperties": False,
@@ -289,13 +319,26 @@ async def serve_stream(
             response: dict[str, Any] | None = _error(None, INVALID_REQUEST, "message too large")
         else:
             try:
-                message = json.loads(line)
+                message = _decode(line)
             except ValueError:
                 response = _error(None, PARSE_ERROR, "parse error")
             else:
                 response = await server.handle(message)
         if response is not None:
-            write(json.dumps(response, ensure_ascii=False, allow_nan=False) + "\n")
+            write(_encode(response))
+
+
+def read_bounded_line(stream: TextIO) -> str:
+    """`stream.readline()` that never holds more than MAX_MESSAGE_BYTES + 1 characters.
+
+    A line over the bound comes back cut at the bound (so `serve_stream` answers "message too large"), and the rest
+    of it is discarded in bounded chunks up to its newline, so an endless line cannot grow memory.
+    """
+    line = stream.readline(MAX_MESSAGE_BYTES + 1)
+    if len(line) > MAX_MESSAGE_BYTES and not line.endswith("\n"):
+        while (chunk := stream.readline(MAX_MESSAGE_BYTES)) and not chunk.endswith("\n"):
+            pass
+    return line
 
 
 def text_stream_writer(stream: TextIO) -> Callable[[str], None]:

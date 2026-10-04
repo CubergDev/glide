@@ -91,3 +91,12 @@ def test_a_bad_config_is_a_controlled_error(world):
 
 
 from mcp_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)
+
+
+def test_serve_answers_an_oversize_line_and_keeps_serving(world):
+    config = world[0]("")
+    huge = "x" * (3 * 1048576)
+    ping = {"jsonrpc": "2.0", "id": 3, "method": "ping"}
+    code, out, _ = run(world, config, "serve", stdin=lines(INIT) + huge + "\n" + lines(ping))
+    replies = [json.loads(line) for line in out.splitlines()]
+    assert code == 0 and replies[1]["error"]["message"] == "message too large" and replies[2]["id"] == 3

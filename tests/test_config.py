@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from typesafe_sdk import Choice, ChoiceAnswer, constants
 
-from glide.computer.generation import GenerationError, GenerationRequest
+from glide.computer.generation import GenerationError, GenerationRequest, GenerationUnavailable
 from glide.providers import config as config_module
 from glide.providers.base import Audio, ChatResult, SpeechAudio, Transcript, Usage
 from glide.providers.chain import SwitchEvent
@@ -893,6 +893,24 @@ def test_the_writer_names_the_variables_when_the_smart_chain_is_unusable():
     assert caught.value.missing == ("DEEPSEEK_API_KEY",)
 
 
+def test_an_optional_chain_with_no_usable_slot_fails_only_its_own_requests():
+    """PR4-4175251083: an unused planner or research role with a missing key must not make every task 'not configured'."""
+    cfg, fakes = make(
+        FAST + '[llm.smart]\nchain = ["openai:gpt-big"]\n[llm.planner]\nchain = ["deepseek:plan"]\n'
+        '[llm.research]\nchain = ["deepseek:research"]',
+        env={"OPENAI_API_KEY": KEYS["OPENAI_API_KEY"]},
+    )
+    fakes.text = "{}"
+    writer = cfg.writer()  # used to raise NoUsableProvider
+    request = GenerationRequest("", "x", "y", {"type": "object"}, role="writer")
+    assert writer.generate(request).model == "gpt-a"
+    for role in ("planner", "research_supervisor"):
+        with pytest.raises(GenerationUnavailable, match="DEEPSEEK_API_KEY"):
+            writer.generate(GenerationRequest("", "x", "y", {"type": "object"}, role=role))
+    assert fakes.log == ["openai:gpt-a"]
+    assert "planner: ?" in writer.describe()  # visible at startup, not silent
+
+
 # -- finding the file ----------------------------------------------------------------------------
 
 
@@ -1152,3 +1170,26 @@ def test_the_whole_speech_table_loads_and_the_voice_settings_come_from_it():
 def test_a_voice_only_key_is_checked_when_the_file_loads(line, match):
     with pytest.raises(ConfigError, match=match):
         make(f"[speech]\n{line}")
+
+
+def test_a_roles_deadline_caps_direct_llm_calls_too_not_only_the_writers():
+    """PR4-4175632219: the router, the answer stream and webhook reports call config.llm(role) with no timeout."""
+    from glide.providers.llm import DEFAULT_TIMEOUT_S
+
+    def timeouts(deadline_line: str, *calls: dict) -> list:
+        cfg, _ = make(
+            FAST + f'[llm.smart]\nchain = ["openai:gpt-big"]\n{deadline_line}', env={"OPENAI_API_KEY": KEYS["OPENAI_API_KEY"]}
+        )
+        seen = []
+        client = cfg.slots("llm.smart")[0].client
+        real = client.chat
+        client.chat = lambda messages, **kw: seen.append(kw.get("timeout")) or real(messages, **kw)
+        for kw in calls:
+            cfg.llm("smart").chat([{"role": "user", "content": "x"}], **kw)
+        return seen
+
+    shorter = DEFAULT_TIMEOUT_S - 20
+    # no timeout asked: the deadline, but never longer than the adapter's own default; asking for less keeps it; more is cut
+    assert timeouts(f"deadline_s = {shorter}", {}, {"timeout": 5}, {"timeout": 300}) == [shorter, 5, shorter]
+    assert timeouts(f"deadline_s = {DEFAULT_TIMEOUT_S + 15}", {}, {"timeout": 300}) == [DEFAULT_TIMEOUT_S, DEFAULT_TIMEOUT_S + 15]
+    assert timeouts("", {}, {"timeout": 300}) == [None, 300]  # a role with no deadline passes the call through untouched

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
+from functools import cached_property
 from pathlib import Path
 
 from .catalog import Catalog
@@ -38,10 +39,18 @@ def _private_dir(path: Path, *, tighten: bool) -> None:
 
 
 class MemoryService:
-    """The opened store and harness. Close it (or use `with`) when the process is done."""
+    """The opened store and, on first use, the harness. Close it (or use `with`) when the process is done.
 
-    def __init__(self, store: Store, harness: Harness, settings: MemorySettings, database: Path):
-        self.store, self.harness, self.settings, self.database = store, harness, settings, database
+    The harness reads the skill/plugin catalog, which can be broken by one bad manifest; building it lazily keeps
+    store-only work (`recall`, `remember`, `forget`) available. A broken catalog raises `ValueError` from `harness`.
+    """
+
+    def __init__(self, store: Store, build_harness: Callable[[], Harness], settings: MemorySettings, database: Path):
+        self.store, self._build_harness, self.settings, self.database = store, build_harness, settings, database
+
+    @cached_property
+    def harness(self) -> Harness:
+        return self._build_harness()
 
     @classmethod
     def open(
@@ -71,13 +80,12 @@ class MemoryService:
         policy = policy or Policy()
         policy = replace(policy, auto_memory=settings.auto_capture)  # the setting is the only switch
         store = Store(base / "memory.sqlite")
-        try:
+
+        def build() -> Harness:
             catalog = Catalog(root, enabled_plugins=enabled_plugins, enabled_skills=enabled_skills)
-            harness = Harness(store, catalog, tools=tools, models=models, policy=policy)
-        except BaseException:
-            store.close()
-            raise
-        return cls(store, harness, settings, base / "memory.sqlite")
+            return Harness(store, catalog, tools=tools, models=models, policy=policy)
+
+        return cls(store, build, settings, base / "memory.sqlite")
 
     def close(self) -> None:
         self.store.close()

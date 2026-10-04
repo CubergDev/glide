@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import types
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import pytest
 
@@ -19,7 +20,7 @@ def run(coro):
 
 
 class FakeSDK:
-    def __init__(self, monkeypatch, *, connect_error=None, init_error=None):
+    def __init__(self, monkeypatch, *, connect_error=None, init_error=None, hang_init=False, exit_error=None):
         self.started, self.parameters, self.initialized, self.closed = [], [], False, False
         sdk = self
 
@@ -37,8 +38,12 @@ class FakeSDK:
 
             async def __aexit__(self, *exc):
                 sdk.closed = True
+                if exit_error:
+                    raise exit_error
 
             async def initialize(self):
+                if hang_init:
+                    await asyncio.Event().wait()  # a server that never answers
                 if init_error:
                     raise init_error
                 sdk.initialized = True
@@ -140,6 +145,32 @@ def test_setup_failures_are_provider_errors_without_the_original_text(monkeypatc
     with pytest.raises(ProviderError) as caught:
         run(go())
     assert caught.value.kind == kind and "no such file" not in str(caught.value)
+
+
+def test_a_server_that_never_answers_initialize_times_out_as_a_provider_error(monkeypatch):
+    """PR5-4175258151: spec.timeout_s bounds setup too, not only the calls made afterwards."""
+    sdk = FakeSDK(monkeypatch, hang_init=True)
+
+    async def go():
+        async with transport.open_stdio_client(replace(SPEC, timeout_s=0.01), approve=lambda spec: True):
+            raise AssertionError("must not connect")
+
+    with pytest.raises(ProviderError) as caught:
+        run(go())
+    assert caught.value.kind == "timeout" and "connect" in str(caught.value) and sdk.closed
+
+
+def test_an_sdk_teardown_failure_after_a_clean_body_is_a_provider_error(monkeypatch):
+    """PR5-4175258134: only the caller's own exceptions pass through raw; SDK close errors are mapped."""
+    FakeSDK(monkeypatch, exit_error=RuntimeError("sdk detail with /private/path"))
+
+    async def go():
+        async with transport.open_stdio_client(SPEC, approve=lambda spec: True):
+            pass
+
+    with pytest.raises(ProviderError) as caught:
+        run(go())
+    assert caught.value.kind == "transport" and "close" in str(caught.value) and "private" not in str(caught.value)
 
 
 def test_an_error_raised_in_the_callers_block_is_not_relabelled(monkeypatch):

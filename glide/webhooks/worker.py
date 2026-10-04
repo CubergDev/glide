@@ -260,8 +260,14 @@ class ComputerExecutor:
 
 
 def desktop_outcome(result) -> dict:
-    """Map a `TaskResult` to a queue outcome. Only a verified success is `completed`: a dry run did nothing."""
-    if result.stopped:
+    """Map a `TaskResult` to a queue outcome. Only a verified success is `completed`: a dry run did nothing.
+
+    A write whose effect was never observed (`uncertain`, even when the run was stopped) is `uncertain`: the queue
+    then holds the agent for an operator to reconcile instead of redacting the task and letting the next one claim.
+    """
+    if result.uncertain:
+        outcome = "uncertain"
+    elif result.stopped:
         outcome = "cancelled"
     elif result.outcome == "done" and result.achieved and not result.failure:
         outcome = "completed"

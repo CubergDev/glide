@@ -92,7 +92,7 @@ def test_any_non_loopback_host_needs_the_proxy_flag(config, host):
     assert cli.main(["--config", str(config()), "--host", "127.0.0.1", "--check-config"]) == 0
 
 
-@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.9.9.9", "::1"])
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.9.9.9"])
 def test_loopback_hosts_are_local_without_the_flag(config, host, capsys):
     assert cli.main(["--config", str(config()), "--host", host, "--check-config"]) == 0
 
@@ -128,3 +128,11 @@ def test_the_default_file_comes_from_the_environment(config, monkeypatch):
     monkeypatch.setenv("GLIDE_WEBHOOK_CONFIG", str(config(enabled=False)))
     with pytest.raises(SystemExit):
         cli.main(["--check-config"])
+
+
+@pytest.mark.parametrize("host", ["::1", "::", "2001:db8::1"])
+def test_an_ipv6_bind_is_refused_with_a_reason(config, capsys, host):
+    """PR7-4175586405: allowed_hosts cannot name an IPv6 literal, so a ::1 listener would refuse every request."""
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--config", str(config()), "--host", host, "--behind-proxy", "--check-config"])
+    assert error.value.code == 2 and "IPv6" in capsys.readouterr().err
