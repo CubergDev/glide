@@ -691,6 +691,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"unrecognized arguments: {' '.join(rest)}")
     args.rest = rest
     if getattr(args, "passthrough", False) and (not args.loads_config or _help_asked(rest)):
+        if not _help_asked(rest):
+            _dotenv()  # the documented .env holds keys and settings these commands read from os.environ themselves
         return args.handler(args)  # theirs to load, if they load anything; asking for help needs no configuration
     try:
         config = _load(args.config)

@@ -150,6 +150,21 @@ def test_memory_and_mcp_get_everything_after_the_command_and_the_glide_toml_the_
     assert [args[0] for args, _ in mcp] == [["--config", "a.toml", "serve", "--user", "me"]]
 
 
+def test_the_commands_that_load_their_own_configuration_still_read_the_dotenv_first(isolated, never_loads, monkeypatch):
+    # PR13-4175444474: the documented .env must reach memory, mcp and the webhook commands, which read os.environ
+    read = []
+    monkeypatch.setattr("glide.computer.config.load_dotenv", read.append)
+    for target in ("glide.memory.cli.main", "glide.mcp.cli.main", "glide.webhooks.worker.main"):
+        calls(monkeypatch, target)
+    for argv in (["memory", "status"], ["mcp", "serve"], ["webhooks", "work"]):
+        read.clear()
+        assert cli.main(argv) == 0
+        assert read == [isolated / ".env"], argv
+    read.clear()
+    assert cli.main(["memory", "--help"]) == 0
+    assert read == []  # asking for help needs no environment
+
+
 def test_a_delegate_s_exit_status_is_the_commands(never_loads, monkeypatch):
     calls(monkeypatch, "glide.memory.cli.main", result=2)
     assert cli.main(["memory", "status"]) == 2
