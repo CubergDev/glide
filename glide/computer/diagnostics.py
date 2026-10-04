@@ -112,6 +112,11 @@ _content_keys = {
     "instructions",
     "schema",
     "configuration",
+    "reason",  # a validation or decision error's text can quote the goal or a page
+    "observation",
+    "message",
+    "error",
+    "field",
 }
 
 

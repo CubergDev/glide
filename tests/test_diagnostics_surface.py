@@ -59,3 +59,12 @@ def test_recorders_are_isolated_by_context(tmp_path):
         with inner.activate():
             assert diagnostics.record_content() is True
         assert diagnostics.record_content() is False
+
+
+def test_free_text_under_reason_and_observation_is_not_kept_without_recording(tmp_path):
+    recorder = Diagnostics(tmp_path)
+    with recorder.activate():
+        diagnostics.event("plan_validation_failed", reason="secret goal", observation={"title": "bank page"}, retrying=True)
+    (item,) = recorder.events
+    assert item["details"]["reason"] == CONTENT_OMITTED and item["details"]["observation"] == CONTENT_OMITTED
+    assert item["details"]["retrying"] is True
