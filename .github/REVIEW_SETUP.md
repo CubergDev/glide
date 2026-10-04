@@ -46,7 +46,7 @@ the cases above; use the label `ci-macos` on a PR when you want it.
 
 - Do not enable "Require review from Code Owners": with `* @CubergDev` as the only owner and you as the author, GitHub
   would block your own PRs. `CODEOWNERS` then only records ownership.
-- If you add a tag ruleset, it must allow you to create `v*.*.*` tags (the release flow below).
+- The tag ruleset in "Hardening" item 2 is required, and it must allow you to create `v*.*.*` tags (the release flow below).
 - The required check is picked by name (`ci-ok`). If it ever shows "Expected - waiting", the name or the event
   (`pull_request`) does not match.
 
@@ -57,7 +57,9 @@ the cases above; use the label `ci-macos` on a PR when you want it.
    an API key outranks the token and switches the run to API billing. No other secret is used by any workflow.
 2. **Labels** (create them; GitHub does not auto-create labels): `ci-macos`, `claude-review`, `no-claude-review`,
    `no-ai-review`.
-3. **Variable** (optional): `CLAUDE_REVIEW_DISABLED=true` pauses Claude review.
+3. **Variables** (Settings, Secrets and variables, Actions, Variables): `CLAUDE_REVIEW_MODEL` is the reviewer's model id
+   (the owner asked for Opus 5.5; record the id here). The workflow has no model id of its own: while the variable is unset
+   the review runs on the action's default model. Optional: `CLAUDE_REVIEW_DISABLED=true` pauses Claude review.
 4. **Settings, Actions, General**: keep the fork-PR options that send secrets or write tokens off. Workflows here use no
    `pull_request_target`, and fork PRs get no secrets (Claude review skips them).
 5. **Dependabot** (optional): Settings, Advisories or Code security, turn on Dependabot alerts and security updates. The
@@ -86,14 +88,16 @@ The release is a GitHub Release with the sdist and wheel attached. Nothing goes 
 ## Claude review (advisory)
 
 `claude-review.yml` is the only Claude workflow. It runs on same-repo, non-draft PRs (opened, reopened, ready for review,
-every push, or label `claude-review` added), reviews with read-only tools, and posts inline comments plus one summary.
-It reads `AGENTS.md` and its `## Code Review Rules` section if present (the proposal below), always from the pre-PR copy.
+every push, or label `claude-review` added), reviews with read-only tools, and posts inline comments only. It has no way to
+post a summary, so a run with no findings posts nothing (it shows only in the Actions log). It reads `AGENTS.md` and its
+`## Code Review Rules` section if present (the proposal below), from the pre-PR copy (`git show HEAD^1:AGENTS.md`) when the
+PR itself changes `AGENTS.md`. Before posting it reads the PR's existing comments: `gh pr view --json ...` for the
+conversation, and a file the workflow fetches before the agent starts for the inline threads (the agent has no `gh api`).
 
 - Pause: variable `CLAUDE_REVIEW_DISABLED=true`, or PR label `no-claude-review` / `no-ai-review`.
 - Re-run: remove and re-add the label `claude-review`.
 - Every push spends subscription usage. Drop `synchronize` from the trigger list if that is too much.
-- No model flag: the model is the action's default. To pin one, add `--model <id>` to `claude_args` from a decision recorded
-  outside the workflow.
+- Model: the repository variable `CLAUDE_REVIEW_MODEL` (see "Reviewer model and effort"). The workflow holds no model id.
 
 ## Codex review (native: its own login, no workflow, no secret)
 
@@ -181,24 +185,36 @@ generally available; its first PR will show it); Codex steps (taken from its doc
    `id-token: write` to the review job and drop the `github_token` line.
 4. Label a PR `ci-macos` once to confirm `test-macos` runs and passes.
 5. The first Dependabot PRs: grouped, at most 3 open, `uv.lock` updated.
+6. Claude review credentials: on the first run, confirm that no readable file holds the job token (the checkout uses
+   `persist-credentials: false`, so `.git/config` and `$RUNNER_TEMP` should have none), that the agent's `Read` deny rules
+   also stop `Glob` and `Grep` from listing `$RUNNER_TEMP`, and that `gh pr view --json` works with this token without
+   `checks: read`.
 
 ## Hardening the owner must do (settings, not files)
 
 These come from the independent security review of the workflows. They are repository settings, so only you change them.
 
 1. **Required check source.** In the `main` ruleset, set the required check `ci-ok` with its integration pinned to
-   *GitHub Actions*. Otherwise a PR can add a workflow with a job named `ci-ok` that always succeeds.
+   *GitHub Actions*. Otherwise a PR can add a workflow with a job named `ci-ok` that always succeeds. Pinning does not
+   stop a PR from editing `ci.yml` itself (a `pull_request` run uses the PR's copy of the workflow, so `ci-ok` can be made to
+   succeed without running the tests), and CODEOWNERS review is off here (see "Ruleset"). Until there is a second person,
+   the real gate is that you read every change under `.github/` before merging; with a second owner, turn on code-owner
+   review for `.github/**`, or use an organization-level required workflow, which a PR cannot edit.
 2. **Release gate.** Settings > Environments > `release`: add yourself as a required reviewer and restrict deployment
-   tags to `v*.*.*`. The release job declares this environment, so it cannot run unreviewed. Consider a tag ruleset
-   that restricts who can create `v*` tags. Without it, anyone with push access can tag a commit that edits the release
-   checks out of the workflow file.
+   tags to `v*.*.*`. Then create a **tag ruleset** (Settings > Rules > Rulesets, target tags `v*`) that restricts who can
+   create them to you. The tag ruleset is required, the environment alone is not a gate: a tag runs the workflow file as it
+   is on the tagged commit, so anyone with push access can tag a non-`main` commit whose `release.yml` drops `environment:
+   release` and the verification job, and the environment reviewer is never asked.
 3. **Claude review is read-only on purpose.** The agent has the inline-comment tool, `gh pr view`/`gh pr diff` and
-   read-only `git`; it has no `gh pr comment`, no `gh api`, no `/proc` and no `.git` access, so a prompt-injected PR
-   cannot post the job's environment or token. If you add a tool, re-check that it cannot write free text.
+   read-only `git show`/`git log`; it has no `gh pr comment`, no `gh api`, no `git blame` (`--contents` reads any file), no
+   `/proc`, no `.git` and no `$RUNNER_TEMP` access. The checkout keeps no credential (`persist-credentials: false`), so a
+   prompt-injected PR has no job token to read and post. If you add a tool, re-check that it cannot read an arbitrary file
+   or write free text.
 
 ## Reviewer model and effort
 
 The Claude review runs **Opus 5.5 at high effort** on every non-fork, non-draft pull request (owner's request, 4 Oct 2026).
-The model id is the default of the repository variable `CLAUDE_REVIEW_MODEL` (workflow `claude-review.yml`): to change it,
-set that variable (Settings > Secrets and variables > Actions > Variables); no file edit is needed. Effort is `--effort high`
+The model id lives only in the repository variable `CLAUDE_REVIEW_MODEL` (workflow `claude-review.yml` passes `--model` only
+when it is set): set it to the Opus 5.5 id (Settings > Secrets and variables > Actions > Variables), and change it there when
+the id is retired; no file edit is needed. Unset, the review runs on the action's default model. Effort is `--effort high`
 in the same file. Every push to a PR re-reviews and spends subscription usage; the large stacked PRs cost the most.
