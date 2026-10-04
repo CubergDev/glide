@@ -78,6 +78,11 @@ question). Needs a yes: it spends money, and a local `openai_compat` slot is a r
       others are unaffected.
 - [ ] `glide status` afterwards shows the same slot names. Record which model ids in `glide.toml.example` were rejected:
       the ids in the example file are unverified starting points.
+- [ ] **Router (D9), spends tokens.** Until a reliability table from your own providers exists, set `[routing] confirm_acting = true`.
+      Then `GLIDE_ROUTING_LIVE=1 python tests/routing/eval.py --live --out reliability_live.json` (docs/ROUTER.md section 6): read the
+      per-tier accuracy and "false actions with the fitted table" (the bar is zero), set `calibration_file`. In `glide chat`: "delete it"
+      asks one question and the next line answers it; "stop" at the question drops it; "what is 17 times 23, think it through" answers
+      from the smart chain; `glide ask "delete it"` says what is needed and does nothing. `--live` has never been run.
 
 ### L3. Provider cancellation over TLS
 
