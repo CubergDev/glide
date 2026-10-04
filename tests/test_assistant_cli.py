@@ -29,6 +29,7 @@ from test_assistant_fakes import (
 
 from glide import cli
 from glide.assistant.audio_io import AudioUnavailable, Microphone, chunked
+from glide.assistant.core import Reply
 from glide.computer import runner
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
@@ -210,6 +211,16 @@ def test_ask_prints_the_answer_and_never_builds_a_tts_without_speak(monkeypatch)
     assert config.calls.tts == 0 and config.closed
 
 
+def test_ask_prints_no_terminal_control_sequence_a_model_or_a_screen_wrote(monkeypatch):
+    # PR15-4175491839: the same sweep for the answer, the notices on stderr and a streamed partial transcript
+    hostile = "Paris\x1b]52;c;ZXZpbA==\x07\x1b[2J\x9b31m is\x07 it"
+    code, terminal = run(["ask", "capital"], monkeypatch, answering(hostile))
+    shown = terminal.out.getvalue() + terminal.err.getvalue()
+    assert code == 0 and "Paris" in shown and "is it" in shown
+    assert not any(c in shown for c in ("\x1b", "\x07", "\x9b"))
+    assert cli.clean("a\x1b[31mb\tc\nd\x07") == "ab\tc\nd"  # tabs and newlines of a multi-line summary stay
+
+
 def test_ask_speak_speaks_waits_for_the_voice_and_closes_the_player(monkeypatch):
     config, player = answering("One. Two."), FakePlayer()
     code, terminal = run(["ask", "--speak", "hi"], monkeypatch, config, player=player)
@@ -329,6 +340,8 @@ def test_act_mode_prints_a_banner_so_it_is_never_a_surprise(monkeypatch, loop_ca
         ("dry run", 0),
         ("stalled", 0),
         ("provider failure", 1),
+        ("generation unavailable", 1),
+        ("desktop unavailable", 1),
         ("crashed", 1),
         ("not permitted", 1),
         ("not configured", 1),
@@ -545,6 +558,16 @@ def test_nothing_said_is_reported_and_costs_no_model_call(monkeypatch):
     rig.keys.press("q")
     assert finish(rig.thread, rig.result) == 0
     assert "(nothing heard)" in rig.terminal.out.getvalue() and rig.config.fast.chat_calls == []
+
+
+def test_a_request_that_was_heard_and_then_cut_is_not_reported_as_nothing_heard(monkeypatch):
+    # PR9-4175574734: a cancelled request is now Reply("none"), as its docstring says, and was heard all the same
+    monkeypatch.setattr(cli.Assistant, "handle_audio", lambda self, chunks, **kw: Reply("none", heard="what is two and two"))
+    rig = listen_rig(monkeypatch, FakeSTT(final="what is two and two"))
+    talk(rig)
+    rig.keys.press("q")
+    assert finish(rig.thread, rig.result) == 0
+    assert "(nothing heard)" not in rig.terminal.out.getvalue()
 
 
 def test_listen_auto_ends_the_recording_when_the_speaker_goes_quiet(monkeypatch):

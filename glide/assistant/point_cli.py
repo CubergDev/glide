@@ -21,6 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..computer.config import load_dotenv, writer_vision
+from ..computer.execution.reading import clean as printable
 from ..computer.writer import make_writer, provider
 from ..providers.config import ConfigError, load_config
 from ..speech.settings import MAX_SILENCE_MS, MIN_SILENCE_MS
@@ -31,6 +32,7 @@ from .point_voice import PointAssistant
 
 DEFAULT_QUESTION = "What is this, and what should I do next?"
 REASON_CHARS = 160
+POLL_S = 0.2  # how often a voice session looks up from waiting to see whether its loop has ended
 
 
 def _bounded(low: float, high: float):
@@ -65,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _say(text: str) -> None:
-    print(text, file=sys.stderr, flush=True)
+    print(printable(text, lines=True), file=sys.stderr, flush=True)  # text from a screen or a model never drives the terminal
 
 
 def _switch_line(event, config) -> str:
@@ -153,7 +155,7 @@ def _run(args, config, voice_factory, capture) -> int:
     with selection:
         if writer is None:
             packet = selection.target.packet() if selection.target is not None else {}
-            print("\n".join(f"{name}: {value}" for name, value in packet.items() if value))
+            print("\n".join(printable(f"{name}: {value}") for name, value in packet.items() if value))
             return 0
         return _ask(args, config, writer, selection, voice_factory)
 
@@ -164,7 +166,7 @@ def _ask(args, config, writer, selection, voice_factory) -> int:
 
     def emit(kind: str, **data) -> None:
         if kind == "answer":
-            print(data["text"], flush=True)
+            print(printable(data["text"], lines=True), flush=True)
             if data.get("uncertain"):
                 _say("The selected context is incomplete. Point again or give more detail.")
             if not args.voice:
@@ -174,7 +176,7 @@ def _ask(args, config, writer, selection, voice_factory) -> int:
             outcome["code"] = 3 if not data.get("closed") else 2
             if data.get("closed") or not args.voice:
                 finished.set()
-        elif kind == "stopped":
+        elif kind == "stopped" and not args.voice:  # a spoken Stop ends the answer in flight, never the session
             finished.set()
 
     if args.voice:
@@ -209,7 +211,10 @@ def _voice(args, config, writer, selection, voice_factory, emit, finished, outco
         loop.assistant.bind(session)
         _say("Ask about this point, then ask follow-up questions. Say Stop to interrupt an answer. Ctrl-C ends.")
         loop.start()
-        finished.wait()
+        while not finished.wait(POLL_S):
+            if loop.ended:  # the microphone was lost: its own warning has been printed, and nothing else will wake this
+                outcome["code"] = 2
+                break
     except Exception as error:  # a microphone that cannot open: what is missing, never a key
         _say(f"Voice input could not start ({type(error).__name__}): {config.scrub(str(error))}")
         outcome["code"] = 2

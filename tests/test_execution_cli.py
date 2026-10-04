@@ -44,8 +44,8 @@ def settings(monkeypatch, tmp_path):
     return write
 
 
-def state(outcome, failure=""):
-    return SimpleNamespace(outcome=outcome, failure=failure)
+def state(outcome, failure="", answer=None):
+    return SimpleNamespace(outcome=outcome, failure=failure, answer=answer)
 
 
 def chains(classifier="the chain classifier"):
@@ -67,13 +67,66 @@ def chains(classifier="the chain classifier"):
         ("desktop unavailable", "No permission.", 1),
         ("done", "", None),
         ("dry run", "", None),
-        ("stalled", "", None),
+        # PR10-4175614834: these end the legacy loop with no `failure` text, and none of them did the job
+        ("stalled", "", 1),
+        ("stuck", "", 1),
+        ("step limit", "", 1),
+        ("nothing helps", "", 1),
+        ("low confidence", "", 1),
+        ("generation unavailable", "", 1),
     ],
 )
 def test_every_failed_outcome_exits_nonzero_and_a_stop_exits_130(monkeypatch, tmp_path, offline, outcome, failure, code):
     monkeypatch.setattr(cli, "make_writer", lambda *a: None)
     monkeypatch.setattr(cli, "run", lambda *a, **kw: state(outcome, failure))
     assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == (code or 0)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "achieved", "code"),
+    [
+        ("done", True, 0),
+        ("done", False, 1),
+        # a stop of the loop is redeemed by the writer's own reading of the screen, and by nothing else
+        ("nothing helps", True, 0),
+        ("stalled", True, 0),
+        ("step limit", True, 0),
+        ("stalled", False, 1),
+        ("low confidence", False, 1),
+    ],
+)
+def test_a_run_that_has_an_answer_exits_by_what_the_writers_answer_says(monkeypatch, tmp_path, offline, outcome, achieved, code):
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", lambda *a, **kw: state(outcome, "", SimpleNamespace(achieved=achieved)))
+    assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == code
+
+
+@pytest.mark.parametrize("outcome", ["provider failure", "generation unavailable", "desktop unavailable", "crashed", "blocked"])
+def test_no_answer_redeems_a_hard_failure(monkeypatch, tmp_path, offline, outcome):
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", lambda *a, **kw: state(outcome, "", SimpleNamespace(achieved=True)))
+    assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == 1
+
+
+@pytest.mark.parametrize(("move", "shown"), [("click 'Tickets'", "it would click 'Tickets'"), ("", "nothing was done")])
+def test_a_dry_run_says_nothing_was_done_and_the_move_it_stopped_at(monkeypatch, tmp_path, offline, capsys, move, shown):
+    # PR4-4175632222: the terminal printed the bare move, or nothing when there was none
+    def fake_run(cfg, ctx_factory, control=None, **kw):
+        control.event("dry_run", move, outcome="dry run")
+        return state("dry run")
+
+    monkeypatch.setattr(cli, "make_writer", lambda *a: None)
+    monkeypatch.setattr(cli, "run", fake_run)
+    assert cli.main(["a goal", "--out", str(tmp_path)], chains()) == 0
+    out = capsys.readouterr().out
+    assert "dry run: nothing was done" in out and shown in out
+
+
+def test_event_text_from_a_screen_or_a_model_reaches_the_terminal_without_control_sequences(capsys):
+    cli.show_event(SimpleNamespace(kind="blocked", text="The page said\x1b]52;c;ZXZpbA==\x07 hello\x1b[2J"))
+    cli.show_event(SimpleNamespace(kind="dry_run", text="click '\x1b[31mTickets'"))
+    out = capsys.readouterr().out
+    assert "The page said hello" in out and "Tickets" in out and "\x1b" not in out and "\x07" not in out
 
 
 def test_the_structured_engine_takes_its_classifier_from_the_provider_chains(monkeypatch, tmp_path, offline):

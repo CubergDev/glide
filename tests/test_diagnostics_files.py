@@ -203,15 +203,21 @@ def test_a_folder_in_use_is_never_overwritten(tmp_path):
     assert [e["event"] for e in lines(third.root / "events.jsonl")] == ["third"]
 
 
-def test_runtime_lists_glide_settings_only(tmp_path, monkeypatch):
-    monkeypatch.setenv("GLIDE_ENGINE_SETTING", "visible")
-    monkeypatch.setenv("GLIDE_PIN_TOKEN", "hidden")
+def test_runtime_lists_glide_setting_names_never_values(tmp_path, monkeypatch):
+    # PR10-4175413698: glide.toml allows any capitals-only api_key_env, so a GLIDE_* value can be a provider key
+    for name in [n for n in os.environ if n.startswith("GLIDE_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("GLIDE_ENGINE_SETTING", "visible-value")
+    monkeypatch.setenv("GLIDE_ACME", "sk-live-ABCDEF123456")
     monkeypatch.setenv("SOME_PRIVATE_ENV", "never-collect-this-variable")
     recorder = Diagnostics(tmp_path / "run", record_content=True)
-    recorder.finish({"outcome": "done"})
-    text = (recorder.root / "diagnostic.json").read_text()
-    assert report(recorder)["runtime"]["settings"] == {"GLIDE_ENGINE_SETTING": "visible"}
-    assert "never-collect-this-variable" not in text and "SOME_PRIVATE_ENV" not in text
+    recorder.finish({"outcome": "provider failure"})
+    for path in (recorder.root / "diagnostic.json", recorder.root / "failure.md"):
+        text = path.read_text()
+        assert "GLIDE_ACME" in text and "GLIDE_ENGINE_SETTING" in text
+        assert "sk-live-ABCDEF123456" not in text and "visible-value" not in text
+        assert "never-collect-this-variable" not in text and "SOME_PRIVATE_ENV" not in text
+    assert report(recorder)["runtime"]["settings"] == ["GLIDE_ACME", "GLIDE_ENGINE_SETTING"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")

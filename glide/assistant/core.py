@@ -233,8 +233,12 @@ class Assistant:
                 return Reply("none")
             with controlled(turn.control):
                 if self._responder is not None:
-                    return self._delegate(turn, text, hint_language, started)
-                return self._respond(turn, text, act, wait, hint_language, started)
+                    reply = self._delegate(turn, text, hint_language, started)
+                else:
+                    reply = self._respond(turn, text, act, wait, hint_language, started)
+            if turn.cancelled and reply.route == "answer":  # a stop or a newer request took it: not a completed answer
+                reply.route = "none"  # (the text is what was already said before the cut)
+            return reply
         finally:
             if own and turn is not None:
                 self._leave(turn)
@@ -605,7 +609,11 @@ class Assistant:
                     else None,
                 )
         except TaskBusy:
-            self._failed(reply, say("busy", language), "a task is already running", language, speak=True)
+            running = self._tasks.current
+            if running is not None and running.stop_requested:  # stopped, and still unwinding: nothing for the user to stop
+                self._failed(reply, say("stopping", language), "the last task is still stopping", language, speak=True)
+            else:
+                self._failed(reply, say("busy", language), "a task is already running", language, speak=True)
             return
         reply.task = task
         self._remember(text, route.reply or f"(started a computer task: {goal})")
@@ -623,7 +631,12 @@ class Assistant:
             return False
 
     def _ask_user(self, task: ComputerTask, question: str, language: str | None) -> None:
-        """A task has a question for the user, on the task's thread: show it and say it. The task waits for `answer_pending`."""
+        """A task has a question for the user, on the task's thread: show it and say it. The task waits for `answer_pending`.
+
+        A task that was stopped between its own check and this call has no question any more: showing it would leave a
+        stale question on screen that nothing is waiting on."""
+        if task.stop_requested:
+            return
         self.io.show(question)
         speaker = self._speaker_or_none()
         if speaker is not None:
@@ -695,29 +708,31 @@ class Assistant:
         with self._lock:
             self._live.discard(turn)
 
-    def _cancel_turns(self, reason: str, *, upto: int, hearing: bool = True, keep: _Turn | None = None) -> None:
+    def _cancel_turns(self, reason: str, *, upto: int, hearing: bool = True) -> None:
         """Cancel the requests in flight with a ticket up to `upto` (those still being heard too, unless `hearing` is
         False). Called with the lock held."""
         for turn in tuple(self._live):
-            if turn is not keep and turn.seq <= upto and (hearing or not turn.hearing):
+            if turn.seq <= upto and (hearing or not turn.hearing):
                 turn.control.cancel(reason)
 
     def _begin(self, turn: _Turn) -> bool:
-        """A new request supersedes the answers before it: they stop being written and their speech is cut. A question
+        """A new request supersedes the answers made before it: they stop being written and their speech is cut. A question
         a task is waiting on is dropped with them: this request is not its answer. False if `turn` was cancelled first.
 
-        A request still being heard is not touched: the person said it and wants it answered too."""
+        Order is the order the requests were made in (their tickets), not the order they begin: a spoken request whose
+        transcript arrives after a typed one was made earlier, so it supersedes nothing the typed one is doing. A
+        request still being heard is not touched either: the person said it and wants it answered too."""
         dropped = None
         with self._lock:
             if turn.cancelled:
                 return False
             turn.hearing = False
-            self._cancel_turns(SUPERSEDED, upto=self._seq, hearing=False, keep=turn)
+            self._cancel_turns(SUPERSEDED, upto=turn.seq - 1, hearing=False)
             waiting = self._tasks.current
             if waiting is not None and waiting.pending_question is not None:
                 waiting.stop()
                 dropped = waiting
-            self._cut_speech(self._seq)  # whoever begins last supersedes what is being said, whatever order they were made in
+            self._cut_speech(turn.seq - 1)  # a newer request that is already speaking is spared (see `_cut_speech`)
         if dropped is not None:
             dropped.wait(UNWIND_S)  # a correction that is itself a task ("open Safari instead") must find the machine free
         return True
@@ -751,7 +766,7 @@ class Assistant:
                     self.io.warn(f"speech is off: {self._scrub(str(exc))}")
                     return None
                 self._voice = _Voice(tts)
-                self._speaker = Speaker(self._voice, self.io.player, on_error=self._speech_failed)
+                self._speaker = Speaker(self._voice, self.io.player, on_error=self._speech_failed, on_cancel=self._voice.cut)
             return self._speaker
 
     def _cut_speech(self, upto: int) -> None:
@@ -771,11 +786,9 @@ class Assistant:
         """Silence now. The lane is marked dead and its queue drained BEFORE the sentence being made is cut: the thread
         that the cut wakes then finds a dead lane and ends, instead of starting the next queued sentence."""
         if self._speaker is not None:
-            self._speaker.cancel()
+            self._speaker.cancel()  # which also cuts the voice (the sentence being made), atomically with the lane's reset
         elif self.io.player is not None:
             self.io.player.cancel()
-        if self._voice is not None:
-            self._voice.cut()  # the sentence being made: its connection is closed and its thread released
 
     def _speech_failed(self, exc: BaseException) -> None:
         if isinstance(exc, ProviderError) and exc.kind == CANCELLED:

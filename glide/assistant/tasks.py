@@ -110,7 +110,7 @@ class TaskResult:
             return say("uncertain", language)
         if self.stopped:
             return ""
-        if self.answer and self.outcome not in ("provider failure", "crashed"):
+        if self.answer and not self.failure and self.outcome not in UNANSWERED:  # an answer kept from an earlier stop is stale
             return self.answer
         if self.outcome == "dry run":
             return say("dry_run", language, what=self.would_do) if self.would_do else say("dry_run_plain", language)
@@ -133,6 +133,9 @@ class TaskResult:
             lines.append(f"run folder: {self.folder}")
         return "\n".join(lines)
 
+
+# Outcomes that end a run on a failure: whatever answer an earlier stop of the same run left is not what happened.
+UNANSWERED = ("provider failure", "generation unavailable", "desktop unavailable", "crashed")
 
 OUTCOME_PHRASES = {
     "done": "done",
@@ -371,9 +374,14 @@ class TaskRunner:
         return self.current is not None and self.current.running
 
     def _fresh_folder(self) -> Path:
+        """A run folder no other run has, made here: another Glide process may start in the same second, and `mkdir`
+        is the one step that tells two of them apart."""
         base = self._runs_dir / time.strftime("%Y%m%d-%H%M%S")
         folder, n = base, 1
-        while folder.exists():
-            n += 1
-            folder = base.with_name(f"{base.name}-{n}")
-        return folder
+        while True:
+            try:
+                folder.mkdir(parents=True)
+                return folder
+            except FileExistsError:
+                n += 1
+                folder = base.with_name(f"{base.name}-{n}")

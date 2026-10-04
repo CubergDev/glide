@@ -18,6 +18,7 @@ from .. import features
 from . import browser_settings, config
 from .actions import Context
 from .control import RunControl
+from .execution.reading import clean as printable
 from .perception import capture, perceive
 from .platform_adapter import desktop
 from .report import annotate, ax_count, render_payload
@@ -33,12 +34,46 @@ ABORTED, FAILED = (
     130,
     1,
 )  # exit codes: stopped by the user (the shell's own value for Ctrl-C), and any run that did not do the job
-FAILED_OUTCOMES = {"blocked", "unsupported", "crashed", "provider failure"}  # failures that may carry no `failure` text
+# How a run ends without having done the job. A hard outcome is one no answer can redeem; most carry no `failure` text
+# (the legacy loop sets one only when the writer fails), so the outcome alone decides.
+FAILED_OUTCOMES = {
+    "blocked",
+    "unsupported",
+    "crashed",
+    "provider failure",
+    "generation unavailable",
+    "desktop unavailable",
+}
+# A stop of the loop. The writer then reads the screen: its answer says whether the goal was reached all the same, and
+# it, not the stop, decides the exit code. With no answer a stop is a failure. "done" and "dry run" are the only
+# other outcomes, and "done" is still a failure when the writer's answer says the goal was not reached.
+STOPPED_OUTCOMES = {"step limit", "stalled", "stuck", "nothing helps", "low confidence"}
+
+
+def exit_code(state) -> int:
+    """0 for a run that did the job, FAILED for one that did not, ABORTED for the user's own stop."""
+    if state.outcome.startswith("aborted"):
+        return ABORTED
+    if state.failure or state.outcome in FAILED_OUTCOMES:
+        return FAILED
+    if state.answer is not None:
+        return 0 if state.answer.achieved else FAILED
+    return FAILED if state.outcome in STOPPED_OUTCOMES else 0
 
 
 def _fail(message: str, code: int = 2) -> int:
     print(f"glide computer: {message}", file=sys.stderr)
     return code
+
+
+def show_event(event) -> None:
+    """What the terminal shows of one event the run reports. The run prints nothing of its own, and what a screen or a
+    model wrote never reaches the terminal as a control sequence."""
+    if event.kind == "dry_run":  # the default run: it must say that nothing was done, with the move it stopped at
+        move = f"; it would {printable(event.text)}" if event.text else ""
+        print(f"dry run: nothing was done{move}")
+    elif event.text:
+        print(printable(event.text, lines=True))
 
 
 def ask_user(question: str) -> str:
@@ -145,16 +180,12 @@ def main(argv: list[str] | None, glide_config) -> int:
         )
 
     # The run prints nothing of its own; this terminal shows what it reports, and Ctrl-C reaches it as a stop.
-    control = RunControl(str(uuid.uuid4()), lambda event: print(event.text) if event.text else None)
+    control = RunControl(str(uuid.uuid4()), show_event)
     try:
         state = run(cfg, ctx_factory, classifier_factory=glide_config.classifier, control=control)
     except ConfigError as e:  # no classifier slot is usable: the message names the variables to set
         return _fail(glide_config.scrub(str(e)))
-    if state.outcome.startswith("aborted"):
-        return ABORTED
-    if state.failure or state.outcome in FAILED_OUTCOMES:
-        return FAILED
-    return 0
+    return exit_code(state)
 
 
 def inspect(argv: list[str] | None = None) -> int:

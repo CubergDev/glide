@@ -268,6 +268,8 @@ class FakeLoop:
         self.assistant = assistant
         self.calls: list[str] = []
         self.on_failure = None  # set by the pet, called by a real loop when it ends on its own
+        self.ended = False  # as VoiceLoop: the thread made by start() has finished
+        self.failure: str | None = None  # as VoiceLoop: why a microphone fault ended it
 
     def start(self):
         self.calls.append("start")

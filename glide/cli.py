@@ -41,6 +41,7 @@ from .assistant.audio_io import AudioUnavailable, Endpointer, Microphone, Player
 from .assistant.core import IO, Assistant, Reply
 from .assistant.router import is_stop
 from .assistant.tasks import DEFAULT_RUNS_DIR
+from .computer.execution.reading import clean as printable
 
 ACT_BANNER = (
     "ACT MODE: Glide will click and type on this Mac. Stop it by saying or typing stop, with Ctrl-C, "
@@ -49,7 +50,9 @@ ACT_BANNER = (
 SECRET_SUFFIXES = ("KEY", "TOKEN", "SECRET")
 MIN_SECRET = 8
 REASON_CHARS = 160
-FAILED_OUTCOMES = frozenset({"provider failure", "crashed", "not permitted", "not configured"})  # a task that could not run
+FAILED_OUTCOMES = frozenset(  # a task that could not run
+    {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
+)
 POLL_S = 0.1  # how often the terminal loop looks up from waiting for a line
 QUIT_WORDS = frozenset({"q", "quit", "exit", "/quit", "/exit"})
 
@@ -119,9 +122,11 @@ def redact(text: str) -> str:
 
 
 def clean(text: str, config=None) -> str:
-    """Text safe to print: the configuration's own scrub first (it knows which variables hold keys), then the sweep."""
+    """Text safe to print: the configuration's own scrub first (it knows which variables hold keys), then the sweep,
+    then every terminal escape sequence and control character removed (newlines and tabs stay): what an app, a page or
+    a model wrote must never move the cursor, retitle the window or write the clipboard of this terminal."""
     scrub = getattr(config, "scrub", None)
-    return redact(scrub(text) if callable(scrub) else text)
+    return printable(redact(scrub(text) if callable(scrub) else text), lines=True)
 
 
 def format_switch(event, config=None) -> str:
@@ -356,7 +361,7 @@ def cmd_listen(args: argparse.Namespace, config) -> int:
 
     def partial(text: str) -> None:
         if sys.stderr.isatty():
-            print(f"\r{text}", end="", file=sys.stderr, flush=True)
+            print(f"\r{clean(text, config)}", end="", file=sys.stderr, flush=True)
 
     assistant = Assistant(config, io=_make_io(config, speak=not args.text_only, partial=partial), runs_dir=args.runs)
     act = args.act
@@ -425,7 +430,7 @@ def _record(
 
     def work() -> None:
         reply = assistant.handle_audio(chunks(), act=act, wait=False, language=args.lang)
-        if reply.route == "none" and not reply.error:
+        if reply.route == "none" and not reply.error and not reply.heard:  # something heard and then cut is not silence
             print("(nothing heard)", flush=True)
 
     turn = _spawn(work, config)
@@ -458,6 +463,12 @@ def cmd_voice(args: argparse.Namespace, config) -> int:
     except (AudioUnavailable, VadError, DeviceFault) as exc:
         print(
             f"glide voice: {clean(str(exc), config)} (the speech extra has the audio and voice packages: uv sync --extra speech)",
+            file=sys.stderr,
+        )
+        return 2
+    except Exception as exc:  # a sound card that will not open: sounddevice's PortAudioError is none of the kinds above
+        print(
+            f"glide voice: the audio device could not be opened ({type(exc).__name__}: {clean(str(exc), config)})",
             file=sys.stderr,
         )
         return 2
@@ -680,11 +691,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"unrecognized arguments: {' '.join(rest)}")
     args.rest = rest
     if getattr(args, "passthrough", False) and (not args.loads_config or _help_asked(rest)):
+        if not _help_asked(rest):
+            _dotenv()  # the documented .env holds keys and settings these commands read from os.environ themselves
         return args.handler(args)  # theirs to load, if they load anything; asking for help needs no configuration
     try:
         config = _load(args.config)
     except (ValueError, OSError) as exc:  # ConfigError is a ValueError: the file is wrong, or missing
-        print(f"glide: {redact(str(exc))}", file=sys.stderr)
+        print(f"glide: {clean(str(exc))}", file=sys.stderr)
         return 2
     try:
         return args.handler(args, config)

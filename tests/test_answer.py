@@ -8,7 +8,7 @@ from PIL import Image
 
 from glide.computer import runner, writer
 from glide.computer.actions import Context
-from glide.computer.generation import GenerationRequest, GenerationResult, GenerationUnavailable
+from glide.computer.generation import GenerationError, GenerationRequest, GenerationResult, GenerationUnavailable
 from glide.computer.models import Field, Guidance, Popup
 from glide.computer.runner import RunConfig, RunState, hand_off, resolve
 from glide.computer.writer import ANSWER_IMAGE_EDGE, Answer, Fill, compose_answer
@@ -184,8 +184,9 @@ def test_the_screen_is_captured_again_when_an_action_made_the_last_capture_stale
 
 
 def test_a_writer_that_fails_costs_the_answer_and_not_the_run(tmp_path, screen):
+    # Changed from GenerationUnavailable (PR4-4175615096): an unavailable writer halts the run, see the test below.
     def refuse(request, cancel=None):
-        raise GenerationUnavailable("the model provider connection was interrupted")
+        raise GenerationError("the model provider answered with something unusable")
 
     fake = FakeWriter({})
     fake.generate = refuse
@@ -196,6 +197,20 @@ def test_a_writer_that_fails_costs_the_answer_and_not_the_run(tmp_path, screen):
 
     assert state.answer is None
     assert "no answer: the writer failed" in lines[0]
+
+
+def test_a_writer_that_is_unavailable_at_review_time_halts_the_run(tmp_path, screen):
+    def refuse(request, cancel=None):
+        raise GenerationUnavailable("the model provider connection was interrupted")
+
+    fake = FakeWriter({})
+    fake.generate = refuse
+    state = RunState(outcome="done", view=(screen, []))
+
+    with pytest.raises(writer.WriterUnavailable):
+        hand_off(RunConfig(goal=GOAL, out=tmp_path), context(fake), state, 1, logged()[1])
+
+    assert state.answer is None and not state.failure  # `_run` turns it into the "generation unavailable" outcome
 
 
 def decision(kind: str, confidence: float = 0.9) -> SimpleNamespace:

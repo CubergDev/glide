@@ -15,8 +15,10 @@ from test_assistant_core import build, spoken
 from test_assistant_fakes import WAIT, FakeClassifier, FakeLLM, route_json, wait_until
 from test_cancel_chain import Connection
 
+from glide.assistant import core
 from glide.assistant.audio_io import chunked
 from glide.assistant.core import Assistant
+from glide.assistant.phrases import say
 from glide.assistant.tasks import ComputerTask
 from glide.computer import runner
 from glide.computer.control import controlled
@@ -104,6 +106,7 @@ def test_a_newer_request_cancels_the_one_still_being_routed_and_the_old_one_says
     assert first_done.wait(WAIT), "the older request is still blocked in its provider call"
     assert hold.connection.closed.is_set()  # its connection was closed, not waited out
     assert second.text == "Paris." and first["value"].text == ""
+    assert first["value"].route == "none" and second.route == "answer"  # PR9-4175574734: a superseded request is not an answer
     assert rig.warned == []  # an interruption is not a failure
     rig.assistant.wait_idle(WAIT)
     assert spoken(rig) == ["Paris."] and rig.shown == ["Paris."]  # the late answer to the first was never shown or said
@@ -145,7 +148,7 @@ def test_an_answer_cut_off_mid_stream_stops_being_spoken_and_its_connection_is_c
     assert done.wait(WAIT) and hold.connection.closed.is_set()
     rig.assistant.wait_idle(WAIT)
     assert spoken(rig) == ["First sentence."]  # nothing after the cut
-    assert rig.warned == [] and box["value"].text == "First sentence."
+    assert rig.warned == [] and box["value"].text == "First sentence." and box["value"].route == "none"
     assert list(rig.assistant._history) == []  # an interrupted answer is not remembered
 
 
@@ -226,6 +229,36 @@ def test_a_sentence_said_after_the_cut_is_heard_in_full(tmp_path):
     assert rig.assistant.wait_idle(WAIT)
     assert voice.calls == ["One.", "Two."] and rig.warned == []
     assert [pcm for pcm, _ in rig.player.played] == [b"\x01\x00\x02\x00", b"\x03\x00"]  # all of it, none of the cut one
+
+
+def test_a_sentence_queued_the_moment_after_a_cut_is_not_lost_to_it(tmp_path, monkeypatch):
+    """PR9-4175620373: the lane was reset and the voice's connection cut as two steps, so a sentence queued between them
+    (from a path that does not hold the assistant lock) started on the connection the second step then closed."""
+    from glide.assistant.speech import Speaker
+
+    voice = Voice()
+    tts = TTS(Chain("tts", [Slot("voice", voice)]))
+    rig = build(tmp_path, llm=llm_of(Model()), tts=tts)
+    speaker = rig.assistant._speaker_or_none()
+    cancel, injected = Speaker.cancel, []
+
+    def cancel_then_a_sentence_is_said(self, *args, **kwargs):
+        cancel(self, *args, **kwargs)  # the lane is reset here, and with the fix the voice already cut
+        if not injected:
+            injected.append(True)
+            threading.Thread(target=lambda: self.say("late"), daemon=True).start()
+            assert voice.connection.opened.wait(WAIT)  # "late" is being made, on the voice's current connection
+
+    monkeypatch.setattr(Speaker, "cancel", cancel_then_a_sentence_is_said)
+
+    rig.assistant.interrupt_speech()
+
+    assert voice.calls == ["late"]
+    assert not voice.connection.closed.is_set(), "the new sentence's connection was closed by the cut that came before it"
+    voice.connection.release.set()
+    assert rig.assistant.wait_idle(WAIT)
+    assert [pcm for pcm, _ in rig.player.played] == [b"\x01\x00\x02\x00", b"\x03\x00"] and rig.warned == []
+    assert speaker is rig.assistant._speaker
 
 
 # -- a request being heard ----------------------------------------------------------------------------
@@ -316,6 +349,32 @@ def test_a_request_typed_while_speech_is_still_being_heard_does_not_cancel_the_s
     listener.connection.release.set()
 
     assert done.wait(WAIT) and box["value"].text == "Four."
+
+
+def test_an_older_requests_transcript_arriving_late_does_not_cancel_a_newer_request_still_being_answered(tmp_path):
+    """PR9-4175621615: requests are ordered by when they were made. The spoken one was made first, so its late
+    transcript supersedes nothing that was made after it: the typed request is answered and remembered, and so is it."""
+    listener = Listener(final="what is two and two")
+    stt = STT(Chain("stt", [Slot("stt", listener)]))
+    hold = Hold(then="Second sentence. ")
+    model = Model(chats=[ANSWER_ROUTE, route_json("answer", reply="Four.")], streams=[["First sentence. ", hold]])
+    rig = build(tmp_path, llm=llm_of(model), stt=stt)
+    spoken_done, spoken_box = in_thread(lambda: rig.assistant.handle_audio(iter(loud())))
+    assert listener.connection.opened.wait(WAIT)
+    typed_done, typed_box = in_thread(lambda: rig.assistant.handle_text("capital of France"))
+    assert hold.connection.opened.wait(WAIT)  # the typed request is mid-answer
+
+    listener.connection.release.set()  # the older request's transcript arrives now
+    assert spoken_done.wait(WAIT) and spoken_box["value"].text == "Four."
+    hold.connection.release.set()
+
+    assert typed_done.wait(WAIT)
+    assert typed_box["value"].text == "First sentence. Second sentence."
+    assert not hold.connection.closed.is_set()  # nothing closed its connection
+    rig.assistant.wait_idle(WAIT)
+    assert {"First sentence.", "Second sentence.", "Four."} <= set(spoken(rig))
+    users = {m["content"] for m in rig.assistant._history if m["role"] == "user"}
+    assert users == {"what is two and two", "capital of France"}
 
 
 # -- the task ------------------------------------------------------------------------------------------
@@ -471,6 +530,38 @@ def test_a_correction_that_is_itself_a_task_waits_for_the_dropped_task_to_end_an
     assert first.wait(WAIT) and isinstance(asking.replies[0], Abort) and len(asking.replies) == 1
     assert asking.goals == ["Open the file", "Open Safari"] and reply.task.result.outcome == "done"
     assert rig.warned == []  # not "a task is already running"
+
+
+def test_a_correction_that_outlasts_the_wait_for_the_dropped_task_is_told_it_is_still_stopping(tmp_path, asking, monkeypatch):
+    # PR9-4175419789: the wait for the dropped task is bounded, and its result was thrown away: the person heard
+    # "I am already working on a task. Say stop first." about a task that had already been stopped
+    monkeypatch.setattr(core, "UNWIND_S", 0.0)
+    instead = route_json("computer", reply="Switching.", goal="Open Safari")
+    rig = assistant_that_asks(tmp_path, [COMPUTER, instead])
+    first = start_asking_task(rig, asking)
+    asking.release.clear()  # the stopped run needs longer than the bound to end
+
+    try:
+        reply = rig.assistant.handle_text("open Safari instead", wait=True)
+        rig.assistant.wait_idle(WAIT)
+        assert reply.task is None and reply.error == "the last task is still stopping"
+        assert say("stopping") in spoken(rig) and say("busy") not in spoken(rig)
+    finally:
+        asking.release.set()
+        assert first.wait(WAIT)
+
+
+def test_a_question_from_a_task_stopped_a_moment_ago_is_not_shown_or_said(tmp_path):
+    # PR9-4175419795: a stop between the task's own check and the callback used to leave a stale question on screen
+    rig = build(tmp_path, llm=llm_of(Model()))
+    task = ComputerTask("g", act=False, config=object(), folder=tmp_path)
+    rig.assistant._ask_user(task, "Which one?", None)
+    assert rig.shown == ["Which one?"]  # the control case: a live task's question is shown
+    rig.shown.clear()
+    task.stop()
+    rig.assistant._ask_user(task, "Which other one?", None)
+    rig.assistant.wait_idle(WAIT)
+    assert rig.shown == [] and "Which other one?" not in spoken(rig)
 
 
 def test_by_default_a_task_never_asks(tmp_path, asking):

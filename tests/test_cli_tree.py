@@ -150,6 +150,21 @@ def test_memory_and_mcp_get_everything_after_the_command_and_the_glide_toml_the_
     assert [args[0] for args, _ in mcp] == [["--config", "a.toml", "serve", "--user", "me"]]
 
 
+def test_the_commands_that_load_their_own_configuration_still_read_the_dotenv_first(isolated, never_loads, monkeypatch):
+    # PR13-4175444474: the documented .env must reach memory, mcp and the webhook commands, which read os.environ
+    read = []
+    monkeypatch.setattr("glide.computer.config.load_dotenv", read.append)
+    for target in ("glide.memory.cli.main", "glide.mcp.cli.main", "glide.webhooks.worker.main"):
+        calls(monkeypatch, target)
+    for argv in (["memory", "status"], ["mcp", "serve"], ["webhooks", "work"]):
+        read.clear()
+        assert cli.main(argv) == 0
+        assert read == [isolated / ".env"], argv
+    read.clear()
+    assert cli.main(["memory", "--help"]) == 0
+    assert read == []  # asking for help needs no environment
+
+
 def test_a_delegate_s_exit_status_is_the_commands(never_loads, monkeypatch):
     calls(monkeypatch, "glide.memory.cli.main", result=2)
     assert cli.main(["memory", "status"]) == 2
@@ -260,7 +275,7 @@ def computer_run(monkeypatch, config, *flags, outcome="dry run", trusted=True):
 
     def fake_run(cfg, ctx_factory, **kwargs):
         seen.update(cfg=cfg, ctx_factory=ctx_factory, **kwargs)
-        return SimpleNamespace(outcome=outcome, failure="")
+        return SimpleNamespace(outcome=outcome, failure="", answer=None)
 
     monkeypatch.setattr(computer_cli, "run", fake_run)
     monkeypatch.setattr(computer_cli.desktop, "accessibility_trusted", lambda: trusted)
@@ -370,6 +385,21 @@ def test_voice_reports_a_detector_that_cannot_be_built(monkeypatch, capsys):
     assert cli.main(["voice"]) == 2
 
 
+def test_voice_reports_a_sound_card_that_will_not_open_in_one_line_and_exits_two(monkeypatch, capsys):
+    # PR13-4175444473: sounddevice's PortAudioError is not an AudioUnavailable, a VadError or a DeviceFault
+    class PortAudioError(Exception):
+        pass
+
+    def boom(config, io, act):
+        raise PortAudioError("Error opening InputStream: Invalid number of channels [PaErrorCode -9998]")
+
+    monkeypatch.setattr(cli, "_load", lambda path: FakeConfig())
+    monkeypatch.setattr(cli, "_voice_loop", boom)
+    assert cli.main(["voice"]) == 2
+    err = capsys.readouterr().err
+    assert "could not be opened (PortAudioError: Error opening InputStream" in err and "Traceback" not in err
+
+
 def test_the_speech_table_of_a_real_file_is_what_build_voice_is_given(monkeypatch):
     config = GlideConfig.from_toml('[speech]\nsilence_ms = 800\nmerge_window_s = 1.0\nidle_s = 5.0\nvad = "energy"\n', env={})
     device = FakePlayer()
@@ -462,6 +492,15 @@ def test_doctor_uses_the_webhooks_file_the_table_and_the_variable_name(isolated,
 def test_doctor_shows_a_wrong_setting_as_an_error_line_and_exits_one(isolated, monkeypatch, capsys, table, feature):
     code, out, lines = doctor(monkeypatch, real_config(isolated, table), capsys)
     assert code == 1 and lines[feature].startswith("error:"), out
+
+
+def test_doctor_calls_server_memory_without_memory_an_error_as_mcp_serve_does(isolated, monkeypatch, capsys):
+    # PR13-4175444479: `glide mcp serve` exits 2 for this combination, so the doctor cannot report it healthy
+    code, out, lines = doctor(monkeypatch, real_config(isolated, '[mcp]\nserver_memory = "read"\n'), capsys)
+    assert code == 1 and lines["mcp"].startswith("error:") and "server_memory needs memory on" in lines["mcp"], out
+    on = '[memory]\nenabled = true\ndata_dir = "mem"\n[mcp]\nserver_memory = "write"\n'
+    code, _, lines = doctor(monkeypatch, real_config(isolated, on), capsys)
+    assert code == 0 and "server_memory write" in lines["mcp"]
 
 
 def test_doctor_checks_the_voice_model_from_the_file_and_never_fetches_it(isolated, monkeypatch, capsys):
