@@ -283,7 +283,7 @@ class FakeLoop:
 def voice_core(tmp_path, **options):
     built = []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         loop = FakeLoop(assistant_factory(config, io=io))
         built.append(SimpleNamespace(loop=loop, settings=settings, act=act, io=io))
         return loop
@@ -318,7 +318,7 @@ def test_a_real_config_gives_the_voice_stack_its_own_settings_not_the_providers_
     config = GlideConfig.from_toml('[speech]\nsilence_ms = 800\nvad = "energy"\n', env={})
     built = []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         built.append(settings)
         return FakeLoop(assistant_factory(config, io=io))
 
@@ -403,7 +403,7 @@ def blocked_voice(tmp_path, **options):
     """A core whose voice factory waits for the test, so a stop can arrive while the stack is still being built."""
     entered, release, loops = threading.Event(), threading.Event(), []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         entered.set()
         assert release.wait(WAIT), "the test never released the voice factory"
         loop = FakeLoop(assistant_factory(config, io=io))
@@ -430,6 +430,30 @@ def test_a_stop_while_the_voice_stack_is_still_opening_wins_and_the_microphone_n
     if how != "close":
         core.start_voice()  # and the slot is free for the next try
         assert wait_until(lambda: len(loops) == 2 and core.voice_active and core._voice is not None)
+    core.close()
+
+
+def test_a_stop_during_the_build_is_known_to_the_stack_before_it_opens_the_microphone(tmp_path):
+    """PR15-4175491836: build_voice opens the device itself, so the epoch check after the build came after the microphone
+    was already open. The factory is now given `ready()`, to ask just before it opens anything."""
+    entered, release, asked = threading.Event(), threading.Event(), []
+
+    def factory(config, settings, *, io, act, assistant_factory, ready):
+        entered.set()
+        assert release.wait(WAIT)
+        asked.append(ready())  # what build_voice does right before device.start()
+        return FakeLoop(assistant_factory(config, io=io))
+
+    core, _ = make_core(tmp_path, voice_factory=factory)
+    core.start_voice()
+    assert entered.wait(WAIT)
+    core.stop()
+    release.set()
+    assert wait_until(lambda: asked and not core._opening)
+    assert asked == [False]
+    core.start_voice()  # a later session is ready
+    assert wait_until(lambda: len(asked) == 2 and core.voice_active)
+    assert asked == [False, True]
     core.close()
 
 

@@ -135,17 +135,18 @@ class PetAssistant(Assistant):
             self._report(PetEvent("state", {"assistant": "idle"}))
 
 
-def _open_voice(config, settings, *, io, act, assistant_factory):
+def _open_voice(config, settings, *, io, act, assistant_factory, ready):
     """The one call that builds real audio hardware: tests replace it (tests/guards_pet-point.py refuses it)."""
     from ..speech.session import build_voice
 
-    return build_voice(config, settings, io=io, act=act, assistant_factory=assistant_factory)
+    return build_voice(config, settings, io=io, act=act, assistant_factory=assistant_factory, ready=ready)
 
 
 class PetCore:
     """Everything the window asks of the core. Methods are safe from any thread and return at once.
 
-    `voice_factory(config, settings, io=, act=, assistant_factory=)` returns a `VoiceLoop`-shaped object; it is
+    `voice_factory(config, settings, io=, act=, assistant_factory=, ready=)` returns a `VoiceLoop`-shaped object (`ready()` is
+    asked just before the microphone is opened, and is False once a stop has come); it is
     `speech.session.build_voice` unless a test passes a fake. `record_content` is opt-in and starts False.
     """
 
@@ -271,7 +272,14 @@ class PetCore:
             if self._abandoned(epoch):
                 return False
             settings = dataclasses.replace(self._config.voice, headset=self.headset, silence_ms=self.silence_ms)
-            loop = self._voice_factory(self._config, settings, io=self._new_io(), act=act, assistant_factory=assistant_factory)
+            loop = self._voice_factory(
+                self._config,
+                settings,
+                io=self._new_io(),
+                act=act,
+                assistant_factory=assistant_factory,
+                ready=lambda: not self._abandoned(epoch),  # a stop during the build must not find the microphone opened
+            )
             if bind is not None:
                 bind(loop.assistant)
             with self._lock:

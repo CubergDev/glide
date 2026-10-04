@@ -233,3 +233,22 @@ def test_build_voice_asks_for_a_yes_per_task_when_acting_unless_the_settings_say
     assert dry._approval is None  # nothing acts, so there is nothing to confirm
     for loop in (on, off, dry):
         loop.assistant.close()
+
+
+def test_the_device_build_voice_owns_is_opened_only_if_the_caller_is_still_ready(monkeypatch):
+    """PR15-4175491836: opening the device is what asks for the microphone, so a caller whose session was stopped while
+    it was being built can say so before that happens."""
+    opened = []
+
+    class Recording(FullDuplexDevice):
+        def start(self):
+            opened.append(self)
+
+    monkeypatch.setattr("glide.speech.session.FullDuplexDevice", Recording)
+    settings = SpeechSettings(echo_canceller="none")
+    for ready in (False, True):
+        loop = build_voice(
+            FakeConfig(llm=FakeLLM(), tts=FakeTTS()), settings, vad=lambda frame: 0.0, ready=lambda ready=ready: ready
+        )
+        loop.assistant.close()
+    assert len(opened) == 1

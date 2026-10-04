@@ -295,7 +295,7 @@ def test_the_view_shows_what_the_provider_never_said_and_keeps_markup_as_text():
 def test_a_point_voice_session_uses_the_pets_voice_slot_and_stop_ends_it(tmp_path):
     loops = []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         loop = FakeLoop(assistant_factory(config, io=io))
         loops.append((loop, act))
         return loop
@@ -314,7 +314,7 @@ def test_a_point_voice_session_uses_the_pets_voice_slot_and_stop_ends_it(tmp_pat
 
 
 def test_a_point_voice_cannot_start_while_an_ordinary_voice_session_is_open(tmp_path):
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         return FakeLoop(assistant_factory(config, io=io))
 
     core, _, fake = pet_with_point(tmp_path, voice_factory=factory)
@@ -331,7 +331,7 @@ def test_a_point_voice_cannot_start_while_an_ordinary_voice_session_is_open(tmp_
 def test_a_stop_while_a_point_voice_session_is_still_opening_wins_and_nothing_stays_open(tmp_path):
     entered, release, loops = threading.Event(), threading.Event(), []
 
-    def factory(config, settings, *, io, act, assistant_factory):
+    def factory(config, settings, *, io, act, assistant_factory, **_):
         entered.set()
         assert release.wait(WAIT)
         loop = FakeLoop(assistant_factory(config, io=io))
