@@ -219,7 +219,11 @@ class Execution:
             return self._blocked_early("Invalid execution budget or readiness deadline; no action was issued.")
         try:
             cfg.out.mkdir(parents=True, exist_ok=True)
-            self.ledger = Ledger(cfg.out / "progress.sqlite3", self.control.task_id)
+            if cfg.journal:
+                cfg.journal.mkdir(parents=True, exist_ok=True)
+            self.ledger = Ledger(
+                cfg.out / "progress.sqlite3", self.control.task_id, cfg.journal / "unresolved-write" if cfg.journal else None
+            )
         except (OSError, sqlite3.Error):
             return self._blocked_early("The task journal is unavailable; no action was issued.")
         try:
@@ -248,6 +252,8 @@ class Execution:
         cfg, state, phases = self.cfg, self.state, self.phases
         if self.ledger.unresolved():
             raise InvalidAction("An unresolved operation exists for this task; review its result before restarting")
+        if cfg.act and self.ledger.marked():
+            raise InvalidAction(self.ledger.marked())
         with self.classifier_factory() as classifier:
             ctx = metered(self.ctx_factory(classifier, state.history), state.calls)
             scope = self._scope(ctx)

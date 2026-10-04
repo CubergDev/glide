@@ -80,6 +80,9 @@ class RunConfig:
     execution_browser: str = ""
     readiness_timeout: float = DEFAULT_READINESS_TIMEOUT
     research_calls: int = DEFAULT_RESEARCH_CALLS  # structured engine: the most model calls a research task may use
+    # The folder every run of one user shares (the parent of each run folder). A write that never reported its result
+    # leaves a marker there that blocks the next acting run until an operator removes it. None: no cross-run guard.
+    journal: Path | None = None
 
     @property
     def replay(self) -> bool:
