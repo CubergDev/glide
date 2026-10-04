@@ -36,6 +36,10 @@ class FakeBrowser:
             return {"targetInfos": [{"type": "page", "targetId": t, "url": u} for t, u in self.tabs.items()]}
         if method == "Target.attachToTarget":
             return {"sessionId": "session-" + params["targetId"]}
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "main"}}}
+        if method == "Page.createIsolatedWorld":
+            return {"executionContextId": 7}
         if method == "Runtime.evaluate":
             if self.evaluate:
                 return {"result": {"value": self.evaluate(params["expression"])}}
@@ -140,7 +144,14 @@ def test_inspection_connects_attaches_and_reads_without_creating_anything():
     browser = FakeBrowser()
     backend = backend_on(browser)
     backend.inspect()
-    assert browser.methods == ["Target.getTargets", "Target.attachToTarget", "Runtime.evaluate"]
+    # The page's scripts run in an isolated world (PR11-4175603646): made once, before the first evaluation.
+    assert browser.methods == [
+        "Target.getTargets",
+        "Target.attachToTarget",
+        "Page.getFrameTree",
+        "Page.createIsolatedWorld",
+        "Runtime.evaluate",
+    ]
     assert browser.calls[-1][2] == "session-tab"  # the page session, not the browser one
     backend.inspect()
     assert browser.methods.count("Target.attachToTarget") == 1  # attached once
@@ -380,3 +391,41 @@ def test_reading_a_form_does_not_construct_form_data():
     """PR11-4175426275: `new FormData(form)` fires the page's `formdata` listeners during a passive read."""
     assert "FormData" not in dom.SNAPSHOT and "FormData" not in dom.FORM_GUARD
     assert ":disabled" in dom.FORM_GUARD and "c.checked" in dom.SNAPSHOT
+
+
+def test_every_script_runs_in_the_isolated_world_and_it_is_remade_after_a_navigation():
+    """PR11-4175603646: a page that patches its own prototypes or ids cannot answer the guards; the world dies with the document."""
+    browser = FakeBrowser()
+    backend = backend_on(browser)
+    backend.inspect()
+    backend.inspect(controls=False)
+    evaluations = [p for m, p, _ in browser.calls if m == "Runtime.evaluate"]
+    assert len(evaluations) == 2 and all(p["contextId"] == 7 for p in evaluations)
+    assert browser.methods.count("Page.createIsolatedWorld") == 1
+    created = [p for m, p, _ in browser.calls if m == "Page.createIsolatedWorld"]
+    assert created == [{"frameId": "main", "worldName": "glide"}]  # no universal access to the page's world
+    real = browser.call
+
+    def gone(method, params=None, *, session_id=None):
+        if method == "Runtime.evaluate" and params["contextId"] == 7:
+            raise dom.CDPError("Runtime.evaluate: Cannot find context with specified id")
+        return real(method, params, session_id=session_id)
+
+    browser.call = gone
+    with pytest.raises(dom.PageEvaluationError):
+        backend.page.evaluate("1")
+    assert backend.page.context is None  # the next read makes a fresh world
+    browser.call = real
+    backend.inspect()
+    assert browser.methods.count("Page.createIsolatedWorld") == 2
+
+
+def test_a_provider_that_cannot_use_a_context_evaluates_in_the_page_world():
+    from glide.computer.execution.obscura import ObscuraBackend
+
+    browser = FakeBrowser()
+    backend = ObscuraBackend("http://127.0.0.1:9222", "tab")
+    backend.browser = browser
+    backend.inspect()
+    assert "Page.createIsolatedWorld" not in browser.methods
+    assert all("contextId" not in p for m, p, _ in browser.calls if m == "Runtime.evaluate")

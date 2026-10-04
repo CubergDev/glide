@@ -53,6 +53,7 @@ DOCUMENT_CHANGED = (
     "Inspected target navigated or closed",
     "request deadline exceeded",
 )
+ISOLATED_WORLD = "glide"
 KEYS = {
     "return": ("Enter", 13),
     "escape": ("Escape", 27),
@@ -233,6 +234,10 @@ class BrowserBackend:
     transport = "cdp"
     passive_inspection = True
     suppress_origin = False
+    # The fixed scripts run in an isolated world of their own, so a page that replaces its own prototypes or `window`
+    # properties cannot answer the staleness, hit-test and credential guards. A provider whose bridge cannot run in a
+    # given context says so by turning this off.
+    isolated_world = True
 
     def __init__(self, endpoint, target=""):
         try:
@@ -300,7 +305,7 @@ class BrowserBackend:
             if self.page:
                 self.page.close()
             attached = self.browser.call("Target.attachToTarget", {"targetId": self.target, "flatten": True})
-            self.page = AttachedPage(self.browser, attached["sessionId"])
+            self.page = AttachedPage(self.browser, attached["sessionId"], isolated=self.isolated_world)
             self.page_id = self.target
 
     def connection_lost(self, error):
@@ -589,19 +594,33 @@ class BrowserBackend:
 class AttachedPage:
     """A flattened page session sharing the existing browser websocket."""
 
-    def __init__(self, browser, session_id):
-        self.browser, self.session_id = browser, session_id
+    def __init__(self, browser, session_id, *, isolated=False):
+        self.browser, self.session_id, self.isolated = browser, session_id, isolated
+        self.context = None  # the isolated world's execution context in the current document
 
     def call(self, method, params=None):
         return self.browser.call(method, params, session_id=self.session_id)
 
+    def _world(self):
+        """The isolated world of the page's top frame, made again after every navigation (it dies with the document)."""
+        if not self.isolated:
+            return {}
+        if self.context is None:
+            frame = self.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+            self.context = self.call("Page.createIsolatedWorld", {"frameId": frame, "worldName": ISOLATED_WORLD})[
+                "executionContextId"
+            ]
+        return {"contextId": self.context}
+
     def evaluate(self, expression, *, await_promise=False):
         try:
             result = self.call(
-                "Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": await_promise}
+                "Runtime.evaluate",
+                {"expression": expression, "returnByValue": True, "awaitPromise": await_promise, **self._world()},
             )
         except CDPError as error:
             if any(marker in str(error) for marker in DOCUMENT_CHANGED):
+                self.context = None
                 raise PageEvaluationError(
                     {"text": "Execution context changed during evaluation", "protocol_error": str(error)}
                 ) from error

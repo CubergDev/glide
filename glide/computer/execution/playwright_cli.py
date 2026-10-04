@@ -261,6 +261,7 @@ class CliSession:
 class PlaywrightBackend(BrowserBackend):
     transport = "playwright-cli"
     passive_inspection = False  # the CLI's ensureTab() can recreate a page before our script runs, so it may act
+    isolated_world = False  # the CLI bridge evaluates in the page's own world
 
     def __init__(self, session=browser_settings.DEFAULT_SESSION, target="", *, allow_actions=False, cli=""):
         browser_settings.validate_provider("playwright", "", target, session)
