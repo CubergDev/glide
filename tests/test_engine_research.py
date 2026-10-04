@@ -570,21 +570,21 @@ def test_with_no_search_address_configured_the_supervisor_is_told_there_is_none(
     assert supervisor.built["search_url"] == ""
 
 
-def test_the_ledger_not_the_supervisor_decides_that_a_planned_step_is_done(monkeypatch, tmp_path):
-    """Browser work is counted only from a fresh observation: a navigation the page never shows is not progress, and the
-    supervisor is not asked for its next stage until every planned step is verified."""
+def test_a_new_tab_the_page_never_shows_is_not_progress_and_is_never_repeated(monkeypatch, tmp_path):
+    """The ledger counts a planned step only from a fresh observation. A tab the backend reports and no observation
+    shows leaves the step open, the write is not replayed, and the supervisor is not asked for its next stage."""
     computer = Computer()
-    computer.state.capabilities.add("query_form")
     writer = Reasoner(
         [decision("browse", goal=f"Open {SEARCH}"), response(Milestone("tab", "Open", "tab_created", value=SEARCH))]
     )
 
-    def stuck(machine, action):
+    def reported_not_shown(machine, action):
         machine.next_id += 1
-        return str(machine.next_id)  # reports a new tab, shows none
+        return str(machine.next_id)
 
-    computer.on_execute = stuck
+    computer.on_execute = reported_not_shown
     state = drive(monkeypatch, tmp_path, computer, writer, research_jev(), steps=6, goal="Review it.")
-    assert state.outcome != "done" and state.answer is None
-    assert len([r for r in writer.requests if r.role == "research_supervisor"]) == 1  # not asked again: the step is open
-    assert state.progress[0]["verified"] == 0
+    assert state.outcome == "blocked" and "not verified" in state.failure and state.answer is None
+    assert [action.kind for action in computer.actions] == ["tab_create"]
+    assert len([r for r in writer.requests if r.role == "research_supervisor"]) == 1
+    assert state.progress[0]["verified"] == 0 and state.progress[-1]["remaining"] == 1
