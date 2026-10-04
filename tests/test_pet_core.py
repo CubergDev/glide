@@ -19,6 +19,7 @@ from glide.computer import runner
 from glide.computer.platform_adapter import desktop
 from glide.computer.runner import RunState
 from glide.providers.chain import SwitchEvent
+from glide.providers.config import SpeechSettings as ProviderSpeech
 from glide.speech.audio import FullDuplexDevice
 from glide.speech.session import build_voice
 from glide.speech.settings import SpeechSettings
@@ -37,7 +38,7 @@ class PetConfig(FakeConfig):
     """FakeConfig plus what the pet reads from a real GlideConfig: the speech settings and the slots."""
 
     voice = SpeechSettings()  # what a real GlideConfig holds for the voice stack (`config.speech` is the providers' view)
-    speech = voice  # still read by glide/assistant/point_cli.py:194, which has the real config's `voice` to read instead (PR15-4175491833)
+    speech = ProviderSpeech()  # the providers' view (language, silence_ms, headset, all None): not what build_voice takes
 
     def slots(self, role):
         return [SimpleNamespace(name=f"{role}-a", state="ready"), SimpleNamespace(name=f"{role}-b", state="skipped")]
