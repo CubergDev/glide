@@ -33,7 +33,8 @@ Expected: one line, `glide app-server: listening on /Users/<you>/Library/Applica
 
 - [ ] In terminal 2: `ls -ld ~/Library/Application\ Support/Glide` shows `drwx------` and you as owner, and
       `ls -l ~/Library/Application\ Support/Glide/glide.sock` shows `srw-------` and you as owner.
-- [ ] `lsof -i -P | grep -i glide` shows nothing: there is no network listener.
+- [ ] `lsof -nP -a -i -p "$(pgrep -f 'glide app-server' | paste -sd, -)"` prints nothing: the core has no network socket at all
+      (a plain `lsof -i | grep glide` would prove nothing, the process is listed as `python`).
 - [ ] Start a second `uv run glide app-server`. Expected: it refuses ("a core is already listening on this socket") and exits 2; the
       first keeps running.
 - [ ] Make the directory open (`chmod 755 ...`) and start again: it refuses ("must be mode 0700"); restore with `chmod 700`.
