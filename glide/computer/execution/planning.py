@@ -68,7 +68,12 @@ def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", con
         data = compose_plan(writer, packet)
         try:
             result = validate_plan(
-                data, observed, steps, allowed_effects=context.get("allowed_effects") if context else None, grounded=grounded
+                data,
+                observed,
+                steps,
+                allowed_effects=context.get("allowed_effects") if context else None,
+                grounded=grounded,
+                refinable={row["id"] for row in progress if not row.get("verified")},
             )
         except UnsupportedCapability:
             raise
@@ -83,7 +88,7 @@ def plan(writer, goal, observed, steps=(), progress=(), reason="", reply="", con
             return result
 
 
-def validate_plan(data, observed, steps=(), *, allowed_effects=None, grounded=None):
+def validate_plan(data, observed, steps=(), *, allowed_effects=None, grounded=None, refinable=frozenset()):
     """Validate the entire batch before registering or dispatching any of it. With `grounded` (a set of canonical hosts),
     every address the plan would open must lead to one of them; the research supervisor does its own check instead."""
     if not isinstance(data, dict) or set(data) not in ({"question", "steps"}, {"question", "steps", "unsupported"}):
@@ -99,7 +104,8 @@ def validate_plan(data, observed, steps=(), *, allowed_effects=None, grounded=No
     if not isinstance(question, str) or len(question) > 500 or not isinstance(raw, list) or len(raw) > MAX_PLAN_STEPS:
         raise InvalidAction("Invalid plan size or question")
     if unsupported:
-        if set(unsupported) & observed.capabilities:
+        if set(unsupported) & (set(observed.capabilities) | set(observed.available_after_navigation)):
+            # Also what the page will offer once the plan has opened it: a blank start is not a missing click.
             raise InvalidAction("Planner reported an available capability as unsupported")
         # Never execute an offered supported fragment when another requirement is unavailable.
         raise UnsupportedCapability(unsupported, observed.capabilities)
@@ -189,11 +195,19 @@ def validate_plan(data, observed, steps=(), *, allowed_effects=None, grounded=No
         raise InvalidAction("Duplicate milestone IDs")
     if steps and not question:
         by_id = {s.id: s for s in planned}
-        if any(s.id not in by_id or by_id[s.id].contract != s.contract for s in steps):
+        if any(
+            s.id not in by_id or not (by_id[s.id].contract == s.contract or _refines(s, by_id[s.id], refinable)) for s in steps
+        ):
             raise InvalidAction("Replanning discarded or changed an original requirement")
     if not steps:
         planned = coalesce_repetitions(planned)
     return planned, question
+
+
+def _refines(old, new, refinable):
+    """A step nothing has verified yet may be made exact: the same requirement in the user's words, a vague "an element
+    called X is present" turned into the address that proves it (the address is checked against the grounded origins)."""
+    return old.id in refinable and old.goal == new.goal and old.effect == "element_present" and new.effect == "url"
 
 
 def coalesce_repetitions(planned):

@@ -233,7 +233,7 @@ def on_element(target: str, body: str) -> str:
 class BrowserBackend:
     transport = "cdp"
     passive_inspection = True
-    suppress_origin = False
+    suppress_origin = True  # Chrome refuses any Origin header the launch flags did not allow; a client without one is accepted
     # The fixed scripts run in an isolated world of their own, so a page that replaces its own prototypes or `window`
     # properties cannot answer the staleness, hit-test and credential guards. A provider whose bridge cannot run in a
     # given context says so by turning this off.
