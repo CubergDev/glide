@@ -210,6 +210,16 @@ def test_ask_prints_the_answer_and_never_builds_a_tts_without_speak(monkeypatch)
     assert config.calls.tts == 0 and config.closed
 
 
+def test_ask_prints_no_terminal_control_sequence_a_model_or_a_screen_wrote(monkeypatch):
+    # PR15-4175491839: the same sweep for the answer, the notices on stderr and a streamed partial transcript
+    hostile = "Paris\x1b]52;c;ZXZpbA==\x07\x1b[2J\x9b31m is\x07 it"
+    code, terminal = run(["ask", "capital"], monkeypatch, answering(hostile))
+    shown = terminal.out.getvalue() + terminal.err.getvalue()
+    assert code == 0 and "Paris" in shown and "is it" in shown
+    assert not any(c in shown for c in ("\x1b", "\x07", "\x9b"))
+    assert cli.clean("a\x1b[31mb\tc\nd\x07") == "ab\tc\nd"  # tabs and newlines of a multi-line summary stay
+
+
 def test_ask_speak_speaks_waits_for_the_voice_and_closes_the_player(monkeypatch):
     config, player = answering("One. Two."), FakePlayer()
     code, terminal = run(["ask", "--speak", "hi"], monkeypatch, config, player=player)

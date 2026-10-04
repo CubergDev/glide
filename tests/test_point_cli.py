@@ -41,6 +41,30 @@ def test_the_default_is_a_local_preview_with_no_model_no_files_and_the_text_on_s
     assert fake.calls == [("pointer",), ("target", (200.0, 150.0))] and list(tmp_path.iterdir()) == []
 
 
+HOSTILE = "pwned\x1b]52;c;ZXZpbA==\x07\x1b[2J\x9b31m\x07 label"
+
+
+def _no_control(text: str) -> bool:
+    return not any(c in text for c in ("\x1b", "\x07", "\x9b", "\x9d"))
+
+
+def test_the_preview_prints_no_terminal_control_sequence_from_the_pointed_item(capsys):
+    # PR15-4175491839: an app's accessibility text must not retitle, clear or write the clipboard of the terminal
+    desktop = SyntheticDesktop(target=PointTarget("AXStaticText", HOSTILE, value="v\x1b[31m"))
+    code, _, _ = run([], writer=reply_writer("never used"), fake=desktop)
+    out = capsys.readouterr().out
+    assert code == 0 and "pwned" in out and "label" in out and _no_control(out)
+
+
+def test_a_model_answer_and_a_heard_sentence_print_no_terminal_control_sequence(capsys):
+    answer = '{"answer":"Fine \\u001b]0;pwned\\u0007 ok \\u009b31m","uncertain":false}'
+    code, _, _ = run(["--allow-model"], writer=reply_writer(answer))
+    out = capsys.readouterr()
+    assert code == 0 and "Fine" in out.out and "ok" in out.out and _no_control(out.out + out.err)
+    point_cli._say(HOSTILE)
+    assert _no_control(capsys.readouterr().err)
+
+
 def test_a_question_goes_to_the_point_answer_with_the_provider_and_what_is_shared_printed_first(capsys):
     code, fake, _ = run(["What is this?", "--allow-model", "--at", "200", "150"], writer=reply_writer())
     out = capsys.readouterr()

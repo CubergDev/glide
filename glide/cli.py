@@ -41,6 +41,7 @@ from .assistant.audio_io import AudioUnavailable, Endpointer, Microphone, Player
 from .assistant.core import IO, Assistant, Reply
 from .assistant.router import is_stop
 from .assistant.tasks import DEFAULT_RUNS_DIR
+from .computer.execution.reading import clean as printable
 
 ACT_BANNER = (
     "ACT MODE: Glide will click and type on this Mac. Stop it by saying or typing stop, with Ctrl-C, "
@@ -121,9 +122,11 @@ def redact(text: str) -> str:
 
 
 def clean(text: str, config=None) -> str:
-    """Text safe to print: the configuration's own scrub first (it knows which variables hold keys), then the sweep."""
+    """Text safe to print: the configuration's own scrub first (it knows which variables hold keys), then the sweep,
+    then every terminal escape sequence and control character removed (newlines and tabs stay): what an app, a page or
+    a model wrote must never move the cursor, retitle the window or write the clipboard of this terminal."""
     scrub = getattr(config, "scrub", None)
-    return redact(scrub(text) if callable(scrub) else text)
+    return printable(redact(scrub(text) if callable(scrub) else text), lines=True)
 
 
 def format_switch(event, config=None) -> str:
@@ -358,7 +361,7 @@ def cmd_listen(args: argparse.Namespace, config) -> int:
 
     def partial(text: str) -> None:
         if sys.stderr.isatty():
-            print(f"\r{text}", end="", file=sys.stderr, flush=True)
+            print(f"\r{clean(text, config)}", end="", file=sys.stderr, flush=True)
 
     assistant = Assistant(config, io=_make_io(config, speak=not args.text_only, partial=partial), runs_dir=args.runs)
     act = args.act
@@ -686,7 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = _load(args.config)
     except (ValueError, OSError) as exc:  # ConfigError is a ValueError: the file is wrong, or missing
-        print(f"glide: {redact(str(exc))}", file=sys.stderr)
+        print(f"glide: {clean(str(exc))}", file=sys.stderr)
         return 2
     try:
         return args.handler(args, config)

@@ -21,6 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..computer.config import load_dotenv, writer_vision
+from ..computer.execution.reading import clean as printable
 from ..computer.writer import make_writer, provider
 from ..providers.config import ConfigError, load_config
 from ..speech.settings import MAX_SILENCE_MS, MIN_SILENCE_MS
@@ -65,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _say(text: str) -> None:
-    print(text, file=sys.stderr, flush=True)
+    print(printable(text, lines=True), file=sys.stderr, flush=True)  # text from a screen or a model never drives the terminal
 
 
 def _switch_line(event, config) -> str:
@@ -153,7 +154,7 @@ def _run(args, config, voice_factory, capture) -> int:
     with selection:
         if writer is None:
             packet = selection.target.packet() if selection.target is not None else {}
-            print("\n".join(f"{name}: {value}" for name, value in packet.items() if value))
+            print("\n".join(printable(f"{name}: {value}") for name, value in packet.items() if value))
             return 0
         return _ask(args, config, writer, selection, voice_factory)
 
@@ -164,7 +165,7 @@ def _ask(args, config, writer, selection, voice_factory) -> int:
 
     def emit(kind: str, **data) -> None:
         if kind == "answer":
-            print(data["text"], flush=True)
+            print(printable(data["text"], lines=True), flush=True)
             if data.get("uncertain"):
                 _say("The selected context is incomplete. Point again or give more detail.")
             if not args.voice:
