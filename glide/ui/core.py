@@ -48,10 +48,10 @@ def task_phase(result) -> str:
     """How a finished task looks to the person. Only a run that said "done" (or a dry run, which is meant to end so)
     and was not found wanting is `completed`: every other outcome, those not yet invented included, is `failed`, and
     a write whose effect was never seen is `uncertain`, never a success."""
+    if result.uncertain:  # a stop mid-write is still a write whose effect was never seen
+        return "uncertain"
     if result.stopped:
         return "stopped"
-    if result.uncertain:
-        return "uncertain"
     return "completed" if result.outcome in ("done", "dry run") and result.achieved is not False else "failed"
 
 
