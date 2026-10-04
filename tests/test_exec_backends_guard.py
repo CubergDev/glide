@@ -1,4 +1,8 @@
-"""The process seam is the only way the execution package starts anything, and a test cannot reach it by accident."""
+"""The process seam is the only way the execution package starts anything, and a test cannot reach it by accident.
+
+The scan itself (`process_starts`) lives here. Which file of `glide/` may start a process, and why, is
+tests/test_process_seams.py.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +16,9 @@ from glide.computer.execution import spawn
 
 REAL_START = spawn.start  # taken at import, before the autouse guard replaces it
 
-COMPUTER = Path(spawn.__file__).resolve().parent.parent
-SCANNED = sorted(
-    [*(p for p in Path(spawn.__file__).resolve().parent.glob("*.py") if p.name != "spawn.py"), COMPUTER / "browser_settings.py"]
-)
-
 BANNED_MODULES = {"subprocess", "multiprocessing", "pty", "pexpect", "webbrowser"}
-ANYWHERE = {"Popen", "create_subprocess_exec", "create_subprocess_shell"}  # no other meaning
+# No other meaning. `stdio_client` and `open_process` are how the MCP SDK and anyio start a child process.
+ANYWHERE = {"Popen", "create_subprocess_exec", "create_subprocess_shell", "stdio_client", "open_process"}
 ON_OS = {"system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile"}  # only as os.<name>
 
 
@@ -54,17 +54,13 @@ def test_the_scan_sees_each_way_of_starting_a_process():
         "from os import fork",
         "import asyncio\nasyncio.create_subprocess_exec('x')",
         "import webbrowser",
+        "from mcp.client.stdio import stdio_client",
+        "import anyio\nawait anyio.open_process(['x'])",
     ):
         assert process_starts(source), source
     assert not process_starts("import os\nos.path.join('a', 'b')\nx = {'run': 1}")
     # Ordinary names that happen to match are not process starts.
     assert not process_starts("system = 'prompt'\nrequest.system\nrequest.fork()\nself.spawn_count = 1\ndef execute(): pass")
-
-
-@pytest.mark.parametrize("path", SCANNED, ids=lambda p: p.name)
-def test_only_the_seam_can_start_a_process(path):
-    assert path.is_file()
-    assert process_starts(path.read_text()) == [], f"{path.name} starts a process; go through glide.computer.execution.spawn"
 
 
 def test_the_seam_itself_starts_the_process_through_popen_without_a_shell(monkeypatch):
