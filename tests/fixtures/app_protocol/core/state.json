@@ -1,0 +1,9 @@
+{
+  "data": {
+    "assistant": "listening",
+    "hands_free": true,
+    "muted": false
+  },
+  "type": "state",
+  "v": 1
+}

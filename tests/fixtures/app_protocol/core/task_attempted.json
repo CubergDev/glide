@@ -1,0 +1,9 @@
+{
+  "data": {
+    "phase": "attempted",
+    "step": 2,
+    "task_id": "t1"
+  },
+  "type": "task",
+  "v": 1
+}

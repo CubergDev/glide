@@ -1,0 +1,11 @@
+{
+  "data": {
+    "chars": 17,
+    "partial": false,
+    "redacted": true,
+    "role": "user",
+    "utterance_id": "u1"
+  },
+  "type": "transcript",
+  "v": 1
+}

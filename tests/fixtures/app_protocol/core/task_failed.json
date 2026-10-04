@@ -1,0 +1,9 @@
+{
+  "data": {
+    "phase": "failed",
+    "summary": "stalled",
+    "task_id": "t1"
+  },
+  "type": "task",
+  "v": 1
+}
