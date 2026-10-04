@@ -207,6 +207,12 @@ ever qualified against a real browser, and that was a report. The full tables of
       probe reports `ready: True` and elements above zero. Two tabs and `target = ""`: an error naming
       `GLIDE_BROWSER_TARGET` and no action. Stop the browser: `Cannot connect to cdp at ...` and nothing else. Navigate a slow
       page and probe repeatedly: never "Cannot connect" (the false-disconnect fix).
+      The probe's scripts now run in an isolated world (`Page.createIsolatedWorld`, then `Runtime.evaluate` with its
+      `contextId`): confirm elements are still found and a click still lands after a navigation (the world is made again), on
+      a page that overrides `Element.prototype.getBoundingClientRect` to lie (the snapshot must not follow it). With a
+      configured background tab, `tab_active` is not met until the tab is in front (`document.visibilityState`); a window
+      fully covered by others reports hidden too, so check what that does to a run you care about. Close the selected tab
+      with several tabs open: no other tab is adopted, the next read lists them.
 - [ ] **End to end (all providers).** `GLIDE_BROWSER_PROVIDER=cdp GLIDE_BROWSER_ENDPOINT=http://127.0.0.1:9222 GLIDE_BROWSER_TARGET=new glide computer "open http://127.0.0.1:8765/ and click the first link" --engine structured --act --out runs/b1`
       (change the provider and endpoint for the others). Expect: the link is clicked, a fresh observation confirms it, the run
       ends `done`, `steps_taken` is above 0, and the exit status is 0. Without `--act` the run stops after one proposed step
