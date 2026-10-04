@@ -1,17 +1,24 @@
-"""Command-line entry points: `clicker` and `clicker-inspect`."""
+"""`glide computer` and `glide inspect`: the screen-driving loop, and a look at what it would send.
+
+Both are reached through the one `glide` command (glide/cli.py), which loads glide.toml, prints every provider
+switch, and hands the loaded configuration to `main`. `glide-computer` and `glide-inspect` are the same two
+commands under their older names. Nothing here starts a run, opens a window or captures the screen until the
+person has typed the command.
+"""
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 import uuid
 from pathlib import Path
 
-from . import config
+from .. import features
+from . import browser_settings, config
 from .actions import Context
 from .control import RunControl
+from .execution.reading import clean as printable
 from .perception import capture, perceive
 from .platform_adapter import desktop
 from .report import annotate, ax_count, render_payload
@@ -19,13 +26,54 @@ from .runner import RunConfig, run
 from .timing import format_timing
 from .writer import make_writer, provider
 
-DOTENV = Path.cwd() / ".env"
+WRITER_DISABLED = (
+    "writer disabled: no usable llm provider in glide.toml; type_text, writer-proposed URLs and the final answer need one "
+    "(run `glide doctor`)"
+)
+ABORTED, FAILED = (
+    130,
+    1,
+)  # exit codes: stopped by the user (the shell's own value for Ctrl-C), and any run that did not do the job
+# How a run ends without having done the job. A hard outcome is one no answer can redeem; most carry no `failure` text
+# (the legacy loop sets one only when the writer fails), so the outcome alone decides.
+FAILED_OUTCOMES = {
+    "blocked",
+    "unsupported",
+    "crashed",
+    "provider failure",
+    "generation unavailable",
+    "desktop unavailable",
+}
+# A stop of the loop. The writer then reads the screen: its answer says whether the goal was reached all the same, and
+# it, not the stop, decides the exit code. With no answer a stop is a failure. "done" and "dry run" are the only
+# other outcomes, and "done" is still a failure when the writer's answer says the goal was not reached.
+STOPPED_OUTCOMES = {"step limit", "stalled", "stuck", "nothing helps", "low confidence"}
 
 
-def _prepare() -> None:
-    config.load_dotenv(DOTENV)
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        sys.exit("TYPESAFE_API_KEY is not set (export it or put it in .env)")
+def exit_code(state) -> int:
+    """0 for a run that did the job, FAILED for one that did not, ABORTED for the user's own stop."""
+    if state.outcome.startswith("aborted"):
+        return ABORTED
+    if state.failure or state.outcome in FAILED_OUTCOMES:
+        return FAILED
+    if state.answer is not None:
+        return 0 if state.answer.achieved else FAILED
+    return FAILED if state.outcome in STOPPED_OUTCOMES else 0
+
+
+def _fail(message: str, code: int = 2) -> int:
+    print(f"glide computer: {message}", file=sys.stderr)
+    return code
+
+
+def show_event(event) -> None:
+    """What the terminal shows of one event the run reports. The run prints nothing of its own, and what a screen or a
+    model wrote never reaches the terminal as a control sequence."""
+    if event.kind == "dry_run":  # the default run: it must say that nothing was done, with the move it stopped at
+        move = f"; it would {printable(event.text)}" if event.text else ""
+        print(f"dry run: nothing was done{move}")
+    elif event.text:
+        print(printable(event.text, lines=True))
 
 
 def ask_user(question: str) -> str:
@@ -39,13 +87,30 @@ def ask_user(question: str) -> str:
         return ""
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None, glide_config) -> int:
+    """Drive this computer toward a goal. `glide_config` is the loaded `GlideConfig`: its writer and classifier chains
+    do the thinking, and every fallback between their slots is announced by the listener `glide` registered on it."""
+    from ..providers.config import ConfigError
+
     parser = argparse.ArgumentParser(
-        prog="clicker",
-        description="Drive this computer toward a goal: screen OCR, a TypeSafe classifier, deterministic actions.",
+        prog="glide computer", description="Drive this computer toward a goal: screen OCR, a classifier, deterministic actions."
     )
     parser.add_argument("goal", help="what you want done on this computer")
     parser.add_argument("--act", action="store_true", help="actually click and type (default: dry run, one step)")
+    parser.add_argument(
+        "--engine",
+        choices=["legacy", "structured"],
+        default="legacy",
+        help="legacy: the screen loop. structured: planned effects checked after each action, through the "
+        "provider chains of glide.toml (browser and desktop tasks; research and reasoning)",
+    )
+    parser.add_argument(
+        "--readiness-timeout",
+        type=float,
+        default=config.DEFAULT_READINESS_TIMEOUT,
+        help="structured engine: seconds a page or an effect may take to show before the run reports it (0-30)",
+    )
+    browser_settings.add_arguments(parser)
     parser.add_argument("--steps", type=int, default=config.DEFAULT_STEPS, help="max actions before stopping")
     parser.add_argument("--min-confidence", type=float, default=config.DEFAULT_MIN_CONFIDENCE, help="stop below this confidence")
     parser.add_argument("--delay", type=float, default=config.DEFAULT_DELAY, help="seconds to wait after each action")
@@ -66,20 +131,24 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--url", help="browser URL to report during replay")
     args = parser.parse_args(argv)
 
-    _prepare()
     if args.act and not desktop.accessibility_trusted():
-        sys.exit("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
+        return _fail("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     try:
-        writer = make_writer()
+        # glide.toml's [browser] table and [research] budget, under the environment and the flags; a bad one stops the run
+        # here, before anything has been started.
+        browser_settings.use(features.table(glide_config, "browser"))
+        browser_settings.apply_arguments(args)
+        research_calls = config.research_budget(features.table(glide_config, "research"))
+        writer = make_writer(glide_config)
         config.writer_vision()  # a bad value stops the run here, not at its first stop
-    except ValueError as e:
-        sys.exit(str(e))
+    except ValueError as e:  # a ConfigError is one
+        return _fail(str(e))
     if writer is None:
-        print(
-            "writer disabled: no ANTHROPIC_API_KEY or CLICKER_WRITER_BASE_URL; type_text, writer-proposed URLs and the final answer need one"
-        )
+        print(WRITER_DISABLED)
     else:
         print(f"writer: {provider(writer)}")
+    if args.engine == "structured":
+        print(f"browser: {browser_settings.description()}")
 
     cfg = RunConfig(
         goal=args.goal,
@@ -93,37 +162,42 @@ def main(argv: list[str] | None = None) -> None:
         app=args.app,
         url=args.url,
         record_content=args.record_content,
+        engine=args.engine,
+        execution_browser=config.browser(),
+        readiness_timeout=args.readiness_timeout,
+        research_calls=research_calls,
     )
 
-    def ctx_factory(typesafe, history):
+    def ctx_factory(classifier, history):
         return Context(
             goal=args.goal,
             browser=config.browser(),
             email=config.email(),
-            typesafe=typesafe,
+            typesafe=classifier,
             writer=writer,
             history=history,
             ask=ask_user if sys.stdin.isatty() else None,
         )
 
     # The run prints nothing of its own; this terminal shows what it reports, and Ctrl-C reaches it as a stop.
-    control = RunControl(str(uuid.uuid4()), lambda event: print(event.text) if event.text else None)
-    state = run(cfg, ctx_factory, control=control)
-    if state.outcome.startswith("aborted"):
-        sys.exit(130)
+    control = RunControl(str(uuid.uuid4()), show_event)
+    try:
+        state = run(cfg, ctx_factory, classifier_factory=glide_config.classifier, control=control)
+    except ConfigError as e:  # no classifier slot is usable: the message names the variables to set
+        return _fail(glide_config.scrub(str(e)))
+    return exit_code(state)
 
 
-def inspect(argv: list[str] | None = None) -> None:
+def inspect(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="clicker-inspect",
-        description="Count down, capture the screen, and show exactly what the clicker would send to TypeSafe.",
+        prog="glide inspect",
+        description="Count down, capture the screen, and show exactly what the classifier would be sent.",
     )
     parser.add_argument("goal", nargs="?", default="(no goal given)")
     parser.add_argument("--countdown", type=int, default=3)
     parser.add_argument("--no-open", action="store_true", help="write files without opening them")
     parser.add_argument("--out", type=Path, default=Path("inspections") / time.strftime("%Y%m%d-%H%M%S"))
     args = parser.parse_args(argv)
-    config.load_dotenv(DOTENV)
     args.out.mkdir(parents=True, exist_ok=True)
 
     for n in range(args.countdown, 0, -1):
@@ -150,3 +224,4 @@ def inspect(argv: list[str] | None = None) -> None:
     if not args.no_open:
         desktop.open_path(annotated)
         desktop.open_path(text, as_text=True)
+    return 0

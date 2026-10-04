@@ -481,3 +481,24 @@ def test_the_command_never_sends_anything_without_live(clean_cwd, monkeypatch):
 
     monkeypatch.setattr(httpx.Client, "send", refuse)
     assert main([], env=KEYS) in (0, 1)  # real adapters, built and closed, nothing sent
+
+
+def test_report_is_the_one_path_of_the_command_and_scrubs_every_notice(capsys):
+    config = GlideConfig.from_toml("[unknown_table]\nx = 1\n", env={"OPENAI_API_KEY": KEYS["OPENAI_API_KEY"]}, source="demo.toml")
+    config.warnings.append(f"a notice that quotes {KEYS['OPENAI_API_KEY']}")
+    rows = doctor_module.report(config, roles=["tts"])
+    out = capsys.readouterr().out
+    assert out.startswith("config: demo.toml\n") and "warning: " in out and "ignoring the unknown table [unknown_table]" in out
+    assert KEYS["OPENAI_API_KEY"] not in out and "***" in out  # the configuration's own scrub, by default
+    assert out.rstrip().endswith(format_rows(rows))
+    doctor_module.report(config, roles=["tts"], scrub=lambda text: "SCRUBBED")
+    assert "warning: SCRUBBED" in capsys.readouterr().out
+
+
+def test_planner_and_research_get_rows_only_when_the_file_gives_them_a_chain():
+    plain = GlideConfig.from_toml("", env=KEYS)
+    assert {row.role for row in doctor(plain)} == set(ROLES)
+    config = GlideConfig.from_toml(
+        '[llm.planner]\nchain = ["openai:gpt-x"]\n[llm.research]\nchain = ["openai:gpt-x"]\n', env=KEYS
+    )
+    assert {row.role for row in doctor(config)} == {*ROLES, "llm.planner", "llm.research"}

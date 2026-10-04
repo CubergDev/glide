@@ -1,0 +1,575 @@
+{
+ "cancellation": {
+  "events": [
+   {
+    "correlation": null,
+    "data": {
+     "name": "needs-task",
+     "reason": "task_required_unsupported",
+     "status": "skipped"
+    },
+    "kind": "mcp.tool_skipped",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "count": 5,
+     "generation": 1,
+     "operation": "tools/list"
+    },
+    "kind": "mcp.inventory_refreshed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-1>",
+    "data": {
+     "name": "slow",
+     "operation": "tools/call",
+     "progressToken": "<token-1>"
+    },
+    "kind": "mcp.call_started",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-1>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "slow",
+     "operation": "tools/call",
+     "progressToken": "<token-1>",
+     "status": "cancelled",
+     "success": false
+    },
+    "kind": "mcp.cancelled",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-1>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "slow",
+     "operation": "tools/call",
+     "progressToken": "<token-1>",
+     "status": "cancelled",
+     "success": false
+    },
+    "kind": "mcp.call_finished",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "operation": "tools/list",
+     "status": "cancelled"
+    },
+    "kind": "mcp.cancelled",
+    "scope": null,
+    "source": "mcp:srv"
+   }
+  ],
+  "outcome": {
+   "call": "CancelledError: ",
+   "refresh": "CancelledError: ",
+   "sync_refresh_on_async_bridge": "TypeError: await arefresh() for an asynchronous MCP bridge"
+  }
+ },
+ "constructor": {
+  "constructor_asynchronous_not_bool": "TypeError: bridge asynchronous flag must be boolean and validator callable",
+  "constructor_capabilities_not_a_mapping": "MCPProtocolError: MCP response must be a dictionary or SDK-like model",
+  "constructor_capability_not_an_object": "ValueError: negotiated capabilities must contain capability objects",
+  "constructor_keywords_not_a_mapping": "TypeError: bridge grants and relevance must be host mappings",
+  "constructor_permissions_not_a_mapping": "TypeError: bridge grants and relevance must be host mappings",
+  "constructor_request_not_callable": "ValueError: bridge requires a server identifier and host request callback",
+  "constructor_server_not_an_identifier": "ValueError: bridge requires a server identifier and host request callback",
+  "constructor_server_not_text": "ValueError: bridge requires a server identifier and host request callback",
+  "constructor_validator_not_callable": "TypeError: bridge asynchronous flag must be boolean and validator callable"
+ },
+ "malformed": {
+  "block_type_not_string": "MCPProtocolError: MCP content type must be a string",
+  "content_not_list": "MCPProtocolError: MCP tool result requires a content list",
+  "cursor_empty": "MCPProtocolError: MCP pagination cursor is invalid or repeated",
+  "cursor_not_string": "MCPProtocolError: MCP pagination cursor is invalid or repeated",
+  "cursor_too_long": "MCPProtocolError: MCP pagination cursor is invalid or repeated",
+  "error_member": "MCPProtocolError: MCP transport returned a protocol error",
+  "inventory_too_large": "MCPProtocolError: MCP inventory exceeds 4096 tools",
+  "is_error_not_bool": "MCPProtocolError: isError must be a boolean",
+  "last_page_has_no_cursor": null,
+  "link_without_name": "MCPProtocolError: resource link requires URI and name",
+  "media_is_projected": {
+   "content": [
+    {
+     "data_omitted": true,
+     "encoded_bytes": 4,
+     "mimeType": "audio/wav",
+     "type": "audio"
+    },
+    {
+     "resource": {
+      "blob_omitted": true,
+      "encoded_bytes": 2,
+      "uri": "u"
+     },
+     "type": "resource"
+    }
+   ]
+  },
+  "media_without_mime": "MCPProtocolError: media content requires data and mimeType",
+  "not_a_dict": "MCPProtocolError: MCP response must be a dictionary or SDK-like model",
+  "not_json": "MCPProtocolError: MCP payload must contain bounded JSON values",
+  "oversized": "MCPProtocolError: MCP payload exceeds its byte budget",
+  "page_has_error": "MCPProtocolError: MCP transport returned a protocol error",
+  "page_not_a_dict": "MCPProtocolError: MCP response must be a dictionary or SDK-like model",
+  "resource_blob_not_string": "MCPProtocolError: resource blob must be a string",
+  "resource_not_a_dict": "MCPProtocolError: MCP response must be a dictionary or SDK-like model",
+  "resource_without_body": "MCPProtocolError: embedded resource requires text or blob",
+  "resource_without_uri": "MCPProtocolError: embedded resource requires a URI",
+  "structured_not_object": "MCPProtocolError: structuredContent must be an object",
+  "text_without_string": "MCPProtocolError: text content requires a string",
+  "tools_not_list": "MCPProtocolError: tools/list requires a tools list",
+  "unsupported_type": "MCPProtocolError: unsupported MCP content type"
+ },
+ "notifications": {
+  "capabilities_are_copies": true,
+  "no_tools_capability_means_no_tools": [],
+  "no_tools_capability_refuses_refresh": "MCPProtocolError: host did not negotiate tools capability",
+  "not_connected_flag": "TypeError: connected must be a boolean",
+  "params_not_a_mapping": "MCPProtocolError: MCP response must be a dictionary or SDK-like model",
+  "params_with_an_error": "MCPProtocolError: MCP transport returned a protocol error",
+  "progress_for_an_unknown_call_is_ignored": "no error",
+  "progress_token_not_valid": "MCPProtocolError: progress notification requires a valid token"
+ },
+ "observers": {
+  "failing": "ZeroDivisionError: division by zero",
+  "not_callable": "TypeError: inventory callback must be callable",
+  "seen": [
+   [],
+   [
+    "mcp:srv/echo",
+    "mcp:srv/slow",
+    "mcp:srv/boom",
+    "mcp:srv/garbled",
+    "mcp:srv/other"
+   ],
+   [],
+   []
+  ]
+ },
+ "one_session": {
+  "events": [
+   {
+    "correlation": null,
+    "data": {
+     "name": "needs-task",
+     "reason": "task_required_unsupported",
+     "status": "skipped"
+    },
+    "kind": "mcp.tool_skipped",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "count": 5,
+     "generation": 1,
+     "operation": "tools/list"
+    },
+    "kind": "mcp.inventory_refreshed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-1>",
+    "data": {
+     "name": "echo",
+     "operation": "tools/call",
+     "progressToken": "<token-1>"
+    },
+    "kind": "mcp.call_started",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-1>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "echo",
+     "operation": "tools/call",
+     "progressToken": "<token-1>",
+     "status": "success",
+     "success": true
+    },
+    "kind": "mcp.call_finished",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-2>",
+    "data": {
+     "name": "echo",
+     "operation": "tools/call",
+     "progressToken": "<token-2>"
+    },
+    "kind": "mcp.call_started",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-2>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "echo",
+     "operation": "tools/call",
+     "progressToken": "<token-2>",
+     "status": "execution_failure",
+     "success": false
+    },
+    "kind": "mcp.execution_failure",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-2>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "echo",
+     "operation": "tools/call",
+     "progressToken": "<token-2>",
+     "status": "execution_failure",
+     "success": false
+    },
+    "kind": "mcp.call_finished",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-3>",
+    "data": {
+     "name": "slow",
+     "operation": "tools/call",
+     "progressToken": "<token-3>"
+    },
+    "kind": "mcp.call_started",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-3>",
+    "data": {
+     "name": "slow",
+     "operation": "tools/call",
+     "progress": 0.3,
+     "progressToken": "<token-3>",
+     "total": 1
+    },
+    "kind": "mcp.progress",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-3>",
+    "data": {
+     "name": "slow",
+     "operation": "tools/call",
+     "progress": 0.6,
+     "progressToken": "<token-3>",
+     "total": null
+    },
+    "kind": "mcp.progress",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-3>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "slow",
+     "operation": "tools/call",
+     "progressToken": "<token-3>",
+     "status": "success",
+     "success": true
+    },
+    "kind": "mcp.call_finished",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-4>",
+    "data": {
+     "name": "boom",
+     "operation": "tools/call",
+     "progressToken": "<token-4>"
+    },
+    "kind": "mcp.call_started",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-4>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "boom",
+     "operation": "tools/call",
+     "progressToken": "<token-4>",
+     "status": "execution_failure",
+     "success": false
+    },
+    "kind": "mcp.execution_failure",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-4>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "boom",
+     "operation": "tools/call",
+     "progressToken": "<token-4>",
+     "status": "execution_failure",
+     "success": false
+    },
+    "kind": "mcp.call_finished",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-5>",
+    "data": {
+     "name": "garbled",
+     "operation": "tools/call",
+     "progressToken": "<token-5>"
+    },
+    "kind": "mcp.call_started",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-5>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "garbled",
+     "operation": "tools/call",
+     "progressToken": "<token-5>",
+     "status": "protocol_failure",
+     "success": false
+    },
+    "kind": "mcp.protocol_failure",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": "<token-5>",
+    "data": {
+     "duration_ms": "<float>",
+     "name": "garbled",
+     "operation": "tools/call",
+     "progressToken": "<token-5>",
+     "status": "protocol_failure",
+     "success": false
+    },
+    "kind": "mcp.call_finished",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "uri": "memo://x"
+    },
+    "kind": "mcp.resources.updated",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "data": "hello",
+     "level": "info"
+    },
+    "kind": "mcp.message",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "generation": 2
+    },
+    "kind": "mcp.tools_changed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "name": "needs-task",
+     "reason": "task_required_unsupported",
+     "status": "skipped"
+    },
+    "kind": "mcp.tool_skipped",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "count": 5,
+     "generation": 3,
+     "operation": "tools/list"
+    },
+    "kind": "mcp.inventory_refreshed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "connected": false,
+     "generation": 4
+    },
+    "kind": "mcp.connection_changed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "connected": true,
+     "generation": 5
+    },
+    "kind": "mcp.connection_changed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "name": "needs-task",
+     "reason": "task_required_unsupported",
+     "status": "skipped"
+    },
+    "kind": "mcp.tool_skipped",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "count": 5,
+     "generation": 6,
+     "operation": "tools/list"
+    },
+    "kind": "mcp.inventory_refreshed",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "operation": "tools/list",
+     "status": "error"
+    },
+    "kind": "mcp.protocol_failure",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "operation": "tools/list",
+     "status": "error"
+    },
+    "kind": "mcp.protocol_failure",
+    "scope": null,
+    "source": "mcp:srv"
+   },
+   {
+    "correlation": null,
+    "data": {
+     "operation": "tools/list",
+     "status": "error"
+    },
+    "kind": "mcp.protocol_failure",
+    "scope": null,
+    "source": "mcp:srv"
+   }
+  ],
+  "outcome": {
+   "arguments_not_an_object": "MCPProtocolError: MCP tool arguments must be an object",
+   "arguments_not_json": "MCPProtocolError: MCP payload must contain bounded JSON values",
+   "bad_page": "MCPProtocolError: tools/list requires a tools list",
+   "boom": "RuntimeError: server exploded",
+   "duplicate_names": "MCPProtocolError: MCP tool names must be unique in a bounded inventory",
+   "echo": {
+    "content": [
+     {
+      "text": "ok",
+      "type": "text"
+     }
+    ],
+    "structuredContent": {
+     "echoed": {
+      "text": "hi"
+     }
+    }
+   },
+   "garbled": "MCPProtocolError: MCP tool result requires a content list",
+   "progress_refusals": [
+    "progress must increase and have a valid optional total",
+    "progress must increase and have a valid optional total"
+   ],
+   "refresh_after_change": [
+    "mcp:srv/echo",
+    "mcp:srv/slow",
+    "mcp:srv/boom",
+    "mcp:srv/garbled",
+    "mcp:srv/other"
+   ],
+   "refresh_after_reconnect": 5,
+   "refresh_ids": [
+    "mcp:srv/echo",
+    "mcp:srv/slow",
+    "mcp:srv/boom",
+    "mcp:srv/garbled",
+    "mcp:srv/other"
+   ],
+   "refresh_while_disconnected": "MCPStaleCatalogError: MCP host is disconnected",
+   "repeated_cursor": "MCPProtocolError: MCP pagination cursor is invalid or repeated",
+   "slow": {
+    "content": [
+     {
+      "text": "ok",
+      "type": "text"
+     }
+    ]
+   },
+   "stale_closure_refused": "MCPStaleCatalogError: refresh and replace the stale MCP tool inventory",
+   "sync_bridge_refuses_arefresh": "TypeError: use refresh() for a synchronous MCP bridge",
+   "tool_error_is_feedback": {
+    "content": [
+     {
+      "text": "tool says no",
+      "type": "text"
+     }
+    ],
+    "isError": true
+   },
+   "tools_after_list_changed": "MCPStaleCatalogError: refresh the connected MCP inventory before selecting tools",
+   "tools_before_refresh": "MCPStaleCatalogError: refresh the connected MCP inventory before selecting tools",
+   "tools_while_disconnected": "MCPStaleCatalogError: refresh the connected MCP inventory before selecting tools"
+  }
+ },
+ "validators": {
+  "accepts": "no error",
+  "breaks": "MCPProtocolError: host could not validate the structured tool output",
+  "rejects": "MCPProtocolError: host rejected the structured tool output",
+  "returns_none_is_accepted": "no error",
+  "structured_content_missing": "MCPProtocolError: tool with outputSchema requires structuredContent"
+ }
+}

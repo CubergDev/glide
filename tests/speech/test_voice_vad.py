@@ -192,3 +192,14 @@ def test_silero_frames_keep_state_and_a_64_sample_context_between_calls():
     assert second["state"].max() == 1 and int(second["sr"]) == 16000
     with pytest.raises(ValueError, match="512 samples"):
         silero(frame[:-2])
+
+
+def test_a_level_exactly_at_the_bar_is_not_speech_and_the_bar_is_the_higher_of_the_threshold_and_the_floors_multiple():
+    from glide.assistant.audio_io import NoiseFloor
+
+    noise = NoiseFloor(threshold=500.0, ratio=3.0)
+    assert not noise.is_speech(500.0) and noise.is_speech(500.5)
+    noise.learn(300.0)  # the first quiet level is the floor itself: the bar is now 900
+    assert noise.floor == 300.0 and not noise.is_speech(900.0) and noise.is_speech(900.5)
+    noise.reset()
+    assert noise.floor == 0.0 and noise.is_speech(500.5)

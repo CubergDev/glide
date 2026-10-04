@@ -8,10 +8,12 @@ walk itself lives in ax_walk.py, shared by both.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
@@ -21,8 +23,9 @@ from ocrmac import ocrmac
 from PIL import Image
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
-from .config import ABORT_CORNER_PX
-from .models import Abort, AxNode, DesktopError, DesktopPermissionError, Field
+from .models import AxNode, Box, DesktopError, DesktopPermissionError, Field
+from .platform_adapter import abort_hint, abort_if_stopped, dispatched, sleep_watching  # noqa: F401  (the shared escape hatch)
+from .point_types import PointTarget, point_box
 
 KEYCODES = {"return": 36, "tab": 48, "escape": 53, "a": 0, "delete": 51, "[": 33}
 SHORTCUT_CODES = {
@@ -53,23 +56,7 @@ def mouse_location() -> tuple[float, float]:
 
 
 def check_abort() -> None:
-    from .control import checkpoint
-
-    checkpoint()
-    x, y = mouse_location()
-    if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
-        raise Abort("mouse in top-left corner")
-
-
-def abort_hint() -> str:
-    return "Ctrl-C, or slam the mouse into the top-left corner"
-
-
-def sleep_watching(seconds: float) -> None:
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        check_abort()
-        time.sleep(0.1)
+    abort_if_stopped(mouse_location)
 
 
 def accessibility_trusted() -> bool:
@@ -103,6 +90,7 @@ def _down_then_up(event: Callable[[bool], object]) -> None:
         _post(event(False))
 
 
+@dispatched
 def click_at(point: tuple[float, float]) -> None:
     # Check before moving: the synthetic move would otherwise take the pointer out of the abort corner.
     check_abort()
@@ -112,6 +100,7 @@ def click_at(point: tuple[float, float]) -> None:
     _down_then_up(lambda down: Quartz.CGEventCreateMouseEvent(None, kinds[down], point, Quartz.kCGMouseButtonLeft))
 
 
+@dispatched
 def press(key: str, command: bool = False) -> None:
     check_abort()
     code = KEYCODES[key]
@@ -131,6 +120,7 @@ def _unicode_key(ch: str, down: bool):
     return event
 
 
+@dispatched
 def type_text(text: str) -> None:
     """One character at a time, checking the abort corner before each."""
     for ch in text:
@@ -138,11 +128,13 @@ def type_text(text: str) -> None:
         _down_then_up(partial(_unicode_key, ch))
 
 
+@dispatched
 def clear_field() -> None:
     press("a", command=True)
     press("delete")
 
 
+@dispatched
 def scroll(lines: int) -> None:
     """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
     center = frontmost_window_center()
@@ -156,8 +148,71 @@ def scroll(lines: int) -> None:
 # ------------------------------------------------------------------ apps and windows
 
 
-def osascript(script: str) -> str:
-    return subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=True).stdout.strip()
+OSASCRIPT_TIMEOUT_S = 10.0  # one AppleScript call; a call that outlives it has an unknown outcome
+JXA_TIMEOUT_S = 5.0  # a tab observation or operation
+OSASCRIPT_POLL_S = 0.05  # how often a running call looks for a stop
+
+# Fixed programs. Whatever came from outside (an app name, a URL) is an argv item of `on run argv`, so it
+# reaches AppleScript as data and never as source.
+ACTIVATE_SCRIPT = "on run argv\ntell application (item 1 of argv) to activate\nend run"
+FRONTMOST_SCRIPT = 'on run argv\ntell application "System Events" to set frontmost of process (item 1 of argv) to true\nend run'
+OPEN_LOCATION_SCRIPT = "on run argv\ntell application (item 1 of argv) to open location (item 2 of argv)\nend run"
+
+# What an application name may look like, so it can be an argument or sit inside a quoted AppleScript literal
+# (browser_url, whose script needs the app's own vocabulary at compile time) without any way to leave it.
+APP_NAME = re.compile(r"\w[\w .+&()-]{0,63}")
+
+
+def app_name(value: str) -> str:
+    if not APP_NAME.fullmatch(value):
+        raise DesktopError("Invalid application name")
+    return value
+
+
+def browser_address(url: str) -> str:
+    from .execution.contracts import safe_url
+
+    if not safe_url(url):
+        raise DesktopError("Invalid URL")
+    return url
+
+
+def osascript(script: str, *args: str, timeout: float = OSASCRIPT_TIMEOUT_S) -> str:
+    """Run one AppleScript program, `script` lines as `-e` options and `args` as its `argv`.
+
+    The call is bounded by `timeout` and watches for a stop while it runs: a cancelled `RunControl`, a stop
+    event or the abort corner kills the child and raises `Abort`; a deadline kills it and raises `DesktopError`
+    (the outcome is unknown, so the caller must not replay it). A failing script raises `CalledProcessError`.
+    """
+    if any(arg.startswith("-") or "\0" in arg for arg in args):  # osascript would read it as an option
+        raise DesktopError("Invalid AppleScript argument")
+    return _run_osascript(["osascript", *(part for line in script.splitlines() for part in ("-e", line)), *args], timeout)
+
+
+def _run_osascript(argv: list[str], timeout: float) -> str:
+    from .control import checkpoint
+
+    checkpoint()
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                out, _ = proc.communicate(timeout=OSASCRIPT_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                check_abort()
+                if time.monotonic() >= deadline:
+                    raise DesktopError("An AppleScript call did not finish in time; its outcome is unknown") from None
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        with suppress(Exception):
+            proc.communicate()  # reap it
+        raise
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, ["osascript"])  # the script is not part of the error
+    return out.strip()
 
 
 def frontmost_app() -> str:
@@ -178,10 +233,12 @@ def frontmost_pid() -> int:
     return frontmost_app_and_pid()[1]
 
 
+@dispatched
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
+    app_name(app)
     check_abort()
-    osascript(f'tell application "{app}" to activate')
+    osascript(ACTIVATE_SCRIPT, app)  # an unknown outcome raises: the retry below is not for a call that may have run
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         check_abort()
@@ -189,21 +246,25 @@ def activate(app: str, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.1)
     check_abort()
-    osascript(f'tell application "System Events" to set frontmost of process "{app}" to true')
+    osascript(FRONTMOST_SCRIPT, app)
     time.sleep(0.3)
     return frontmost_app() == app
 
 
+@dispatched
 def open_url(browser: str, url: str) -> bool:
+    app_name(browser)
+    browser_address(url)
     check_abort()
-    osascript(f'tell application "{browser}" to open location "{url}"')
+    osascript(OPEN_LOCATION_SCRIPT, browser, url)
     return activate(browser)
 
 
 def browser_url(browser: str) -> str | None:
+    """The active tab's address, or None when the browser has none to give (or took too long)."""
     try:
-        return osascript(f'tell application "{browser}" to get URL of active tab of front window') or None
-    except subprocess.CalledProcessError:
+        return osascript(f'tell application "{app_name(browser)}" to get URL of active tab of front window') or None
+    except (subprocess.CalledProcessError, DesktopError):
         return None
 
 
@@ -264,6 +325,41 @@ def display_scale(image: Image.Image) -> float:
     return image.width / points_wide
 
 
+def point_target(point: tuple[float, float]) -> PointTarget | None:
+    """Read the exact AX element under the pointer, without focusing or pressing it."""
+    system = AS.AXUIElementCreateSystemWide()
+    AS.AXUIElementSetMessagingTimeout(system, AX_MESSAGE_TIMEOUT)
+    error, element = AS.AXUIElementCopyElementAtPosition(system, *point, None)
+    if error:
+        raise RuntimeError("Accessibility hit test failed; check permissions and point again.")
+    if element is None:
+        return None
+    role = str(_ax_attr(element, AS.kAXRoleAttribute) or "")
+    protected = role == "AXSecureTextField" or _ax_attr(element, "AXSubrole") == "AXSecureTextField"
+    if protected:
+        return PointTarget(role, protected=True)  # decided before any content is read
+    value = _ax_attr(element, AS.kAXValueAttribute)
+    return PointTarget(
+        role=role,
+        label=_ax_label(element),
+        value=value if isinstance(value, str) else "",
+        help=str(_ax_attr(element, "AXHelp") or ""),
+    )
+
+
+def point_region(point: tuple[float, float], radius: float) -> tuple[Image.Image, Box]:
+    """Capture just a primary-display region; the temporary file is deleted on every path."""
+    bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+    box = point_box(point, radius, (0.0, 0.0, float(bounds.size.width), float(bounds.size.height)))
+    left, top, right, bottom = box
+    region = f"{left},{top},{right - left},{bottom - top}"
+    with tempfile.TemporaryDirectory(prefix="glide-point-") as folder:
+        path = Path(folder) / "region.png"
+        subprocess.run(["screencapture", "-x", f"-R{region}", str(path)], check=True, capture_output=True, timeout=10)
+        with Image.open(path) as image:
+            return image.convert("RGB"), box
+
+
 def recognize_text(image: Image.Image) -> list[tuple[str, float, tuple[float, float, float, float]]]:
     """Vision OCR lines as text, confidence, and a box in the image's own pixels."""
     return ocrmac.OCR(image, recognition_level="accurate").recognize(px=True)
@@ -312,6 +408,7 @@ def focused_field() -> Field | None:
 # be dead, the app may refuse, and the bridge raises on both. False means "use synthetic input".
 
 
+@dispatched
 def ax_press(ref) -> bool:
     """Send AXPress to an element."""
     check_abort()
@@ -321,6 +418,7 @@ def ax_press(ref) -> bool:
         return False
 
 
+@dispatched
 def ax_focus(ref) -> bool:
     """Give an element the keyboard focus."""
     check_abort()
@@ -330,6 +428,7 @@ def ax_focus(ref) -> bool:
         return False
 
 
+@dispatched
 def ax_set_value(ref, text: str) -> bool:
     """Write an element's value. A read-only or unwilling element reports an error."""
     check_abort()
@@ -428,10 +527,7 @@ def _browser_jxa(browser, body):
         raise DesktopError("Stable tab identities are unavailable for this browser; configure an approved CDP connection")
     script = f"const app=Application({json.dumps(browser)}); " + body
     try:
-        result = subprocess.run(
-            ["osascript", "-l", "JavaScript", "-e", script], capture_output=True, text=True, check=True, timeout=5
-        )
-        return json.loads(result.stdout)
+        return json.loads(_run_osascript(["osascript", "-l", "JavaScript", "-e", script], JXA_TIMEOUT_S))
     except (subprocess.SubprocessError, ValueError) as error:
         raise DesktopError("Browser tab observation or operation failed") from error
 
@@ -451,6 +547,7 @@ def execution_tabs(browser: str) -> dict:
     )
 
 
+@dispatched
 def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
     from .execution.contracts import safe_url
 
@@ -483,6 +580,7 @@ def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
     )
 
 
+@dispatched
 def execution_shortcut(key: str, modifiers: tuple[str, ...]) -> None:
     from .execution.contracts import MODIFIERS
 
@@ -556,6 +654,7 @@ def execution_labels(pid: int) -> list[dict]:
     return result
 
 
+@dispatched
 def execution_scroll(ref, direction: str) -> None:
     if direction not in {"up", "down"}:
         raise DesktopError("Invalid scroll direction")

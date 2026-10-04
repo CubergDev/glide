@@ -7,7 +7,7 @@ from mcp_guard_loader import no_real_memory_or_mcp, sync  # noqa: F401  (autouse
 
 from glide.mcp import MCPBridge, SessionClient, session_request
 
-pytestmark = [pytest.mark.anyio, pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="needs the optional MCP SDK")]
+pytestmark = [pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="needs the optional MCP SDK")]
 
 
 def make_server():

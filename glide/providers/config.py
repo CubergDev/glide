@@ -25,6 +25,12 @@ chain entry is "provider:model" (split at the FIRST colon, since OpenRouter ids 
 inline table `{provider=, model=, options={...}, name=}` for options on one slot, such as `reasoning_effort`.
 In the classifier chain the entry "llm.fast" (or "llm.smart") means the classifier prompt run over that LLM chain.
 
+A glide.toml found in the current directory (not `--config`, not $GLIDE_CONFIG, not the user's own
+~/.config/glide/glide.toml) is somebody else's file until the user says otherwise: a repository can ship one. It is
+used, and said to be (a notice in `GlideConfig.warnings` names the file), but a key is never sent from it to a host
+the user did not name: the vendors Glide knows by name, the hosts in the user's own config and this machine are
+trusted, any other host makes that slot "skipped" with the reason. See `load_config`.
+
 Pinning, with no code change: GLIDE_PIN_LLM_FAST, GLIDE_PIN_LLM_SMART, GLIDE_PIN_STT, GLIDE_PIN_TTS and
 GLIDE_PIN_CLASSIFIER name a slot (its full name or a prefix naming one); a trailing "!" makes it strict, so
 nothing else is ever tried. `GlideConfig.pin` and `unpin` do the same at runtime. A pin that cannot be honoured
@@ -34,15 +40,18 @@ is an error that names the slots there are, never a quiet fallback.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import logging
 import os
 import re
 import threading
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from importlib import resources
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import classifier as classifier_mod
 from . import llm as llm_mod
@@ -51,11 +60,11 @@ from . import tts as tts_mod
 from .base import ProviderSpec
 from .chain import ORDERS, Chain, ChainPolicy, Slot, SwitchEvent
 from .classifier import ChainedClassifier, LLMClassifier
-from .errors import ProviderError
+from .errors import ProviderError, redact
 from .llm import LLM
 from .stt import STT
 from .tts import TTS
-from .writer_client import ChainWriter
+from .writer_client import ChainWriter, UnavailableFacade
 
 log = logging.getLogger("glide.config")
 
@@ -78,6 +87,8 @@ CONFIG_NAME = "glide.toml"
 PIN_PREFIX = "GLIDE_PIN_"
 MIN_SECRET = 4  # shorter than this and scrubbing a "key" would mangle ordinary words
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+_CREDENTIAL_HEADER = re.compile(r"authorization|key|token|secret|password|cookie", re.IGNORECASE)
+_HEADER_OPTIONS = ("extra_headers", "headers")  # an llm slot's and a typesafe slot's
 _CLASSIFIER_OPTIONS = ("max_tokens", "temperature", "timeout")  # LLMClassifier's own, from a slot's options
 
 # The vendors Glide knows by name. The base URLs were read from each vendor's documentation, and the key variables
@@ -96,43 +107,37 @@ PRESETS: dict[str, ProviderSpec] = {
     "macos_say": ProviderSpec("macos_say", "macos_say"),  # no key: a slot with no key variable is never skipped
 }
 
+
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower()
+
+
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+# The hosts a project-local glide.toml may send a key to without the user having named them: the vendors above.
+PRESET_HOSTS = frozenset(_host(spec.base_url) for spec in PRESETS.values() if spec.base_url)
+
 POLICY_KEYS = ("order", "fail_threshold", "cooldown_s", "auth_cooldown_s", "hedge_after_s", "latency_alpha")
 SPEECH_KEYS = ("language", "silence_ms", "headset", "vad_model_path", "vad_model_url", "vad_model_sha256")
+# Tables another module reads for itself (`glide.memory.settings`, `glide.mcp.config`, `glide.webhooks.cli`, `glide.computer.browser_settings`,
+# `glide.computer.config`): known
+# here so the file does not warn about them, and not parsed here, so the one reader of each stays the only one.
+OWN_TABLES = ("memory", "mcp", "webhooks", "browser", "research")
+KNOWN_TABLES = ("providers", "llm", "stt", "tts", "classifier", "speech", *OWN_TABLES)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
-# Used when no glide.toml is found, and for any role a file leaves out. It lives here, not in a data file,
-# because glide.toml.example sits outside the package and is not shipped with it. The model ids are the team's
-# starting point and are unverified until `glide doctor --live` has run with real keys. A test keeps these
-# chains identical to the example's.
-DEFAULT_TOML = """
-[llm.fast]
-chain = [
-  { provider = "openrouter", model = "deepseek/deepseek-v4.1-flash", options = { reasoning_effort = "low" } },
-  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
-  { provider = "gemini", model = "gemini-3.5-flash-lite", options = { reasoning_effort = "low" } },
-]
-
-[llm.smart]
-chain = [
-  { provider = "openai", model = "gpt-6.1-sol", options = { reasoning_effort = "low" } },
-  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
-]
-
-[stt]
-chain = [
-  { provider = "elevenlabs", model = "scribe_v2_realtime" },
-  { provider = "openai", model = "gpt-transcribe" },
-]
-
-[tts]
-chain = [
-  { provider = "elevenlabs", model = "eleven_v4_turbo", options = { timeout = 8 } },
-  "macos_say",
-]
-
-[classifier]
-chain = ["typesafe:jev-latest", "llm.fast"]
-"""
+# Used when no glide.toml is found, and for any role a file leaves out. They are data (default.toml, shipped inside
+# the package because glide.toml.example sits outside it), never code: the model ids in it are the team's starting
+# point and are unverified until `glide doctor --live` has run with real keys. A test keeps these chains identical
+# to the example's.
+DEFAULT_TOML = resources.files(__package__).joinpath("default.toml").read_text(encoding="utf-8")
 
 
 class ConfigError(ValueError):
@@ -245,6 +250,20 @@ def _only(table: Mapping, allowed: tuple[str, ...], where: str) -> None:
             raise ConfigError(f"{where} has an unknown key {key!r}{hint} (known: {', '.join(allowed)})")
 
 
+def _options(value: object, where: str) -> dict:
+    """An `options` table, refused when a header in it would carry a credential: keys come from the environment only."""
+    options = _table(value, where)
+    for option in _HEADER_OPTIONS:
+        headers = options.get(option)
+        for name in headers if isinstance(headers, dict) else ():
+            if _CREDENTIAL_HEADER.search(str(name)):
+                raise ConfigError(
+                    f"{where} {option} sets the header {str(name)!r}, which looks like a credential: keys are never written "
+                    "in this file; name the environment variable with api_key_env"
+                )
+    return options
+
+
 def _providers(table: Mapping) -> dict[str, ProviderSpec]:
     """The presets, overlaid by the file's `[providers.<name>]` tables field by field.
 
@@ -273,7 +292,7 @@ def _providers(table: Mapping) -> dict[str, ProviderSpec]:
             raise ConfigError(f"{where} api_key_env must be the NAME of an environment variable (capitals, digits, _), not a key")
         if kind in ("elevenlabs", "typesafe") and not env_var:
             raise ConfigError(f"{where} needs api_key_env: a {kind} provider cannot be used without a key")
-        options = _table(entry.get("options", {}), f"{where} options")
+        options = _options(entry.get("options", {}), f"{where} options")
         specs[name] = ProviderSpec(name, kind, base_url.strip(), env_var, {**(preset.options if preset else {}), **options})
     return specs
 
@@ -333,7 +352,7 @@ def _slot(entry: object, role: str, index: int, providers: Mapping[str, Provider
         model = table.get("model", "")
         if not isinstance(model, str):
             raise ConfigError(f"{where} model must be a string")
-        entry_options = _table(table.get("options", {}), f"{where} options")
+        entry_options = _options(table.get("options", {}), f"{where} options")
         label = _text(table["name"], f"{where} name") if "name" in table else None
     provider, model = provider.strip(), model.strip()
     spec = providers.get(provider)
@@ -384,10 +403,23 @@ def _roles(data: Mapping, providers: Mapping[str, ProviderSpec]) -> dict[str, Ro
     return {role: _role(role, table, providers) for role, table in found.items()}
 
 
+def _voice(entry: Mapping):
+    """The `[speech]` table as the voice stack reads it (`glide.speech.settings`), validated now rather than at `glide voice`."""
+    from ..speech.settings import SpeechSettings as VoiceSettings
+
+    return VoiceSettings.from_mapping(entry)
+
+
 def _speech(table: object) -> SpeechSettings:
+    """The part of `[speech]` that is about providers, checked first so its messages stay what they were.
+
+    The voice-only keys (merge_window_s, idle_s, vad, ...) are known here too and checked by `_voice`.
+    """
+    from ..speech.settings import SpeechSettings as VoiceSettings
+
     where = "[speech]"
     entry = _table(table, where)
-    _only(entry, SPEECH_KEYS, where)
+    _only(entry, tuple(dict.fromkeys((*SPEECH_KEYS, *(f.name for f in fields(VoiceSettings))))), where)
     out: dict[str, Any] = {}
     if "language" in entry:
         out["language"] = _text(entry["language"], f"{where} language")
@@ -479,13 +511,17 @@ class GlideConfig:
         warnings: tuple[str, ...] = (),
         builders: Mapping[tuple[str, str], Callable[..., Any]] | None = None,
         speech: SpeechSettings | None = None,
+        voice: Any = None,
+        trusted_hosts: frozenset[str] | None = None,
     ):
         self.providers = dict(providers)
         self.speech = speech or SpeechSettings()
+        self.voice = voice if voice is not None else _voice({})  # what `glide.speech.session.build_voice` takes
         self.roles = dict(roles)
         self.source = source
         self.defaulted = tuple(defaulted)  # roles the file left out, served by the built-in chains
         self.warnings = list(warnings)
+        self._trusted_hosts = trusted_hosts  # None: the file is the user's own; else the hosts a key may be sent to
         self._env = env
         self._builders: dict[tuple[str, str], Callable[..., Any]] = {
             ("llm", "openai_compat"): llm_mod.build_client,
@@ -512,15 +548,21 @@ class GlideConfig:
         env: Mapping[str, str] | None = None,
         source: str = "<dict>",
         builders: Mapping[tuple[str, str], Callable[..., Any]] | None = None,
+        trusted_hosts: frozenset[str] | None = None,
     ) -> GlideConfig:
-        """A configuration from an already parsed glide.toml. `env` defaults to the process environment."""
+        """A configuration from an already parsed glide.toml. `env` defaults to the process environment.
+
+        `trusted_hosts` is for a file that is not the user's own (see the module docstring): the hosts, besides the
+        vendors Glide knows by name and this machine, that a key may be sent to. Left out, the file is trusted.
+        """
         providers = _providers(data.get("providers", {}))
         roles = _roles(data, providers)
-        warnings = tuple(
-            f"{source}: ignoring the unknown table [{key}]"
-            for key in data
-            if key not in ("providers", "llm", "stt", "tts", "classifier", "speech")
-        )
+        warnings = tuple(f"{source}: ignoring the unknown table [{key}]" for key in data if key not in KNOWN_TABLES)
+        if trusted_hosts is not None:
+            warnings += (
+                f"{source}: read from the current directory, so a key is sent only to the vendors Glide knows, "
+                "this machine, and hosts named in your own configuration (~/.config/glide/glide.toml)",
+            )
         for warning in warnings:
             log.warning(warning)
         # Chains the file leaves out come from the built-in defaults. They name presets, and a file that
@@ -535,6 +577,8 @@ class GlideConfig:
             warnings=warnings,
             builders=builders,
             speech=_speech(data["speech"]) if "speech" in data else None,
+            voice=_voice(data["speech"]) if "speech" in data else None,
+            trusted_hosts=None if trusted_hosts is None else frozenset(trusted_hosts | PRESET_HOSTS),
         )
 
     @classmethod
@@ -545,12 +589,13 @@ class GlideConfig:
         env: Mapping[str, str] | None = None,
         source: str = "<toml>",
         builders: Mapping[tuple[str, str], Callable[..., Any]] | None = None,
+        trusted_hosts: frozenset[str] | None = None,
     ) -> GlideConfig:
         try:
             data = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"{source} is not valid TOML: {e}") from None
-        return cls.from_dict(data, env=env, source=source, builders=builders)
+        return cls.from_dict(data, env=env, source=source, builders=builders, trusted_hosts=trusted_hosts)
 
     def __repr__(self) -> str:
         return f"<GlideConfig {self.source}: {', '.join(self.roles)}>"  # nothing from the environment, ever
@@ -568,11 +613,8 @@ class GlideConfig:
 
     def scrub(self, text: str) -> str:
         """`text` with every key this configuration can read replaced by '***', for anything about to be shown."""
-        for spec in self.providers.values():
-            key = self._key(spec.api_key_env) if spec.api_key_env else ""
-            if len(key) >= MIN_SECRET:
-                text = text.replace(key, "***")
-        return text
+        keys = (self._key(spec.api_key_env) for spec in self.providers.values() if spec.api_key_env)
+        return redact(text, keys, "***", min_len=MIN_SECRET)
 
     # -- the slots -----------------------------------------------------------------------------
 
@@ -644,6 +686,17 @@ class GlideConfig:
                     missing=(spec.api_key_env,),
                     options=options,
                 )
+        if key and not self._may_send_key_to(spec):
+            return SlotInfo(
+                **left_out,
+                reason=(
+                    f"{spec.api_key_env} will not be sent to {_host(spec.base_url)}: this glide.toml is from the current "
+                    "directory and that host is not one you named in your own configuration"
+                ),
+                short="untrusted host",
+                env_var=spec.api_key_env,
+                options=options,
+            )
         if family == "tts" and spec.kind == "elevenlabs" and not (options.get("voice") or options.get("voices")):
             # A voice is a library id, not a name, and ElevenLabs has no default one. Without this the slot would
             # fail on every sentence before the next one spoke.
@@ -662,6 +715,10 @@ class GlideConfig:
         return SlotInfo(
             role, slot.name, slot.provider, slot.model, "ready", env_var=spec.api_key_env, options=options, client=client
         )
+
+    def _may_send_key_to(self, spec: ProviderSpec) -> bool:
+        host = _host(spec.base_url)
+        return self._trusted_hosts is None or not host or _loopback(host) or host in self._trusted_hosts
 
     def _build(self, family: str, spec: ProviderSpec, slot: SlotSpec, key: str) -> Any:
         options = dict(slot.options)
@@ -688,7 +745,8 @@ class GlideConfig:
             slots = [Slot(i.name, _Lent(i.client, i.name) if family == "classifier" else i.client) for i in ready]
             chain = Chain(role, slots, self.roles[role].policy, on_event=self._dispatch)
             self._pin_from_environment(role, chain)
-            facade = {"llm": LLM, "stt": STT, "tts": TTS, "classifier": ChainedClassifier}[family](chain)
+            extra = {"deadline_s": self.roles[role].deadline_s} if family == "llm" else {}
+            facade = {"llm": LLM, "stt": STT, "tts": TTS, "classifier": ChainedClassifier}[family](chain, **extra)
             self._facades[role] = facade
             return facade
 
@@ -724,28 +782,41 @@ class GlideConfig:
         """The writer's one `generate` call, answered by the LLM chains: by role, fast, smart, planner and research."""
         deadlines = {
             role.split(".")[1]: spec.deadline_s
-            for role in ("llm.fast", "llm.smart", "llm.planner", "llm.research")
-            if (spec := self.roles.get(role)) is not None and spec.deadline_s is not None
+            for role in ALL_ROLES
+            if role.startswith("llm.") and (spec := self.roles.get(role)) is not None and spec.deadline_s is not None
         }
         return ChainWriter(
             self.llm("fast"),
             self.llm("smart"),
-            planner=self.llm("planner"),
-            research=self.llm("research"),
+            planner=self._optional_llm("planner"),
+            research=self._optional_llm("research"),
             timeout=timeout,
             deadlines=deadlines,
         )
+
+    def _optional_llm(self, role: str) -> Any:
+        """The facade of planner or research. A chain the file gave it that has no usable slot (a missing key) fails
+        only the requests that need it; fast and smart, which every task needs, are still required by `writer`."""
+        try:
+            return self.llm(role)
+        except NoUsableProvider as error:
+            return UnavailableFacade(str(error))
 
     def chain(self, role: str) -> Chain:
         """The chain of a role, for status, pinning and events. Raises ConfigError when no slot is usable."""
         return self._facade(role).chain
 
     @property
+    def active_roles(self) -> tuple[str, ...]:
+        """The roles that have a chain: the five every file has, and planner and research only when the file gives them one."""
+        return (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in self.roles))
+
+    @property
     def chains(self) -> dict[str, Chain]:
         """The chains of every role that can be built, keyed llm.fast, llm.smart, stt, tts, classifier, and
         llm.planner and llm.research when the file gives them a chain."""
         out: dict[str, Chain] = {}
-        for role in (*ROLES, *(r for r in EXTRA_LLM_ROLES if r in self.roles)):
+        for role in self.active_roles:
             with contextlib.suppress(NoUsableProvider):  # `chain(role)` raises it, with the reason
                 out[role] = self.chain(role)
         return out
@@ -877,6 +948,8 @@ def load_config(
     """
     environment = os.environ if env is None else env
     chosen: Path | None = None
+    user_file: Path | None = None
+    in_cwd = False
     if path is not None:
         chosen = Path(path).expanduser()
         if not chosen.is_file():
@@ -890,10 +963,24 @@ def load_config(
         base = home if home is not None else (Path(h) if (h := environment.get("HOME")) else None)
         if base is None and env is None:
             base = Path.home()
-        for candidate in (here, base / ".config" / "glide" / CONFIG_NAME if base else None):
+        user_file = base / ".config" / "glide" / CONFIG_NAME if base else None
+        for candidate in (here, user_file):
             if candidate is not None and candidate.is_file():
-                chosen = candidate
+                chosen, in_cwd = candidate, candidate is here
                 break
     if chosen is None:
         return GlideConfig.from_toml("", env=environment, source="built-in defaults")
-    return GlideConfig.from_toml(_read(chosen), env=environment, source=str(chosen))
+    trusted = _own_hosts(user_file) if in_cwd else None
+    return GlideConfig.from_toml(_read(chosen), env=environment, source=str(chosen), trusted_hosts=trusted)
+
+
+def _own_hosts(user_file: Path | None) -> frozenset[str]:
+    """The hosts the user's own glide.toml names in its `[providers.*]` tables (none if it is missing or unreadable)."""
+    if user_file is None or not user_file.is_file():
+        return frozenset()
+    try:
+        providers = tomllib.loads(user_file.read_text(encoding="utf-8")).get("providers", {})
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return frozenset()
+    entries = providers.values() if isinstance(providers, dict) else ()
+    return frozenset(_host(e["base_url"]) for e in entries if isinstance(e, dict) and isinstance(e.get("base_url"), str))

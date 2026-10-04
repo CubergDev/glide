@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import time
 import webbrowser
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 
 import psutil
@@ -27,12 +27,14 @@ import win32api
 import win32con
 import win32gui
 import win32process
+import win32ui
 import winocr
 from PIL import Image, ImageGrab
 
 from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
-from .config import ABORT_CORNER_PX
-from .models import Abort, AxNode, Field, Missed
+from .models import AxNode, Box, DesktopError, Field, Missed
+from .platform_adapter import abort_hint, abort_if_stopped, dispatched, sleep_watching  # noqa: F401  (the shared escape hatch)
+from .point_types import PointTarget, point_box
 
 with suppress(AttributeError, OSError):  # pre-8.1 Windows without shcore, or awareness set by the host process
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
@@ -68,7 +70,7 @@ CONTROL_TYPE_TO_ROLE = {
     "TextControl": "AXStaticText",
 }
 
-# The browsers the site catalog can open, by the name CLICKER_BROWSER gives and their executable.
+# The browsers the site catalog can open, by the name GLIDE_BROWSER gives and their executable.
 # The frontmost app is reported by the same name, so the classifier sees one browser, not two.
 BROWSER_EXES = {"Google Chrome": "chrome", "Microsoft Edge": "msedge", "Firefox": "firefox", "Brave Browser": "brave"}
 
@@ -230,23 +232,7 @@ def mouse_location() -> tuple[float, float]:
 
 
 def check_abort() -> None:
-    from .control import checkpoint
-
-    checkpoint()
-    x, y = mouse_location()
-    if x <= ABORT_CORNER_PX and y <= ABORT_CORNER_PX:
-        raise Abort("mouse in top-left corner")
-
-
-def abort_hint() -> str:
-    return "Ctrl-C, or slam the mouse into the top-left corner"
-
-
-def sleep_watching(seconds: float) -> None:
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        check_abort()
-        time.sleep(0.1)
+    abort_if_stopped(mouse_location)
 
 
 def accessibility_trusted() -> bool:
@@ -274,6 +260,7 @@ def _move(point: tuple[int, int]) -> None:
     time.sleep(EVENT_GAP)
 
 
+@dispatched
 def click_at(point: tuple[float, float]) -> None:
     """Move, read back where the cursor landed, then press and release there.
 
@@ -293,6 +280,7 @@ def click_at(point: tuple[float, float]) -> None:
         _send(_mouse(MOUSEEVENTF_LEFTUP))
 
 
+@dispatched
 def press(key: str, command: bool = False) -> None:
     check_abort()
     held = []
@@ -310,6 +298,7 @@ def press(key: str, command: bool = False) -> None:
             _send(_key(vk=vk, flags=flags | KEYEVENTF_KEYUP))
 
 
+@dispatched
 def type_text(text: str) -> None:
     for unit, flags in unicode_events(text):
         if flags & KEYEVENTF_KEYUP:
@@ -321,11 +310,13 @@ def type_text(text: str) -> None:
             _send(_key(scan=unit, flags=flags | KEYEVENTF_KEYUP))
 
 
+@dispatched
 def clear_field() -> None:
     press("a", command=True)
     press("delete")
 
 
+@dispatched
 def scroll(lines: int) -> None:
     """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
     check_abort()
@@ -379,6 +370,7 @@ def _find_window(app: str) -> int | None:
     return found[0] if found else None
 
 
+@dispatched
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
     check_abort()
@@ -399,7 +391,12 @@ def activate(app: str, timeout: float = 3.0) -> bool:
     return win32gui.GetForegroundWindow() == hwnd
 
 
+@dispatched
 def open_url(browser: str, url: str) -> bool:
+    from .execution.contracts import safe_url
+
+    if not safe_url(url):  # also keeps a leading dash from reaching the browser as one of its options
+        raise DesktopError("Invalid URL")
     check_abort()
     exe = next((exe for name, exe in BROWSER_EXES.items() if name.lower() == browser.strip().lower()), None)
     if exe and shutil.which(exe):
@@ -473,6 +470,48 @@ def display_scale(image: Image.Image) -> float:
     return 1.0
 
 
+def point_target(point: tuple[float, float]) -> PointTarget | None:
+    """Read the UIA control at this physical screen point; do not activate its window."""
+    element = auto.ControlFromPoint(*map(round, point))
+    if element is None:
+        return None
+    role = role_for(element.ControlTypeName)
+    if element.IsPassword:
+        return PointTarget(role, protected=True)  # decided before any content is read
+    return PointTarget(
+        role=role,
+        label=element.Name or "",
+        value=_ui_value(element) or "",
+        help=element.HelpText or "",
+    )
+
+
+def point_region(point: tuple[float, float], radius: float) -> tuple[Image.Image, Box]:
+    """Capture only a bounded primary-monitor rectangle in physical pixels."""
+    box = point_box(point, radius, (0.0, 0.0, float(win32api.GetSystemMetrics(0)), float(win32api.GetSystemMetrics(1))))
+    left, top, right, bottom = map(int, box)
+    width, height = right - left, bottom - top
+    # ImageGrab's Windows backend captures the full screen before cropping.
+    # Copy only this rectangle into an equally small bitmap instead.
+    with ExitStack() as cleanup:
+        handle = win32gui.CreateDC("DISPLAY", None, None)
+        cleanup.callback(win32gui.DeleteDC, handle)
+        source = win32ui.CreateDCFromHandle(handle)
+        memory = source.CreateCompatibleDC()
+        cleanup.callback(memory.DeleteDC)
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(source, width, height)
+        cleanup.callback(win32gui.DeleteObject, bitmap.GetHandle())
+        previous = memory.SelectObject(bitmap)
+        cleanup.callback(memory.SelectObject, previous)
+        memory.BitBlt((0, 0), (width, height), source, (left, top), win32con.SRCCOPY)
+        info = bitmap.GetInfo()
+        if info["bmBitsPixel"] != 32:
+            raise RuntimeError("Unsupported display pixel format for a point crop.")
+        image = Image.frombytes("RGB", (width, height), bitmap.GetBitmapBits(True), "raw", "BGRX", info["bmWidthBytes"], 1)
+    return image, box
+
+
 def recognize_text(image: Image.Image) -> list[tuple[str, float, tuple[float, float, float, float]]]:
     """Windows.Media.Ocr lines as text, confidence, and a box in the image's own pixels."""
     return ocr_lines(winocr.recognize_pil_sync(image, OCR_LANGUAGE))
@@ -539,6 +578,7 @@ def focused_field() -> Field | None:
 # be dead, the app may refuse, and the bridge raises on both. False means "use synthetic input".
 
 
+@dispatched
 def ax_press(ref) -> bool:
     """Invoke an element, or run its named legacy default action: the same rule as `pressable`."""
     check_abort()
@@ -555,6 +595,7 @@ def ax_press(ref) -> bool:
     return False
 
 
+@dispatched
 def ax_focus(ref) -> bool:
     """Give an element the keyboard focus."""
     check_abort()
@@ -564,6 +605,7 @@ def ax_focus(ref) -> bool:
         return False
 
 
+@dispatched
 def ax_set_value(ref, text: str) -> bool:
     """Write an element's value. A read-only or unwilling element reports an error."""
     check_abort()
@@ -631,15 +673,14 @@ def execution_tabs(browser: str) -> dict:
     return {"tabs": {}, "active": "", "unsupported": True}
 
 
+@dispatched
 def execution_tab(browser: str, kind: str, tab_id: str, url: str) -> str:
-    from .models import DesktopError
-
     raise DesktopError("Stable browser tab operations on Windows require an explicitly configured CDP connection")
 
 
+@dispatched
 def execution_shortcut(key: str, modifiers: tuple[str, ...]) -> None:
     from .execution.contracts import MODIFIERS
-    from .models import DesktopError
 
     codes = {
         **VK,
@@ -708,9 +749,8 @@ def execution_labels(pid: int) -> list[dict]:
     return result
 
 
+@dispatched
 def execution_scroll(ref, direction: str) -> None:
-    from .models import DesktopError
-
     check_abort()
     if direction not in {"up", "down"}:
         raise DesktopError("Invalid scroll direction")

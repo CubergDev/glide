@@ -81,17 +81,60 @@ chain = [
 [classifier]
 chain = ["typesafe:jev-latest", "llm.fast"]
 
-# Voice sessions. Voice ids and model ids belong to the [tts] and [stt] slots above (options.voice, the model after
-# the colon); nothing here has a built-in value, and a voice session says what is missing. The voice-activity model
-# is a file you supply: its path and its SHA-256 digest are required, the https URL only says where it was fetched from.
+# Hands-free voice (`glide voice`; needs the speech extra: uv sync --extra speech). Voice ids and model ids belong
+# to the [tts] and [stt] slots above (options.voice, the model after the colon); nothing here has a built-in value,
+# and a voice session says what is missing. Without a voice-activity model, loudness alone decides when you are
+# speaking (vad = "auto"). The model is a file you supply: its path and its SHA-256 digest are required, the https
+# URL only says where it was fetched from. `glide doctor` reports which of these is in effect.
+#
+#
+# Talking over Glide through speakers (docs/voice-echo-cancellation.md). "auto" takes WebRTC echo cancellation
+# (the aec extra), then the built-in numpy filter (the speech extra), and says which; "none" is half duplex.
 #
 # [speech]
 # language = "en"
-# silence_ms = 700
-# headset = false
+# silence_ms = 700          # how long a pause ends your turn (200-2000)
+# merge_window_s = 0.0      # a pause shorter than this does not end the request: "open Safari ... no, Chrome"
+# idle_s = 0.0              # microphone off after this long with nothing happening (0 = never)
+# headset = false           # true: the microphone stays open while Glide speaks, so you can talk over it
+# vad = "auto"              # "auto", "silero" (needs the model below) or "energy"
 # vad_model_path = "models/vad.onnx"
 # vad_model_url = "https://example.invalid/vad.onnx"
 # vad_model_sha256 = "<64 hexadecimal digits>"
+# echo_canceller = "auto"
+# barge_min_voiced_ms = 190   # how long you must speak over Glide before it stops for you
+# barge_margin_db = 8.0       # how far above the echo still left in the microphone your voice must be
+# barge_min_erle_db = 6.0     # no interruption by voice until the canceller removes at least this much echo
+# stop_phrases = ["hold on please"]   # whole-utterance phrases that stop Glide, besides the built-in ones
+
+# Personalization and memory (`glide memory`). Off unless you turn it on, and it saves what you typed or said, so
+# it stays on this machine, in files only you can read. GLIDE_MEMORY=1 or 0 in the environment overrides `enabled`.
+#
+# [memory]
+# enabled = true
+# auto_capture = false      # true: also save sentences such as "I prefer short answers"
+# data_dir = "~/glide-data" # default: GLIDE_DATA_DIR, else the per-user data directory
+
+# MCP (`glide mcp`). `serve` offers Glide's memory to other programs over stdio; with "off" it offers no tools. Each
+# [[mcp.servers]] is a program Glide may use as a client, started only after you approve that exact command. Name
+# the variables to pass on (`env`), never their values.
+#
+# [mcp]
+# server_memory = "off"     # "off", "read" or "write" (anything but "off" also needs [memory] enabled = true)
+#
+# [[mcp.servers]]
+# name = "files"
+# command = "<a local MCP server command>"
+# args = []
+# env = ["<NAME OF A VARIABLE>"]
+# timeout_s = 60
+
+# Webhooks (`glide webhooks serve`, `glide webhooks work`; needs the webhooks extra). The service, its sources and
+# its enabled switch are in a JSON file (see glide/webhooks/README.md); nothing runs until that file says
+# "enabled": true. This table only says where the file is. GLIDE_WEBHOOK_CONFIG overrides it.
+#
+# [webhooks]
+# config = "webhooks.json"
 
 # ---------------------------------------------------------------------------------------------------------------
 # Pinning, from the environment and with no edit to this file. The value is a slot name or a prefix that names one;
@@ -101,3 +144,40 @@ chain = ["typesafe:jev-latest", "llm.fast"]
 #   GLIDE_PIN_CLASSIFIER=typesafe        GLIDE_PIN_LLM_PLANNER=openai (only when [llm.planner] is set)
 # A pin that names no usable slot is an error that lists the slots there are.
 # ---------------------------------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------------------------------
+# Browser provider: which one drives the browser for a computer task. Nothing here is started for you: you start the
+# browser, Obscura or the Playwright CLI session yourself, and Glide only attaches. Endpoints must be loopback.
+#   provider    native (the default: this Mac's own browser), cdp, obscura or playwright
+#   target      a tab id, or "new" for a tab of its own; empty means the one open tab
+#   fallback    optional, default none. Tried in order when the provider is unavailable, only before anything has been
+#               done, and every switch is reported. "native" cannot be a fallback: it takes over this machine.
+#   search_url  optional: the address a search starts from when a task names no site. Glide has no built-in one, so
+#               without it a task that names no site has to say where to go.
+# Per run, the environment wins: GLIDE_BROWSER_PROVIDER, GLIDE_BROWSER_ENDPOINT, GLIDE_BROWSER_TARGET,
+# GLIDE_PLAYWRIGHT_SESSION, GLIDE_PLAYWRIGHT_CLI, GLIDE_SEARCH_URL; `glide computer` also takes --browser-provider,
+# --browser-endpoint, --browser-target and --playwright-session. A provider that is not installed or not enabled fails
+# with a message that says what to do, and takes no action. What to check live: docs/live-checks/browsers.md.
+# ---------------------------------------------------------------------------------------------------------------
+
+# [browser]
+# provider = "cdp"
+# target = "new"
+# fallback = ["obscura"]
+# search_url = "<address of the page a search starts from>"
+#
+# [browser.cdp]
+# endpoint = "<loopback address and port of the browser's debugging port>"
+# [browser.obscura]
+# endpoint = "<loopback address and port of Obscura>"
+# [browser.playwright]
+# session = "glide"                       # an already opened Playwright CLI session
+# cli = "/path/to/playwright-cli"         # optional; the default is playwright-cli on PATH
+
+# ---------------------------------------------------------------------------------------------------------------
+# Research (`glide computer --engine structured`): the model that plans and answers is the [llm.research] chain above.
+#   calls  the most model calls one research task may use, 1 to 32 (default 24). GLIDE_RESEARCH_CALLS overrides it.
+# ---------------------------------------------------------------------------------------------------------------
+
+# [research]
+# calls = 12

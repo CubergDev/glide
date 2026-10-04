@@ -20,7 +20,7 @@ from glide.memory.service import MemoryService
 from glide.memory.settings import MemorySettings
 
 from .config import McpSettings
-from .server import GlideMCPServer, memory_tools, serve_stream, text_stream_writer
+from .server import GlideMCPServer, memory_tools, read_bounded_line, serve_stream, text_stream_writer
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -68,7 +68,7 @@ def main(
         server = GlideMCPServer(tools)
 
         async def readline() -> str:
-            return await asyncio.to_thread(stdin.readline)
+            return await asyncio.to_thread(read_bounded_line, stdin)
 
         try:
             asyncio.run(serve_stream(server, readline, text_stream_writer(out)))

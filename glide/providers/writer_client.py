@@ -13,10 +13,9 @@ by the words it carries, so a reply is used whole or not at all: a connection th
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Protocol
+from collections.abc import Mapping
 
-from glide.computer.control import RunControl, checkpoint
+from glide.computer.control import RunControl, checkpoint, controlled, current_control
 from glide.computer.generation import (
     GenerationError,
     GenerationRequest,
@@ -26,7 +25,7 @@ from glide.computer.generation import (
     image_url,
 )
 
-from .base import ChatResult, Usage
+from .base import ChatFacade, Usage
 from .errors import AllProvidersFailed, ProviderError
 
 # Which LLM facade serves which `GenerationRequest.role`. A role is a job, never a model: the chain decides which
@@ -41,18 +40,20 @@ RESEARCH_PREFIX = "research"
 CUT_SHORT = frozenset({"length", "content_filter", "error"})
 
 
-class ChatFacade(Protocol):
-    """What `ChainWriter` needs from an LLM facade: its `chat`, which fails over inside itself."""
+class UnavailableFacade:
+    """Stands where an optional role has no usable slot: every request to it fails visibly, nothing else is affected.
 
-    def chat(
-        self,
-        messages: Sequence[dict],
-        *,
-        max_tokens: int = 512,
-        temperature: float = 0.0,
-        schema: dict | None = None,
-        timeout: float | None = None,
-    ) -> ChatResult: ...
+    `chat` raises an `unsupported` ProviderError carrying the role's own reason (variable names, never a key), which
+    `ChainWriter` turns into `GenerationUnavailable` for that request only.
+    """
+
+    chain = None
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def chat(self, *args, **kwargs):
+        raise ProviderError(self._reason, kind="unsupported")
 
 
 class ChainWriter:
@@ -115,14 +116,17 @@ class ChainWriter:
         checkpoint(cancel)
         label, facade = self._route(request.role)
         try:
-            result = facade.chat(
-                _messages(request),
-                max_tokens=request.max_tokens,
-                temperature=0.0,
-                schema=request.schema,
-                timeout=self._deadline(request, label),
-            )
+            with controlled(cancel if cancel is not None else current_control()):  # the chains cancel what is in flight
+                result = facade.chat(
+                    _messages(request),
+                    max_tokens=request.max_tokens,
+                    temperature=0.0,
+                    schema=request.schema,
+                    timeout=self._deadline(request, label),
+                    exact_json=True,  # a reply is read whole: the prompt carries text that someone else may have written
+                )
         except ProviderError as error:
+            checkpoint(cancel, wait=False)  # a call a cancel cut short is an `Abort`, not an unavailable writer
             raise _generation_error(error) from error
         checkpoint(cancel)  # an answer that arrives after a cancel is dropped, never used
         return GenerationResult(
@@ -130,6 +134,7 @@ class ChainWriter:
             result.model,
             _usage(result.usage),
             completed=result.finish_reason not in CUT_SHORT,
+            stop_reason=result.finish_reason,
         )
 
     def _route(self, role: str) -> tuple[str, ChatFacade]:
@@ -163,14 +168,22 @@ def _generation_error(error: ProviderError) -> GenerationError:
 def _messages(request: GenerationRequest) -> list[dict]:
     """The request as OpenAI chat messages: the instructions as the system prompt, then the user's turn.
 
-    The schema is not written into the prompt here: a facade given a `schema` enforces it where it can, and asks
+    The user's turn is the request's data, fenced (`_fenced`). The schema is not written into the prompt here: a facade given a `schema` enforces it where it can, and asks
     for JSON in the prompt where it cannot (llm.py).
     """
-    content: list[dict] = [{"type": "text", "text": request.text}]
+    content: list[dict] = [{"type": "text", "text": _fenced(request.text)}]
     if request.image is not None:
         content.insert(0, {"type": "image_url", "image_url": {"url": image_url(request.image)}})
     system = [{"role": "system", "content": request.instructions}] if request.instructions else []
     return [*system, {"role": "user", "content": content}]
+
+
+def _fenced(text: str) -> str:
+    """The request's JSON between <data> tags, which its instructions call untrusted data (writer.UNTRUSTED).
+
+    `</` becomes `<\\/`, which JSON reads as the same two characters, so nothing in the data can write the closing tag.
+    """
+    return "<data>\n" + text.replace("</", "<\\/") + "\n</data>"
 
 
 def _usage(usage: Usage | None) -> TokenUsage:

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from typesafe_sdk import TypeSafeClient
 
@@ -13,11 +16,15 @@ from .control import checkpoint, dispatch
 from .decide import OFFSCREEN_PREFIX, Decision, row_mates, verify_typed
 from .models import Field, Guidance, Item, Missed, Popup, Screen
 from .platform_adapter import desktop
-from .writer import Writer, WriterError, compose_text, compose_url
+from .writer import CREDENTIAL_HINTS, Writer, WriterError, compose_text, compose_url, literal_browser_url
 
 VERIFY_THRESHOLD = 0.5
 WAIT_SECONDS = 3.0  # what a wait adds to the settle delay every step already gets; three of them cover a slow page
 CLOSE_SECONDS = 0.5  # for a closed popup to leave the screen before the click under it
+
+# The macOS adapter puts an address inside an AppleScript string literal, so these would end it. No address needs them.
+UNSAFE_URL_CHARS = frozenset('"\\`')
+CREDENTIAL_WORDS = re.compile(r"\b(?:" + "|".join(re.escape(hint) for hint in CREDENTIAL_HINTS) + r")s?\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -136,6 +143,46 @@ def restore_field(field: Field, typed: str) -> bool:
     return dispatch(desktop.ax_set_value, ref, field.value) and desktop.ax_value(ref) == field.value
 
 
+def address_refusal(url: str, *, from_user: bool) -> str:
+    """Why `url` must not be opened, or "" when it may be.
+
+    A catalog address is configuration and is not checked here. An address the user wrote in the goal may carry a port,
+    a query or a numeric host, because those are the user's words. Anything else is the writer's proposal, built from
+    the goal and from a history that quotes screen text, so it must be a plain page of a public site: a query or a
+    fragment would carry that text out, and a numeric or local host reaches the user's own network. Every address
+    must be free of characters that end the AppleScript string it is placed in, and of credentials.
+    """
+    if not url.isascii() or any(ch in UNSAFE_URL_CHARS or ch.isspace() or ord(ch) < 32 for ch in url):
+        return "it contains characters that are not safe to hand to the browser"
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return "it is not a valid address"
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or "." not in host:
+        return "it is not an https address of a site"
+    if parts.username is not None or parts.password is not None:
+        return "it carries a user name or password"
+    if from_user:
+        return ""
+    if port not in (None, 443) or parts.query or parts.fragment:
+        return "it carries a port, query or fragment, which a page address does not need"
+    try:
+        ipaddress.ip_address(host)
+        return "it names a numeric host"
+    except ValueError:
+        pass
+    if host.rsplit(".", 1)[-1] in {"local", "localdomain", "localhost", "internal", "lan", "home", "corp", "intranet"}:
+        return "it names a host on a local network"
+    return ""
+
+
+def credential_field(field: Field) -> bool:
+    """Whether the field's own label asks for a secret. Whole words only: "Shipping address" is not a PIN."""
+    return bool(CREDENTIAL_WORDS.search(f"{field.label} {field.placeholder}"))
+
+
 def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
     """Go to the browser, and open the website the site answer named.
 
@@ -160,6 +207,9 @@ def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
             return f"use_browser refused: the writer failed ({e})"
     if not url:
         return "use_browser refused: the writer proposed no usable URL for this goal"
+    reason = address_refusal(url, from_user=url == literal_browser_url(ctx.goal) or url in SITES.values())
+    if reason:
+        return f"use_browser refused: the proposed address was not opened because {reason}"
     if dispatch(desktop.open_url, ctx.browser, url):
         return f"opened {url}"
     return f"use_browser failed: opened {url} but {ctx.browser} did not come to the front"
@@ -168,6 +218,8 @@ def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
 def _type_email(decision, screen: Screen, items, ctx: Context) -> str:
     if not (screen.field and screen.field.is_text):
         return "type_email refused: no text field is focused"
+    if credential_field(screen.field):
+        return "type_email refused: the focused field asks for a credential"
     how = fill_field(screen.field, ctx.email or "")
     return f"typed email {how}"
 
@@ -181,6 +233,8 @@ def _type_text(decision, screen: Screen, items, ctx: Context) -> str:
     """
     if not (screen.field and screen.field.is_text):
         return "type_text refused: no text field is focused"
+    if credential_field(screen.field):
+        return "type_text refused: the focused field asks for a credential"
     if ctx.writer is None:
         return "type_text refused: no writer available"
     try:

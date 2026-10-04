@@ -1,0 +1,61 @@
+{
+  "data": {
+    "revision": 3,
+    "settings": {
+      "computer": {
+        "act_enabled": false
+      },
+      "privacy": {
+        "record_content": false
+      },
+      "roles": [
+        {
+          "chain": [
+            {
+              "key_env": "ALPHA_API_KEY",
+              "key_present": true,
+              "model": "m1",
+              "name": "alpha:m1",
+              "provider": "alpha",
+              "status": "ready"
+            },
+            {
+              "key_env": "BETA_API_KEY",
+              "key_present": false,
+              "name": "beta",
+              "provider": "beta",
+              "status": "skipped"
+            }
+          ],
+          "pinned": null,
+          "role": "stt"
+        },
+        {
+          "chain": [
+            {
+              "key_present": false,
+              "name": "gamma",
+              "provider": "gamma",
+              "status": "resting"
+            }
+          ],
+          "pinned": "gamma",
+          "role": "tts"
+        }
+      ],
+      "voice": {
+        "hands_free": false,
+        "headset": false,
+        "language": "en",
+        "silence_ms": 600,
+        "silence_ms_range": [
+          200,
+          2000
+        ]
+      }
+    }
+  },
+  "reply_to": "a2",
+  "type": "settings",
+  "v": 1
+}

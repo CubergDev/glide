@@ -17,7 +17,6 @@ Database files (and their -wal/-shm/-journal sidecars) are kept at mode 0600.
 """
 
 import json
-import math
 import os
 import re
 import sqlite3
@@ -28,7 +27,7 @@ from os import PathLike
 from threading import RLock
 from uuid import uuid4
 
-from .contracts import Scope
+from .contracts import SAFE_ID, Scope
 
 _VERSION = 1
 _EVENT_DAYS = 30
@@ -80,6 +79,13 @@ def _identifier(value: str, *, maximum: int = 256) -> str:
     return value
 
 
+def _run_id(value: str) -> str:
+    """An opaque run identifier (`run:` + hash from `ingest_run`, or any safe token), never a path or URL."""
+    if not isinstance(value, str) or len(value) > 128 or not SAFE_ID.fullmatch(value):
+        raise ValueError("run id must be an opaque token (letters, digits and _ . : -), never a path or URL")
+    return value
+
+
 def _scope(scope: Scope) -> tuple[str, str, str]:
     if not isinstance(scope, Scope):
         raise TypeError("scope must be a Scope")
@@ -92,14 +98,31 @@ def _target(target: str) -> str:
     return target
 
 
+def _is_int(value: object, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _is_real(value: object, low: float, high: float, *, above_low: bool = False) -> bool:
+    """An int or float (never a bool) between `low` and `high`; `above_low` makes `low` itself invalid.
+
+    With finite bounds the comparisons also refuse NaN and infinity, and never convert a huge int to a float.
+    """
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (low < value if above_low else low <= value)
+        and value <= high
+    )
+
+
 def _revision(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 2**63 - 1:
+    if not _is_int(value, 0, 2**63 - 2):
         raise ValueError("expected_revision must be a nonnegative integer")
     return value
 
 
 def _limit(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1000:
+    if not _is_int(value, 1, 1000):
         raise ValueError("limit must be an integer between 1 and 1000")
     return value
 
@@ -176,7 +199,7 @@ class Store:
         self._lock = RLock()
         self._closed = False
         self._pid = os.getpid()
-        path = _prepare_path(path)
+        path = self._path = _prepare_path(path)
         self._db = sqlite3.connect(path, timeout=5.0, isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         try:
@@ -201,8 +224,6 @@ class Store:
 
     def __enter__(self) -> "Store":
         self._check_open()
-        with self._lock:
-            self._check_open()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -217,6 +238,8 @@ class Store:
                 self._closed = True
 
     def _check_open(self) -> None:
+        # Callers check once before taking `self._lock` and again inside it. The first check matters after a fork:
+        # the child must refuse before it waits on a lock it inherited, possibly held, from the parent.
         if os.getpid() != self._pid:
             raise RuntimeError("open a new Store after a process fork")
         if self._closed:
@@ -260,19 +283,9 @@ class Store:
         validate_text(text, max_length=8192)
         if not text.strip() or level not in ("user", "project", "session"):
             raise ValueError("memory requires nonempty text and a valid level")
-        if (
-            isinstance(confidence, bool)
-            or not isinstance(confidence, (int, float))
-            or not 0 <= confidence <= 1
-            or not math.isfinite(confidence)
-        ):
+        if not _is_real(confidence, 0, 1):
             raise ValueError("confidence must be finite and between 0 and 1")
-        if ttl_seconds is not None and (
-            isinstance(ttl_seconds, bool)
-            or not isinstance(ttl_seconds, (int, float))
-            or not 0 < ttl_seconds <= 86400 * 3650
-            or not math.isfinite(ttl_seconds)
-        ):
+        if ttl_seconds is not None and not _is_real(ttl_seconds, 0, 86400 * 3650, above_low=True):
             raise ValueError("TTL must be finite, positive and at most ten years")
         project = project if level != "user" else ""
         session = session if level == "session" else ""
@@ -324,7 +337,27 @@ class Store:
     def forget(self, scope: Scope, id: str) -> bool:
         parameters = (_identifier(id), *_scope(scope))
         with self._transaction() as db:
-            return db.execute(f"DELETE FROM memories WHERE id=? AND {_ACCESS}", parameters).rowcount == 1
+            forgotten = db.execute(f"DELETE FROM memories WHERE id=? AND {_ACCESS}", parameters).rowcount == 1
+        if forgotten:
+            self._truncate_wal()
+        return forgotten
+
+    def _truncate_wal(self) -> None:
+        """Fold the log into the database and empty it: older frames still hold the text of a deleted row.
+
+        A reader on another connection can keep the log from being emptied (`busy`); then the deletion is real in the
+        database but not yet in the log, and saying nothing would break the promise that forget deletes.
+        """
+        self._check_open()
+        with self._lock:
+            self._check_open()
+            busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        _harden(self._path)
+        if busy:
+            raise sqlite3.OperationalError(
+                "the memory was deleted, but its text may remain in the write-ahead log while another connection reads "
+                "the database; close other readers and the log is emptied when the store closes"
+            )
 
     def event(self, scope: Scope, kind: str, payload: dict) -> str:
         scoped, kind = _scope(scope), _identifier(kind, maximum=128)
@@ -363,7 +396,7 @@ class Store:
 
     def record_outcome(self, scope: Scope, run_id: str, success: bool, summary: str) -> str:
         user, project, _ = _scope(scope)
-        run_id = _identifier(run_id)
+        run_id = _run_id(run_id)
         validate_summary(summary)
         if not isinstance(success, bool):
             raise ValueError("success must be a boolean")

@@ -1,0 +1,10 @@
+{
+  "data": {
+    "code": "busy",
+    "fatal": false,
+    "message": "too many requests are being answered"
+  },
+  "reply_to": "a5",
+  "type": "error",
+  "v": 1
+}

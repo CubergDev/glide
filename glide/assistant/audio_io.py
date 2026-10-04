@@ -34,7 +34,7 @@ class AudioUnavailable(RuntimeError):
     """There is no way to reach a microphone or speaker: the `sounddevice` package or PortAudio is missing."""
 
 
-def _sounddevice():
+def load_sounddevice():
     """The `sounddevice` module, imported on first use. It needs PortAudio, so a missing library is an OSError."""
     try:
         import sounddevice
@@ -80,7 +80,7 @@ class SoundDeviceOutput:
     """The default speaker, through `sounddevice`. One output stream per sample rate, reopened when it changes."""
 
     def __init__(self, device: int | str | None = None) -> None:
-        self._sd = _sounddevice()
+        self._sd = load_sounddevice()
         self._device = device
         self._stream = None
         self._rate: int | None = None
@@ -123,7 +123,7 @@ class SoundDeviceInput:
     """The default microphone, through `sounddevice`: blocking reads of fixed-size blocks, copied out as bytes."""
 
     def __init__(self, device: int | str | None = None) -> None:
-        self._sd = _sounddevice()
+        self._sd = load_sounddevice()
         self._device = device
         self._stream = None
         self._frames = 0
@@ -321,6 +321,32 @@ def chunked(pcm: bytes, *, sample_rate: int = SAMPLE_RATE, chunk_ms: int = CHUNK
         yield pcm[start : start + size]
 
 
+class NoiseFloor:
+    """Loudness against a floor that follows the room: a level is speech when it is above `threshold` and above
+    `ratio` times the running average of the levels that were not (`learn`), so a noisy room raises the bar by itself.
+    Shared by `Endpointer` (push to talk) and `EnergyProbability` (hands free)."""
+
+    def __init__(self, *, threshold: float = 500.0, ratio: float = 3.0, floor_weight: float = 0.1) -> None:
+        self.threshold = threshold
+        self.ratio = ratio
+        self.floor_weight = floor_weight
+        self.floor = 0.0
+        self._measured = False
+
+    def is_speech(self, level: float) -> bool:
+        return level > max(self.threshold, self.floor * self.ratio)
+
+    def learn(self, level: float) -> None:
+        """Fold the level of a chunk that was not speech into the floor (the first one is the floor)."""
+        weight = self.floor_weight if self._measured else 1.0
+        self.floor = (1 - weight) * self.floor + weight * level
+        self._measured = True
+
+    def reset(self) -> None:
+        self.floor = 0.0
+        self._measured = False
+
+
 class Endpointer:
     """Decides from loudness alone when an utterance is over. Feed it each captured chunk in turn.
 
@@ -344,20 +370,16 @@ class Endpointer:
         floor_weight: float = 0.1,
     ) -> None:
         self.sample_rate = sample_rate
-        self.threshold = threshold
-        self.ratio = ratio
         self.silence_s = silence_s
         self.min_speech_s = min_speech_s
         self.no_speech_s = no_speech_s
         self.max_s = max_s
-        self.floor_weight = floor_weight
-        self.floor = 0.0
+        self.noise = NoiseFloor(threshold=threshold, ratio=ratio, floor_weight=floor_weight)
         self.heard = False
         self.reason: str | None = None
         self._samples = 0  # counted in samples, not seconds: ten chunks of 0.1 s must add up to exactly 1 s
         self._voiced = 0  # samples of speech in the current run
         self._quiet = 0  # samples since the last speech
-        self._measured = False
 
     @property
     def elapsed(self) -> float:
@@ -366,8 +388,12 @@ class Endpointer:
     def _enough(self, seconds: float, samples: int) -> bool:
         return samples >= round(seconds * self.sample_rate)
 
+    @property
+    def floor(self) -> float:
+        return self.noise.floor
+
     def is_speech(self, level: float) -> bool:
-        return level > max(self.threshold, self.floor * self.ratio)
+        return self.noise.is_speech(level)
 
     def feed(self, chunk: bytes) -> bool:
         """Take the next chunk. True once the utterance is over (see `reason`)."""
@@ -382,9 +408,7 @@ class Endpointer:
         else:
             self._voiced = 0
             self._quiet += samples
-            weight = self.floor_weight if self._measured else 1.0
-            self.floor = (1 - weight) * self.floor + weight * level
-            self._measured = True
+            self.noise.learn(level)
         if self.heard and self._enough(self.silence_s, self._quiet):
             self.reason = "silence"
         elif not self.heard and self._enough(self.no_speech_s, self._samples):

@@ -54,3 +54,22 @@ def test_the_boundary_code_names_no_model_voice_or_oauth_literal(path):
         if LITERAL.search(line):
             found.append(f"{path}:{number}: {line.strip()}")
     assert not found, "\n".join(found)
+
+
+def test_no_module_of_glide_imports_a_vendor_sdk():
+    """The vendor SDKs read credentials and hosts from the process environment by themselves, which keys-from-glide.toml forbids."""
+    import ast
+
+    banned = {"anthropic", "openai"}
+    found = []
+    for path in sorted((HERE.parent / "glide").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = (
+                [a.name for a in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+                if isinstance(node, ast.ImportFrom) and not node.level
+                else []
+            )
+            found += [f"{path.relative_to(HERE.parent)}:{node.lineno}: {n}" for n in names if n.split(".")[0] in banned]
+    assert not found, "\n".join(found)

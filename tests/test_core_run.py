@@ -10,16 +10,20 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from typesafe_sdk import Noul
 from world import FakeTypeSafe, FakeWriter, Page, World, scripted
 
-from glide.assistant.tasks import STOPPED_BY_USER, ComputerTask, abort_on
+from glide.assistant.phrases import say
+from glide.assistant.tasks import STOPPED_BY_USER, ComputerTask, TaskResult, abort_on
 from glide.computer import macos, runner, windows
 from glide.computer.actions import Context
 from glide.computer.config import DEFAULT_READINESS_TIMEOUT
 from glide.computer.control import RunControl, checkpoint, controlled, dispatch
+from glide.computer.generation import GenerationUnavailable
 from glide.computer.models import Abort, BrowserConnectionError, DesktopPermissionError
-from glide.computer.platform_adapter import desktop
+from glide.computer.platform_adapter import desktop, dispatching
 from glide.computer.runner import RunConfig, RunState
+from glide.providers.errors import ProviderError
 
 
 def one_page() -> World:
@@ -30,11 +34,11 @@ def run_with(monkeypatch, tmp_path, policy, control, *, record_content=False, wr
     world = one_page()
     world.install(monkeypatch)
     classifier = FakeTypeSafe(policy)
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: classifier)
     cfg = RunConfig(goal, tmp_path, act=True, delay=0, record_content=record_content)
     state = runner.run(
         cfg,
         lambda client, history: Context(goal, "Google Chrome", None, client, writer or FakeWriter(), history),
+        classifier_factory=lambda: classifier,
         control=control,
     )
     return world, state
@@ -49,6 +53,94 @@ def test_stop_during_classification_never_dispatches(monkeypatch, tmp_path):
 
     world, state = run_with(monkeypatch, tmp_path, policy, control)
     assert state.outcome == "aborted (stopped by the user)" and not state.uncertain and not world.typed
+
+
+def test_a_writer_that_is_unavailable_at_review_time_ends_the_run_as_generation_unavailable(monkeypatch, tmp_path):
+    # PR4-4175615096: the review used to swallow the halt, leaving outcome "done" and "Done." spoken.
+    def refuse(request, cancel=None):
+        raise GenerationUnavailable("account spent")
+
+    fake = FakeWriter()
+    fake.generate = refuse
+    _, state = run_with(monkeypatch, tmp_path, scripted(("done", None)), RunControl("task"), writer=fake)
+    assert state.outcome == "generation unavailable" and state.failure == "account spent"
+    result = TaskResult("goal", True, state.outcome, failure=state.failure)
+    assert result.spoken() == say("provider")
+
+
+@pytest.mark.parametrize(
+    "error", [ProviderError("no reply", kind="timeout", provider="llm"), GenerationUnavailable("account spent")]
+)
+def test_a_model_that_fails_after_a_write_was_sent_leaves_it_uncertain_and_says_so(monkeypatch, tmp_path, error):
+    # PR4-4175632210: verify_typed asks the classifier after the field was filled; the failure used to be spoken as
+    # the plain provider phrase, which invites a retry of a write whose effect was never observed.
+    class Failing(FakeTypeSafe):
+        def system_one(self, state, questions):
+            if any(isinstance(q, Noul) for q in questions.values()):
+                raise error
+            return super().system_one(state, questions)
+
+    world = one_page()
+    world.install(monkeypatch)
+    classifier = Failing(scripted(("type_text", None)))
+    state = runner.run(
+        RunConfig("Find", tmp_path, act=True, delay=0),
+        lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(text="invoice"), history),
+        classifier_factory=lambda: classifier,
+        control=RunControl("task"),
+    )
+    assert world.typed == {"Search": "invoice"}  # the write went out
+    assert state.outcome in ("provider failure", "generation unavailable")
+    assert state.uncertain and state.readback == "unavailable; completion unknown"
+    result = TaskResult("Find", True, state.outcome, failure=state.failure, uncertain=state.uncertain)
+    assert result.spoken() == say("uncertain")
+
+
+def test_a_model_that_fails_before_any_write_is_not_uncertain(monkeypatch, tmp_path):
+    def policy(*args):
+        raise ProviderError("no reply", kind="timeout", provider="llm")
+
+    _, state = run_with(monkeypatch, tmp_path, policy, RunControl("task"))
+    assert state.outcome == "provider failure" and not state.uncertain and state.readback == "not needed"
+
+
+def test_an_event_listener_that_fails_never_costs_the_run_its_verification(monkeypatch, tmp_path):
+    # PR4-4175590955: 'progress' is emitted right after a write was dispatched; a broken pipe there must not crash the run
+    events = []
+
+    def broken_pipe(event):
+        events.append(event.kind)
+        raise BrokenPipeError("the terminal went away")
+
+    world = one_page()
+    world.install(monkeypatch)
+    classifier = FakeTypeSafe(scripted(("scroll_down", None), ("done", None)))
+    state = runner.run(
+        RunConfig("Find", tmp_path, act=True, delay=0),
+        lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
+        control=RunControl("task", broken_pipe),
+    )
+    assert state.outcome == "done" and len(state.history) == 1
+    assert world.ticks == 2 and "progress" in events  # the screen was captured again after the action
+    assert events[0] == "accepted" and events[-1] == "completed"  # and the listener was still told how it ended
+
+
+def test_an_event_listener_that_stops_the_run_still_stops_it(monkeypatch, tmp_path):
+    def stopping(event):
+        if event.kind == "progress":
+            raise Abort("stopped by the listener")
+
+    world = one_page()
+    world.install(monkeypatch)
+    classifier = FakeTypeSafe(scripted(("scroll_down", None), ("done", None)))
+    state = runner.run(
+        RunConfig("Find", tmp_path, act=True, delay=0),
+        lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
+        control=RunControl("task", stopping),
+    )
+    assert state.outcome.startswith("aborted") and len(state.history) == 1
 
 
 def test_a_stop_during_a_re_decision_after_a_writer_focus_dispatches_nothing_more(monkeypatch, tmp_path):
@@ -87,10 +179,10 @@ def test_interrupted_dispatch_gets_one_readback_and_is_never_replayed(monkeypatc
 
     monkeypatch.setattr(runner, "perform", interrupted)
     classifier = FakeTypeSafe(scripted(("type_text", None), ("type_text", None)))
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: classifier)
     state = runner.run(
         RunConfig("Find", tmp_path, act=True, delay=0),
         lambda client, history: Context("Find", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
         control=control,
     )
     assert state.uncertain and state.readback == "captured; completion unknown"
@@ -208,11 +300,11 @@ def test_a_dry_run_keeps_its_first_move_in_memory_only(monkeypatch, tmp_path):
     world = World([Page(name="home", items=["Tickets", "Help"], url="https://example.test")])
     world.install(monkeypatch)
     classifier = FakeTypeSafe(scripted(("click_item", "Tickets")))
-    monkeypatch.setattr(runner, "TypeSafeClient", lambda: classifier)
     events = []
     state = runner.run(
         RunConfig("Open tickets", tmp_path, act=False, delay=0),
         lambda client, history: Context("Open tickets", "Google Chrome", None, client, FakeWriter(), history),
+        classifier_factory=lambda: classifier,
         control=RunControl("task", events.append),
     )
     assert state.outcome == "dry run" and state.would_do == "click 'Tickets'" and not world.log
@@ -228,13 +320,11 @@ def test_runner_prints_nothing_of_its_own(monkeypatch, tmp_path, capsys):
 # -- engines and configuration ------------------------------------------------------------------------
 
 
-def test_the_default_engine_is_the_legacy_loop_and_structured_is_refused_until_it_exists(tmp_path):
+def test_the_default_engine_is_the_legacy_loop_and_an_unknown_engine_is_refused(tmp_path):
     cfg = RunConfig("goal", tmp_path)
     assert cfg.engine == "legacy" and cfg.record_content is False and cfg.readiness_timeout == DEFAULT_READINESS_TIMEOUT
-    with pytest.raises(ValueError, match="structured engine is not part of this build"):
-        runner.run(RunConfig("goal", tmp_path, engine="structured"), lambda *a: None)
     with pytest.raises(ValueError, match="Unknown execution engine"):
-        runner.run(RunConfig("goal", tmp_path, engine="nope"), lambda *a: None)
+        runner.run(RunConfig("goal", tmp_path, engine="nope"), lambda *a: None, classifier_factory=object)
 
 
 def test_a_replay_runs_the_legacy_loop_even_when_structured_is_asked_for(monkeypatch, tmp_path):
@@ -245,8 +335,8 @@ def test_a_replay_runs_the_legacy_loop_even_when_structured_is_asked_for(monkeyp
         return RunState(outcome="done")
 
     monkeypatch.setattr(runner, "_run", fake_run)
-    runner.run(RunConfig("goal", tmp_path, engine="structured", image=tmp_path / "x.png"), lambda *a: None)
-    runner.run(RunConfig("goal", tmp_path, engine="legacy"), lambda *a: None)
+    runner.run(RunConfig("goal", tmp_path, engine="structured", image=tmp_path / "x.png"), lambda *a: None, object)
+    runner.run(RunConfig("goal", tmp_path, engine="legacy"), lambda *a: None, object)
     assert seen == ["legacy", "legacy"]  # run() never asked for the structured engine on a replay
 
 
@@ -303,7 +393,7 @@ def test_stop_during_typing_releases_key_but_types_no_next_character(monkeypatch
 
         monkeypatch.setattr(windows, "_send", send)
         expected = [(ord("a"), windows.KEYEVENTF_UNICODE), (ord("a"), windows.KEYEVENTF_UNICODE | windows.KEYEVENTF_KEYUP)]
-    with controlled(control), pytest.raises(Abort):
+    with controlled(control), dispatching(), pytest.raises(Abort):
         adapter.type_text("abc")
     assert sent == expected
 
@@ -325,15 +415,13 @@ def test_the_command_line_records_content_only_when_asked(monkeypatch, tmp_path,
     from glide.computer import cli
 
     seen = {}
-    monkeypatch.setattr(cli.config, "load_dotenv", lambda _: None)
-    monkeypatch.setenv("TYPESAFE_API_KEY", "fixture-key")
-    monkeypatch.setattr(cli, "make_writer", lambda: None)
+    monkeypatch.setattr(cli, "make_writer", lambda config: None)
     monkeypatch.setattr(cli.config, "writer_vision", lambda: True)
 
     def fake_run(cfg, ctx_factory, **kwargs):
         seen.update(cfg=cfg, control=kwargs.get("control"))
-        return SimpleNamespace(outcome="done")
+        return SimpleNamespace(outcome="done", failure="", answer=None)
 
     monkeypatch.setattr(cli, "run", fake_run)
-    cli.main(["a goal", "--out", str(tmp_path), *flags])
+    cli.main(["a goal", "--out", str(tmp_path), *flags], SimpleNamespace(classifier=lambda: None))
     assert seen["cfg"].record_content is recorded and isinstance(seen["control"], RunControl)

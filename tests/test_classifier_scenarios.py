@@ -193,19 +193,14 @@ class Backed:
         return getattr(self.inner, name)
 
 
-def refuse_hosted_client():
-    raise AssertionError("the loop built the hosted TypeSafe client instead of using the injected classifier")
-
-
 def inject(monkeypatch, variant: str) -> type[Backed]:
-    """Make every `drive` in the test run the loop with a classifier adapter injected, and the hosted client forbidden."""
+    """Make every `drive` in the test run the loop with a classifier adapter injected."""
     Backed.last = None
     monkeypatch.setattr(Backed, "variant", variant)
     real_run = runner.run
 
-    def run_injected(cfg, ctx_factory):
-        monkeypatch.setattr(runner, "TypeSafeClient", refuse_hosted_client)  # `drive` set its own just before
-        return real_run(cfg, ctx_factory, classifier_factory=lambda: Backed.last.classifier)
+    def run_injected(cfg, ctx_factory, classifier_factory=None, **kwargs):
+        return real_run(cfg, ctx_factory, classifier_factory=lambda: Backed.last.classifier, **kwargs)
 
     monkeypatch.setattr(world, "FakeTypeSafe", Backed)
     monkeypatch.setattr(world, "run", run_injected)
@@ -530,31 +525,9 @@ def test_a_bug_in_the_classifier_still_crashes_the_run_as_before(monkeypatch, tm
     assert summary["outcome"] == "crashed" and summary["failure"] is None
 
 
-def test_without_a_factory_the_loop_uses_the_hosted_client_as_it_always_did(monkeypatch, tmp_path):
-    used = []
-
-    class Hosted(world.FakeTypeSafe):
-        def __init__(self):
-            super().__init__(scripted(("done", None)))
-            used.append(self)
-
-    w = World([Page(name="done", items=["Order 4821"], url="https://example.com/done")])
-    w.install(monkeypatch)
-    monkeypatch.setattr(runner, "TypeSafeClient", Hosted)
-    cfg = runner.RunConfig(goal="g", out=tmp_path / "run", act=True, steps=3, delay=0, record_content=True)
-    state = runner.run(
-        cfg,
-        lambda typesafe, history: Context(
-            goal="g", browser="Google Chrome", email=None, typesafe=typesafe, writer=FakeWriter(), history=history
-        ),
-    )
-    assert state.outcome == "done" and len(used) == 1
-
-
 def drive_with(w: World, classifier, *, steps=20, monkeypatch, tmp_path, writer=None):
     """`world.drive`, but handing the classifier to `runner.run(classifier_factory=...)` as the caller would."""
     w.install(monkeypatch)
-    monkeypatch.setattr(runner, "TypeSafeClient", refuse_hosted_client)
     cfg = runner.RunConfig(goal="do the thing", out=tmp_path / "run", act=True, steps=steps, delay=0, record_content=True)
     client = writer or FakeWriter()
     return runner.run(

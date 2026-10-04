@@ -32,6 +32,10 @@ def test_effect_counters_are_internal_status(text):
         "The side effects of this drug include nausea.",
         "Step 2 of the recipe takes 10 minutes.",
         "You have 2 messages remaining.",
+        # PR6-4175247840: a counter inside a longer sentence is part of an answer
+        "The study verified 2 effects of the treatment.",
+        "There are 3 effects pending review.",
+        "I verified 2 effects of the change, and 1 remains for you to check.",
     ],
 )
 def test_ordinary_sentences_with_numbers_are_still_spoken(text):

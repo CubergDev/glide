@@ -55,7 +55,9 @@ def no_real_memory_or_mcp(request, monkeypatch, tmp_path):
 
     def refuse(what: str):
         def call(*args, **kwargs):
-            raise RuntimeError(f"a test reached the real machine through {what}; patch it in the test")
+            from conftest import refusal
+
+            raise refusal(what)
 
         return call
 

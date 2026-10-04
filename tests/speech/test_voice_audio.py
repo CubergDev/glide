@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from guards_voice import no_real_audio  # noqa: F401
 
+from glide.speech import audio
 from glide.speech.audio import DeviceFault, FullDuplexDevice, resample
 from glide.speech.vad import FRAME_BYTES
 
@@ -186,3 +187,53 @@ def test_close_is_idempotent_and_drops_queued_audio():
     assert rig.device._queued == 0
     rig.device.play(b"\x05\x00" * 100, RATE)
     assert rig.device._queued == 0
+
+
+def test_a_close_that_lands_while_the_microphone_is_being_resumed_leaves_no_open_stream():
+    """resume_input builds and starts the stream outside the lock; a close() in that gap used to leak the new stream."""
+    import threading
+
+    rig = Rig()
+    rig.device.pause_input()
+    entered, release = threading.Event(), threading.Event()
+
+    class SlowStream(FakeStream):
+        def start(self):
+            entered.set()
+            assert release.wait(5)
+            super().start()
+
+    rig.device._input_factory = lambda callback: SlowStream(rig.log, "late")
+    resumer = threading.Thread(target=rig.device.resume_input)
+    resumer.start()
+    assert entered.wait(5)
+    rig.device.close()  # lands after the stream began to start and before resume stored it
+    release.set()
+    resumer.join(5)
+    assert not resumer.is_alive()
+    assert ("late", "start") in rig.log
+    assert ("late", "stop") in rig.log and ("late", "close") in rig.log  # nothing is left open
+    assert rig.device.input_paused and rig.device._input is None
+
+
+def test_a_problem_the_sound_card_reports_while_speaking_is_counted_not_ignored(monkeypatch):
+    """PR6-4175581062: the output callback dropped `status`, so an underflow was invisible and wait_idle reported success."""
+    made = {}
+
+    class FakeSoundDevice:
+        class RawInputStream:
+            def __init__(self, **kw): ...
+
+        class RawOutputStream:
+            def __init__(self, **kw):
+                made["callback"] = kw["callback"]
+
+    monkeypatch.setattr(audio, "load_sounddevice", lambda: FakeSoundDevice)
+    _, make_output = audio.sounddevice_factories()
+    device = audio.FullDuplexDevice()
+    make_output(device._on_output, device.output_rate)
+    outdata = bytearray(1024)
+    made["callback"](outdata, 512, None, False)
+    assert device.output_faults == 0
+    made["callback"](outdata, 512, None, "output underflow")
+    assert device.output_faults == 1 and len(outdata) == 1024

@@ -1,10 +1,22 @@
-"""The `glide` command: ask, listen, chat, doctor, status.
+"""The `glide` command, the one tree for everything Glide does.
 
     glide ask "what is the capital of France" [--speak]
     glide listen [--auto]          push-to-talk: Enter starts and stops, say "stop" or type /stop to cut in
+    glide voice [--act]            hands-free: always listening, interruptible (needs the speech extra)
     glide chat [--speak]           a typed REPL: /pin /unpin /status /stop /act /help /quit
-    glide doctor [--live]          what each provider slot can do (--live sends one tiny real request each)
+    glide doctor [--live]          what each provider slot can do (--live sends one tiny real request each),
+                                   and how voice, memory, webhooks and mcp are set
     glide status                   the chains: slots, pins, resting slots, recent switches
+    glide computer GOAL [--act]    drive the screen toward a goal (a dry run without --act); `glide-computer` too
+    glide inspect [GOAL]           capture the screen and show what the classifier would be sent; `glide-inspect` too
+    glide memory ...               local memory administration (off unless [memory] enabled = true)
+    glide mcp ...                  serve Glide over MCP and show the MCP settings
+    glide webhooks serve|work ...  the webhook listener and its worker (serve needs the webhooks extra)
+    glide app-server [--socket PATH]  serve the SwiftUI app over a local Unix socket (never a network port)
+
+`memory`, `mcp` and `webhooks` have their own options and help (`glide memory --help`); everything after the
+command is theirs. Optional packages are imported only by the command that needs them, so `glide --help` and
+the commands above that do not name an extra work with none installed.
 
 Nothing here touches the machine unless `--act` is given (or `/act` typed in `chat`): a request to do
 something on the computer is otherwise a dry run that looks at the screen and says what it would do. Every
@@ -24,10 +36,12 @@ import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from . import features
 from .assistant.audio_io import AudioUnavailable, Endpointer, Microphone, Player
 from .assistant.core import IO, Assistant, Reply
 from .assistant.router import is_stop
 from .assistant.tasks import DEFAULT_RUNS_DIR
+from .computer.execution.reading import clean as printable
 
 ACT_BANNER = (
     "ACT MODE: Glide will click and type on this Mac. Stop it by saying or typing stop, with Ctrl-C, "
@@ -36,7 +50,9 @@ ACT_BANNER = (
 SECRET_SUFFIXES = ("KEY", "TOKEN", "SECRET")
 MIN_SECRET = 8
 REASON_CHARS = 160
-FAILED_OUTCOMES = frozenset({"provider failure", "crashed", "not permitted", "not configured"})  # a task that could not run
+FAILED_OUTCOMES = frozenset(  # a task that could not run
+    {"provider failure", "generation unavailable", "desktop unavailable", "crashed", "not permitted", "not configured"}
+)
 POLL_S = 0.1  # how often the terminal loop looks up from waiting for a line
 QUIT_WORDS = frozenset({"q", "quit", "exit", "/quit", "/exit"})
 
@@ -44,15 +60,20 @@ QUIT_WORDS = frozenset({"q", "quit", "exit", "/quit", "/exit"})
 # -- Seams: everything that reaches outside the process goes through one of these, so tests replace it ----
 
 
+def _dotenv() -> None:
+    from .computer.config import load_dotenv
+
+    load_dotenv(Path.cwd() / ".env")
+
+
 def _load(path: str | None):
     """The configuration, with every provider switch printed to stderr as it happens.
 
     The listener is registered before any chain exists, so not even the first call can switch silently.
     """
-    from .computer.config import load_dotenv
     from .providers.config import load_config
 
-    load_dotenv(Path.cwd() / ".env")
+    _dotenv()
     config = load_config(path)
     config.on_switch(lambda event: print(format_switch(event, config), file=sys.stderr, flush=True))
     return config
@@ -78,7 +99,11 @@ def _doctor(config, live: bool) -> int:
         print("live: one tiny request to each slot that has a key")
     rows = doctor.doctor(config, live=live)
     print(doctor.format_rows(rows))
-    return 1 if doctor.failed(rows) else 0
+    print("\nfeatures (nothing is started or downloaded to find this out)")
+    report = features.feature_report(config)
+    for name, _, line in report:
+        print(f"  {name:<9}{clean(line, config)}")
+    return 1 if doctor.failed(rows) or not all(ok for _, ok, _ in report) else 0
 
 
 def _read_line(prompt: str = "") -> str:
@@ -97,9 +122,11 @@ def redact(text: str) -> str:
 
 
 def clean(text: str, config=None) -> str:
-    """Text safe to print: the configuration's own scrub first (it knows which variables hold keys), then the sweep."""
+    """Text safe to print: the configuration's own scrub first (it knows which variables hold keys), then the sweep,
+    then every terminal escape sequence and control character removed (newlines and tabs stay): what an app, a page or
+    a model wrote must never move the cursor, retitle the window or write the clipboard of this terminal."""
     scrub = getattr(config, "scrub", None)
-    return redact(scrub(text) if callable(scrub) else text)
+    return printable(redact(scrub(text) if callable(scrub) else text), lines=True)
 
 
 def format_switch(event, config=None) -> str:
@@ -334,7 +361,7 @@ def cmd_listen(args: argparse.Namespace, config) -> int:
 
     def partial(text: str) -> None:
         if sys.stderr.isatty():
-            print(f"\r{text}", end="", file=sys.stderr, flush=True)
+            print(f"\r{clean(text, config)}", end="", file=sys.stderr, flush=True)
 
     assistant = Assistant(config, io=_make_io(config, speak=not args.text_only, partial=partial), runs_dir=args.runs)
     act = args.act
@@ -403,7 +430,7 @@ def _record(
 
     def work() -> None:
         reply = assistant.handle_audio(chunks(), act=act, wait=False, language=args.lang)
-        if reply.route == "none" and not reply.error:
+        if reply.route == "none" and not reply.error and not reply.heard:  # something heard and then cut is not silence
             print("(nothing heard)", flush=True)
 
     turn = _spawn(work, config)
@@ -419,8 +446,117 @@ def _record(
     return turn
 
 
+def _voice_loop(config, io: IO, act: bool):
+    """The voice loop over the real sound device, not yet started (`build_voice` sets `io.player` to that device)."""
+    from .speech.session import build_voice
+
+    return build_voice(config, config.voice, io=io, act=act)
+
+
+def cmd_voice(args: argparse.Namespace, config) -> int:
+    from .speech.audio import DeviceFault
+    from .speech.vad import VadError
+
+    io = _make_io(config, speak=False)  # the device is the speaker: a second one would fight it for the output
+    try:
+        loop = _voice_loop(config, io, args.act)
+    except (AudioUnavailable, VadError, DeviceFault) as exc:
+        print(
+            f"glide voice: {clean(str(exc), config)} (the speech extra has the audio and voice packages: uv sync --extra speech)",
+            file=sys.stderr,
+        )
+        return 2
+    except Exception as exc:  # a sound card that will not open: sounddevice's PortAudioError is none of the kinds above
+        print(
+            f"glide voice: the audio device could not be opened ({type(exc).__name__}: {clean(str(exc), config)})",
+            file=sys.stderr,
+        )
+        return 2
+    print('glide voice: listening. Just talk; say "stop" to stop a task, press Ctrl-C to leave.')
+    if args.act:
+        print(ACT_BANNER, file=sys.stderr)
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        loop.assistant.stop()
+    finally:
+        loop.stop()
+        loop.assistant.close()
+    return 1 if loop.failure else 0
+
+
 def cmd_doctor(args: argparse.Namespace, config) -> int:
     return _doctor(config, args.live)
+
+
+# -- Commands that are other modules' own: everything after the command is theirs ---------------------------
+
+
+def _forward(args: argparse.Namespace) -> list[str]:
+    """The words after the command, led by the glide.toml the person named (their own `--config` is glide.toml too)."""
+    return ["--config", args.config, *args.rest] if args.config else list(args.rest)
+
+
+def _help_asked(words: Sequence[str]) -> bool:
+    return any(word in ("-h", "--help") for word in words)
+
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    from .memory import cli as memory
+
+    return memory.main(_forward(args))
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from .mcp import cli as mcp
+
+    return mcp.main(_forward(args))
+
+
+def cmd_webhooks_serve(args: argparse.Namespace) -> int:
+    """`glide webhooks serve`: its `--config` is the webhook JSON file, so the glide.toml only says where that is by default."""
+    from .memory.settings import SettingsError, find_config
+
+    words = list(args.rest)
+    if not _help_asked(words):
+        lacking = features.missing(features.WEBHOOKS_MODULES)
+        if lacking:
+            print(f"glide: {features.extra_message('glide webhooks serve', 'webhooks', lacking)}", file=sys.stderr)
+            return 2
+        if not any(word == "--config" or word.startswith("--config=") for word in words):
+            try:
+                words = ["--config", str(features.webhooks_file(os.environ, find_config(os.environ, path=args.config))), *words]
+            except SettingsError as exc:
+                print(f"glide webhooks: {exc}", file=sys.stderr)
+                return 2
+    from .webhooks import cli as webhooks
+
+    return webhooks.main(words)
+
+
+def cmd_webhooks_work(args: argparse.Namespace) -> int:
+    from .webhooks import worker
+
+    return worker.main(_forward(args))
+
+
+def cmd_computer(args: argparse.Namespace, config=None) -> int:
+    from .computer import cli as computer
+
+    return computer.main(args.rest, config)
+
+
+def cmd_app_server(args: argparse.Namespace, config=None) -> int:
+    from .app_server import cli as app_server
+
+    return app_server.main(args.rest, config)
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    from .computer import cli as computer
+
+    _dotenv()
+    return computer.inspect(args.rest)
 
 
 def cmd_status(args: argparse.Namespace, config) -> int:
@@ -503,15 +639,75 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser("status", help="the provider chains, pins, resting slots and recent switches")
     status.set_defaults(handler=cmd_status)
+
+    voice = commands.add_parser("voice", help="hands-free voice loop: always listening, interruptible (speech extra)")
+    voice.add_argument("--act", action="store_true", help="really click and type on this Mac (default: tasks are dry runs)")
+    voice.set_defaults(handler=cmd_voice)
+
+    # The rest take their own options. Their parsers live in their own modules and are imported only when the command
+    # runs, so nothing is parsed here: `parse_known_args` hands the words after the command to `main` as `args.rest`.
+    def passthrough(parent, name: str, handler, help: str, *, config: bool = False, loads: bool = False):
+        command = parent.add_parser(name, add_help=False, help=help)
+        if config:  # `glide memory --config x ...` and `glide --config x memory ...` mean the same
+            command.add_argument("--config", default=argparse.SUPPRESS)
+        command.set_defaults(handler=handler, passthrough=True, loads_config=loads)
+        return command
+
+    passthrough(
+        commands, "computer", cmd_computer, "drive the screen toward a goal (`glide computer --help`)", config=True, loads=True
+    )
+    passthrough(
+        commands,
+        "app-server",
+        cmd_app_server,
+        "serve the SwiftUI app over a local socket (`glide app-server --help`)",
+        config=True,
+        loads=True,
+    )
+    passthrough(commands, "inspect", cmd_inspect, "capture the screen and show what the classifier would be sent")
+    passthrough(commands, "memory", cmd_memory, "local memory administration (`glide memory --help`)", config=True)
+    passthrough(commands, "mcp", cmd_mcp, "serve Glide over MCP, show the MCP settings (`glide mcp --help`)", config=True)
+    webhooks = commands.add_parser("webhooks", help="the webhook listener and its worker (`glide webhooks serve --help`)")
+    parts = webhooks.add_subparsers(dest="webhooks_command", required=True, metavar="serve|work")
+    passthrough(parts, "serve", cmd_webhooks_serve, "receive authenticated webhooks and queue agent requests (webhooks extra)")
+    passthrough(parts, "work", cmd_webhooks_work, "consume queued requests, one at a time", config=True)
     return parser
 
 
+def computer_main(argv: Sequence[str] | None = None) -> int:
+    """The `glide-computer` command: `glide computer`, under its older name."""
+    return main(["computer", *(sys.argv[1:] if argv is None else argv)])
+
+
+def inspect_main(argv: Sequence[str] | None = None) -> int:
+    """The `glide-inspect` command: `glide inspect`, under its older name."""
+    return main(["inspect", *(sys.argv[1:] if argv is None else argv)])
+
+
+def webhooks_serve_main(argv: Sequence[str] | None = None) -> int:
+    """The `glide-webhooks` command: `glide webhooks serve`, so the glide.toml default and the missing-extra message apply."""
+    return main(["webhooks", "serve", *(sys.argv[1:] if argv is None else argv)])
+
+
+def webhooks_work_main(argv: Sequence[str] | None = None) -> int:
+    """The `glide-webhook-worker` command: `glide webhooks work`, under its older name."""
+    return main(["webhooks", "work", *(sys.argv[1:] if argv is None else argv)])
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, rest = parser.parse_known_args(argv)
+    if rest and not getattr(args, "passthrough", False):
+        parser.error(f"unrecognized arguments: {' '.join(rest)}")
+    args.rest = rest
+    if getattr(args, "passthrough", False) and (not args.loads_config or _help_asked(rest)):
+        if not _help_asked(rest):
+            _dotenv()  # the documented .env holds keys and settings these commands read from os.environ themselves
+        return args.handler(args)  # theirs to load, if they load anything; asking for help needs no configuration
     try:
         config = _load(args.config)
     except (ValueError, OSError) as exc:  # ConfigError is a ValueError: the file is wrong, or missing
-        print(f"glide: {redact(str(exc))}", file=sys.stderr)
+        print(f"glide: {clean(str(exc))}", file=sys.stderr)
         return 2
     try:
         return args.handler(args, config)

@@ -1,0 +1,44 @@
+{
+  "data": {
+    "base_revision": 3,
+    "changes": [
+      {
+        "key": "voice.hands_free",
+        "value": true
+      },
+      {
+        "key": "voice.silence_ms",
+        "value": 700
+      },
+      {
+        "key": "voice.language",
+        "value": "en"
+      },
+      {
+        "key": "privacy.record_content",
+        "value": false
+      },
+      {
+        "key": "computer.act_enabled",
+        "value": false
+      },
+      {
+        "key": "roles.pin",
+        "value": {
+          "role": "tts",
+          "slot": null
+        }
+      },
+      {
+        "key": "roles.pin",
+        "value": {
+          "role": "stt",
+          "slot": "alpha:m1"
+        }
+      }
+    ]
+  },
+  "id": "a10",
+  "type": "settings_set",
+  "v": 1
+}

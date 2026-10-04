@@ -73,14 +73,27 @@ def _parse(raw: bytes, kind: str, label: str) -> dict:
     return {key: tuple(value) if isinstance(value, list) else value for key, value in item.items()}
 
 
-def _read_directory(root_fd: int, kind: str) -> dict[str, dict]:
+# Opening every step relative to a directory descriptor, refusing symlinks, needs POSIX. Elsewhere (Windows) the
+# same checks are made on paths: no symlink or junction, regular files only. That path cannot close a swap between
+# the check and the read, so the descriptor route is used wherever it exists.
+_DIR_FD = hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd
+
+
+def _add(records: dict[str, dict], raw: bytes, kind: str, name: str) -> None:
+    item = _parse(raw, kind, f"{kind}/{name}")
+    if item["id"] in records:
+        raise ValueError(f"duplicate {kind} id: {item['id']}")
+    records[item["id"]] = item
+
+
+def _read_directory_fd(root_fd: int, kind: str) -> dict[str, dict]:
     """Relative descriptor opens prevent manifests or their directory escaping root."""
     flags = os.O_RDONLY | os.O_NOFOLLOW
     try:
         directory_fd = os.open(kind, flags | os.O_DIRECTORY, dir_fd=root_fd)
     except FileNotFoundError:
         return {}
-    records = {}
+    records: dict[str, dict] = {}
     try:
         for name in sorted(os.listdir(directory_fd)):
             if not name.endswith(".md"):
@@ -89,13 +102,46 @@ def _read_directory(root_fd: int, kind: str) -> dict[str, dict]:
             with os.fdopen(file_fd, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError(f"manifest is not a regular file: {kind}/{name}")
-                item = _parse(stream.read(MAX_MANIFEST_BYTES + 1), kind, f"{kind}/{name}")
-            if item["id"] in records:
-                raise ValueError(f"duplicate {kind} id: {item['id']}")
-            records[item["id"]] = item
+                _add(records, stream.read(MAX_MANIFEST_BYTES + 1), kind, name)
     finally:
         os.close(directory_fd)
     return records
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def _read_directory_path(root: Path, kind: str) -> dict[str, dict]:
+    """The same contract by path, for platforms without descriptor-relative opens."""
+    directory = root / kind
+    if _is_link(directory):
+        raise OSError("catalog directory is a link")
+    if not directory.exists():
+        return {}
+    if not directory.is_dir():
+        raise OSError("catalog entry is not a directory")
+    records: dict[str, dict] = {}
+    for path in sorted(directory.iterdir()):
+        if not path.name.endswith(".md"):
+            continue
+        if _is_link(path):
+            raise OSError("manifest is a link")
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError(f"manifest is not a regular file: {kind}/{path.name}")
+        with path.open("rb") as stream:
+            _add(records, stream.read(MAX_MANIFEST_BYTES + 1), kind, path.name)
+    return records
+
+
+def _read_manifests(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    if not _DIR_FD:
+        return _read_directory_path(root, "skills"), _read_directory_path(root, "plugins")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return _read_directory_fd(root_fd, "skills"), _read_directory_fd(root_fd, "plugins")
+    finally:
+        os.close(root_fd)
 
 
 class Catalog:
@@ -118,14 +164,10 @@ class Catalog:
 
     def reload(self) -> None:
         with self._lock:
-            root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                skills = _read_directory(root_fd, "skills")
-                plugins = _read_directory(root_fd, "plugins")
+                skills, plugins = _read_manifests(self.root)
             except OSError as error:
                 raise ValueError("catalog paths must be contained regular files/directories without symlinks") from error
-            finally:
-                os.close(root_fd)
             if set(skills) & set(plugins):
                 raise ValueError("skill and plugin ids must be globally unique")
             for plugin in plugins.values():
@@ -140,10 +182,6 @@ class Catalog:
                 active.update(plugins[plugin_id]["skills"])
                 tool_ids.update(plugins[plugin_id]["tools"])
             self._snapshot = (tuple(skills[key] for key in sorted(active)), frozenset(tool_ids), self._snapshot[2] + 1)
-
-    def snapshot(self) -> tuple[list[dict], frozenset[str]]:
-        skills, tool_ids, _ = self.snapshot_with_revision()
-        return skills, tool_ids
 
     @property
     def revision(self) -> int:
@@ -160,7 +198,7 @@ class Catalog:
         )
 
     def skills(self) -> list[dict]:
-        return self.snapshot()[0]
+        return self.snapshot_with_revision()[0]
 
     def tool_ids(self) -> frozenset[str]:
         with self._lock:

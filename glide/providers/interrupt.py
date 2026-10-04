@@ -1,0 +1,122 @@
+"""What an adapter does so that a cancel reaches its connection (D2).
+
+The cancel itself is `glide.computer.control.RunControl`: the control that is current while a provider is called
+(`current_control()`) is the one the user's stop cancels. This module is the adapter's side of it, small helpers
+over `RunControl.closing_on_cancel` and `checkpoint`, and nothing more:
+
+- `closing(close)` registers how to close a connection for as long as it is open. The cancelling thread runs
+  `close`, which wakes whatever is blocked reading it.
+- `check()` is the checkpoint between two requests, so a cancelled call is never sent again.
+- `abort_response(response)` is the `close` for an httpx response whose headers have arrived. It shuts the socket
+  down first, because closing a socket that another thread is blocked reading does not wake that thread on every
+  platform, and shutting it down does.
+- `Call(client)` is the `close` for a request that is still waiting for its headers, which is where a model spends
+  most of a non-streaming call: no response exists yet to close. It finds the one connection that carries this
+  request in httpcore's pool and shuts that down, and nothing else (a client's other requests are not touched). It
+  reads private attributes of httpcore 1.0.x (`_pool`, `_requests`, `_connection`, `_network_stream`) and does
+  nothing if they are not there (`Call.socket()` is then None). That is the one silent degrade, and it lives only
+  here: `test_httpx_alone_has_what_the_helper_reads` in tests/test_cancel_wire.py fails loudly, over a real loopback
+  socket, the day a new httpcore moves them.
+
+What a cancel cannot reach: a request that is still being connected (DNS, TCP, TLS) or still waiting for a free
+pool slot has no connection in the pool yet, so `Call.abort` finds nothing to shut and the thread making it stays
+inside httpx until its connect timeout or until a connection arrives. Through a chain the caller is released at once
+all the same (chain.py runs the call on a thread it can abandon). The request is not sent when the connection does
+arrive: `Call` is httpcore's `trace` hook and checks the control just before the first byte of the request is
+written, so it ends as the cancel having transmitted nothing, and no answer is used.
+
+An adapter raises only `ProviderError`, so a cancel leaves here as kind "cancelled" (errors.py). What the closed
+connection makes httpx raise afterwards is still mapped by the adapter as usual; the chain (chain.py) turns anything
+raised once the control is cancelled into the same "cancelled", so a closed connection is never a transport fault.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import socket
+from collections.abc import Callable, Iterator
+
+import httpx
+
+from glide.computer.control import current_control
+from glide.computer.models import Abort
+
+from .errors import cancelled
+
+
+def check(provider: str = "") -> None:
+    """Raise `ProviderError(kind="cancelled")` if the current control has been cancelled. A no-op without one."""
+    control = current_control()
+    if control is not None and control.cancelled.is_set():
+        raise cancelled(provider, control.reason)
+
+
+@contextlib.contextmanager
+def closing(close: Callable[[], None], provider: str = "") -> Iterator[None]:
+    """For the block, a cancel of the current control calls `close()` from the cancelling thread.
+
+    A control already cancelled closes at once and raises `ProviderError(kind="cancelled")`. Without a control
+    nothing is registered and the block runs as it is.
+    """
+    control = current_control()
+    if control is None:
+        yield
+        return
+    try:
+        with control.closing_on_cancel(close):
+            yield
+    except Abort:
+        with contextlib.suppress(Exception):
+            close()
+        raise cancelled(provider, control.reason) from None
+
+
+def _shutdown(sock: object) -> None:
+    if sock is not None:
+        with contextlib.suppress(Exception):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+def abort_response(response: httpx.Response) -> None:
+    """Close an open httpx response from any thread, waking a read that is blocked on it."""
+    stream = response.extensions.get("network_stream")
+    _shutdown(stream.get_extra_info("socket") if stream is not None else None)
+    response.close()
+
+
+class Call:
+    """One httpx request, as far as a cancel is concerned. Pass `extensions` to the request, `abort` to `closing`."""
+
+    def __init__(self, client: httpx.Client, provider: str = "") -> None:
+        self._client = client
+        self._token = object()
+        self._provider = provider
+        self._control = current_control()  # the one this request belongs to, wherever httpcore runs it
+        # httpcore carries these to its own Request: the token finds the connection, `trace` is told how it is going
+        self.extensions: dict[str, object] = {"glide_call": self._token, "trace": self._trace}
+
+    def _trace(self, event: str, info: object) -> None:
+        """httpcore tells us each step it takes. Before the request line and headers go out, a cancelled request stops.
+
+        A request that waited for a pool slot or a connection gets here after the user may have stopped it; closing a
+        socket cannot help a request that had none, so this is the last point where nothing has been sent yet.
+        """
+        if event.endswith("send_request_headers.started") and self._control is not None and self._control.cancelled.is_set():
+            raise cancelled(self._provider, self._control.reason)
+
+    def socket(self) -> object | None:
+        """The socket of the connection that carries this request, or None when there is none yet or it cannot be found.
+
+        This reads private attributes of httpcore, and where a new httpcore has moved them it finds nothing, so a
+        cancel degrades to closing what the adapter can reach itself. tests/test_cancel_wire.py fails if that happens.
+        """
+        with contextlib.suppress(Exception):
+            pool = self._client._transport._pool
+            for queued in list(pool._requests):
+                if queued.request.extensions.get("glide_call") is self._token and queued.connection is not None:
+                    return queued.connection._connection._network_stream.get_extra_info("socket")
+        return None
+
+    def abort(self) -> None:
+        """Shut down the connection that carries this request, whether or not its headers have arrived."""
+        _shutdown(self.socket())

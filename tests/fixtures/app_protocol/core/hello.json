@@ -1,0 +1,15 @@
+{
+  "data": {
+    "capabilities": [
+      "text_input",
+      "voice"
+    ],
+    "core_version": "0.1.0",
+    "protocol": 1,
+    "recording_content": false,
+    "session_id": "s1"
+  },
+  "reply_to": "a1",
+  "type": "hello",
+  "v": 1
+}

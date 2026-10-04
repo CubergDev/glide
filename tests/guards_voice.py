@@ -1,9 +1,8 @@
 """Guards for the voice stack: no test opens a sound device or a websocket.
 
-`no_real_audio` is an autouse fixture. Each module under `tests/speech/` imports it (a second
-`conftest.py` there would shadow the root one: tests do `from conftest import busy_page`), and the root
-`tests/conftest.py` must import it too (`from guards_voice import no_real_audio  # noqa: F401`) so
-that every test in the suite is covered, not only the ones under `tests/speech/`.
+`no_real_audio` is an autouse fixture. `tests/conftest.py` registers this file as a plugin (every `guards_*.py`
+is), so every test in the suite is covered; the modules under `tests/speech/` also import it (a second
+`conftest.py` there would shadow the root one: tests do `from conftest import busy_page`).
 
 What it refuses, when the module is installed:
 
@@ -44,7 +43,9 @@ WEBSOCKETS_CALLS = (
 
 def _refusal(what: str):
     def refuse(*args, **kwargs):
-        raise RuntimeError(f"a test reached the real machine through {what}; give the code a fake instead")
+        from conftest import refusal  # this file is loaded under two names; the ledger lives in conftest
+
+        raise refusal(what, "give the code a fake instead")
 
     return refuse
 

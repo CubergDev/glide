@@ -123,3 +123,89 @@ def test_events_reach_the_emitter_with_the_task_id():
     control = RunControl("task-7", events.append)
     control.event("progress", "working", outcome="")
     assert [(e.task_id, e.kind, e.text) for e in events] == [("task-7", "progress", "working")]
+
+
+# -- two cancellers, and a close callback against the block it belongs to (finding 5) ---------------------
+
+
+class GatedEvent(threading.Event):
+    """An Event whose first `set()` holds there until `proceed` is set (or WAIT passes): the moment between a canceller
+    having chosen a reason and the control being marked cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered, self.proceed, self._first = threading.Event(), threading.Event(), True
+
+    def set(self) -> None:
+        if self._first:
+            self._first = False
+            self.entered.set()
+            self.proceed.wait(0.3)
+        super().set()
+
+
+def test_two_concurrent_cancellers_agree_on_the_first_reason():
+    """F5: the reason was written under the lock but the flag set outside it, so a second canceller in between
+    overwrote the reason the first had chosen."""
+    control = RunControl("t")
+    control.cancelled = GatedEvent()
+    first = threading.Thread(target=control.cancel, args=("first",))
+    first.start()
+    assert control.cancelled.entered.wait(3)
+    second = threading.Thread(target=lambda: (control.cancel("second"), control.cancelled.proceed.set()))
+    second.start()
+    first.join(3)
+    second.join(3)
+    assert control.reason == "first"
+    with pytest.raises(Abort, match="first"):
+        control.check(wait=False)
+
+
+def test_a_close_callback_never_runs_after_its_block_has_exited():
+    """F5: `cancel` took a snapshot of the callbacks and ran them with nothing held, so the callback of a block that
+    had exited in the meantime (a connection by then back in a pool) still ran."""
+    control = RunControl("t")
+    ran, running, release = [], [], threading.Event()
+    first_running = threading.Event()
+
+    def make(name):
+        def close():
+            ran.append(name)
+            if not first_running.is_set():  # whichever the cancel reaches first holds there
+                running.append(name)
+                first_running.set()
+                release.wait(3)
+
+        return close
+
+    a, b = control.closing_on_cancel(make("a")), control.closing_on_cancel(make("b"))
+    blocks = {"a": a, "b": b}
+    a.__enter__()
+    b.__enter__()
+    canceller = threading.Thread(target=control.cancel, args=("stop",))
+    canceller.start()
+    assert first_running.wait(3)
+    (held,) = running
+    other = "b" if held == "a" else "a"
+    blocks[other].__exit__(None, None, None)  # its block ends while the cancel is still going through the callbacks
+    release.set()
+    canceller.join(3)
+    blocks[held].__exit__(None, None, None)
+    assert ran == [held]
+
+
+def test_leaving_a_block_waits_for_its_own_callback_that_is_running():
+    control = RunControl("t")
+    running, release, left = threading.Event(), threading.Event(), threading.Event()
+    block = control.closing_on_cancel(lambda: (running.set(), release.wait(3)))
+    block.__enter__()
+    canceller = threading.Thread(target=control.cancel, args=("stop",))
+    canceller.start()
+    assert running.wait(3)
+    leaver = threading.Thread(target=lambda: (block.__exit__(None, None, None), left.set()))
+    leaver.start()
+    assert not left.wait(0.2)  # the callback is still using what the block owned
+    release.set()
+    assert left.wait(3)
+    canceller.join(3)
+    leaver.join(3)

@@ -2,11 +2,21 @@
 name = "glide"
 version = "0.1.0"
 description = "A voice and text assistant that drives your Mac, on swappable API providers."
+readme = "README.md"
 requires-python = ">=3.12"
+# No license is declared: the team decides it, and one is not invented here. "Private :: Do Not Upload" makes PyPI
+# reject an accidental `twine upload` of this package.
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "anthropic==1.6.0",
     "openai==2.54.0",
-    "pillow>=11.0,<13",
+    # 12.3.0 is the first release without published advisories (earlier 11.x and 12.x releases have them).
+    "pillow>=12.3.0,<13",
     "typesafe-sdk==0.6.0",
     "websocket-client==1.9.0",
     "httpx>=0.27",
@@ -26,14 +36,19 @@ dependencies = [
 # were built against (a point-in-time claim, re-checked with `uv lock`), each upper bound the next breaking release.
 # Nothing here is imported by the core: a feature that needs one imports it lazily and reports a missing extra.
 [project.optional-dependencies]
-# Hands-free voice: Silero VAD (numpy + onnxruntime), a full-duplex audio device, realtime TTS over websockets.
+# Hands-free voice: Silero VAD (numpy + onnxruntime) and a full-duplex audio device. Realtime TTS talks websockets
+# through websocket-client, a core dependency, so nothing for it is listed here.
 speech = [
     "numpy>=2.5.3,<3",
     "onnxruntime>=1.30,<2",
     "sounddevice>=0.5.6,<1",
-    "websockets>=17.1,<18",
 ]
-# The PySide6 pet. Optional until the SwiftUI pet exists (decision D11). Cocoa must match the core's pyobjc pins.
+# Echo cancellation for talking over Glide through speakers: WebRTC's AEC3 through the livekit package (a wheel; no
+# system library, no compiler). Without it, `echo_canceller = "auto"` falls back to a numpy filter from the `speech`
+# extra, and says so. Candidates evaluated and not chosen are listed in docs/voice-echo-cancellation.md.
+aec = ["livekit>=1.1.20,<2"]
+# The PySide6 pet. Nothing on this branch imports it: the pet code lands with the pet branch, which is why the extra stays.
+# Optional until the SwiftUI pet exists (decision D11). Cocoa must match the core's pyobjc pins.
 ui = [
     "PySide6>=6.10,<7",
     "pyobjc-framework-Cocoa==12.2.2; sys_platform == 'darwin'",
@@ -48,32 +63,36 @@ webhooks = [
 # Glide as an MCP server and client. 1.30 is what the memory extension's SDK tests were written against;
 # 2.x exists and is unchecked, so it is excluded until someone runs those tests against it.
 mcp = ["mcp>=1.30,<2"]
-# Portable OCR for machines without macOS Vision (RapidOCR on onnxruntime).
-ocr = [
-    "rapidocr>=3.9.2,<4",
-    "onnxruntime>=1.30,<2",
-]
 # Optional OS keychain storage for provider keys. The core reads keys from environment variables only (decision D4).
 keyring = ["keyring>=25.7,<26"]
 # Personalization and memory (SQLite, standard library only): no packages to add. The extra exists so installs and
 # docs name the feature; MCP-facing parts also need the `mcp` extra.
 memory = []
-all = ["glide[speech,ui,webhooks,mcp,ocr,keyring,memory]"]
+all = ["glide[speech,aec,ui,webhooks,mcp,keyring,memory]"]
 
 [project.scripts]
 glide = "glide.cli:main"
-glide-computer = "glide.computer.cli:main"
-glide-inspect = "glide.computer.cli:inspect"
+glide-computer = "glide.cli:computer_main"
+glide-inspect = "glide.cli:inspect_main"
+# The two webhook commands under their older names: `glide webhooks serve` and `glide webhooks work` run the same code.
+glide-webhooks = "glide.cli:webhooks_serve_main"
+glide-webhook-worker = "glide.cli:webhooks_work_main"
 
 [dependency-groups]
 dev = ["pytest==9.1.1", "ruff==0.16.8"]
 
 [build-system]
-requires = ["hatchling==1.32.1"]
+# Pinned. 1.32.1 was yanked on PyPI ("Broken by change to types"); 1.32.4 is the newest release that is not yanked.
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["glide"]
+
+# The sdist is the source and what builds it, not the repository: no tests, notes, CI files or lock. README.md is the
+# package's long description (`readme` under [project]) and so it ships; tests/test_packaging.py pins both.
+[tool.hatch.build.targets.sdist]
+include = ["/glide", "/pyproject.toml", "/glide.toml.example", "/README.md"]
 
 [tool.ruff]
 line-length = 130

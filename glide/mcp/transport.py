@@ -9,6 +9,7 @@ a yes (AGENTS.md: ask first, for that exact command). Without a yes nothing is s
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -41,21 +42,28 @@ async def open_stdio_client(
     source = os.environ if environ is None else environ
     env = {name: source[name] for name in spec.env_names if name in source}  # values go to the child only
     parameters = StdioServerParameters(command=spec.command, args=list(spec.args), env=env or None)
-    ready = False
+    body_failed = False
     try:
         async with AsyncExitStack() as stack:
-            read, write = await stack.enter_async_context(stdio_client(parameters))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            ready = True
-            yield SessionClient(
-                spec.name,
-                session_request(session, read_timeout_seconds=timedelta(seconds=spec.timeout_s)),
-                timeout_s=spec.timeout_s,
-            )
+            try:
+                async with asyncio.timeout(spec.timeout_s):  # a server that never answers initialize must not hang setup
+                    read, write = await stack.enter_async_context(stdio_client(parameters))
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+            except Exception as error:
+                raise to_provider_error(error, server=spec.name, action="connect") from None
+            try:
+                yield SessionClient(
+                    spec.name,
+                    session_request(session, read_timeout_seconds=timedelta(seconds=spec.timeout_s)),
+                    timeout_s=spec.timeout_s,
+                )
+            except BaseException:
+                body_failed = True
+                raise
     except ProviderError:
         raise
     except Exception as error:
-        if ready:
+        if body_failed:
             raise  # raised by the caller's own block: not ours to relabel
-        raise to_provider_error(error, server=spec.name, action="connect") from None
+        raise to_provider_error(error, server=spec.name, action="close") from None  # SDK teardown after a clean body

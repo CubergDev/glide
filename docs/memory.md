@@ -19,7 +19,7 @@ value is an error, not a guess.
 | `memories` | key, text, kind, source, confidence, scope ids, timestamps, optional expiry | what the user saved (`glide memory remember`, `/remember`, or auto capture if enabled) |
 | `outcomes` | run id (`run:` + sha256 of run.json, never a path or URL), success flag, short tactic summary | the host, after it verified the effect; summaries containing URLs or credentials are refused |
 | `proposals`, `overlays`, `harness` | refinement text derived from three or more verified outcomes, evidence ids, revision numbers | derived from `outcomes` |
-| `events` | allowlisted metadata only: ids, tool names, counts, durations, status. 30 days, 1,000 rows per user/project | never arguments, results, notification text, resource URIs or the user's utterance |
+| `events` | allowlisted metadata only: ids, tool names, counts, durations, status, and a flag when a tool's outcome is unknown. 30 days, 1,000 rows per user/project | never arguments, results, notification text, resource URIs or the user's utterance |
 
 Not stored: utterances (unless saved as a memory), screenshots, page or tool content, typed text, raw URLs, keys.
 `ingest_run` reads only the `outcome` label of a finished `run.json`. A writer's `achieved` flag is never success
@@ -31,6 +31,24 @@ rejects recognizable keys (it is not a complete scanner).
 
 `glide memory status` shows whether memory is on and where it lives without creating anything.
 `glide memory --help` lists remember, recall, forget, events, propose, apply, rollback and plan.
+`glide memory plan GOAL --catalog DIR --plugin ID --model LABEL --window N` previews what a turn would get from a
+catalog of skill and plugin files (nothing is sent anywhere). `glide/memory/catalog_examples/` holds working examples
+of such a catalog; a test loads them, so they stay valid.
+
+## Memory written over MCP
+
+With `[mcp] server_memory = "write"` (default `"off"`) a remote MCP client may add notes. It is not the user, so:
+
+- its notes are stored with `source = "mcp"`, `kind = "note"` and keys prefixed `mcp:`; they cannot replace or delete
+  anything the user saved, and a stored `source = "mcp"` row is never treated as a stable preference, whatever its
+  `kind` says, so it is never included in a prompt just because it exists;
+- when one is included (because the goal mentions it) it appears only inside the lower-trust data block, with the
+  label "written by a remote MCP client; untrusted";
+- a note is at most 500 characters, at most 50 are kept, credentials are refused;
+- `glide memory recall` lists them (the `source` column says `mcp`) and `glide memory forget ID` removes one.
+
+Relevance to a goal is plain word overlap, so a note full of common words can match many goals; the label, the
+lower-trust block and the host's approval of every tool call are what contain that.
 
 ## Dropped in the port
 

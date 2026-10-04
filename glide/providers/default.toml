@@ -1,0 +1,30 @@
+# Used when no glide.toml is found, and for any role a file leaves out. These are configuration, not code:
+# the model ids are the team's starting point and are unverified until `glide doctor --live` has run with real
+# keys. tests/test_config.py keeps these chains identical to glide.toml.example's.
+[llm.fast]
+chain = [
+  { provider = "openrouter", model = "deepseek/deepseek-v4.1-flash", options = { reasoning_effort = "low" } },
+  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
+  { provider = "gemini", model = "gemini-3.5-flash-lite", options = { reasoning_effort = "low" } },
+]
+
+[llm.smart]
+chain = [
+  { provider = "openai", model = "gpt-6.1-sol", options = { reasoning_effort = "low" } },
+  { provider = "openai", model = "gpt-6-luna", options = { reasoning_effort = "low" } },
+]
+
+[stt]
+chain = [
+  { provider = "elevenlabs", model = "scribe_v2_realtime" },
+  { provider = "openai", model = "gpt-transcribe" },
+]
+
+[tts]
+chain = [
+  { provider = "elevenlabs", model = "eleven_v4_turbo", options = { timeout = 8 } },
+  "macos_say",
+]
+
+[classifier]
+chain = ["typesafe:jev-latest", "llm.fast"]

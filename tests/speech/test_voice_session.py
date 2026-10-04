@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -67,6 +68,37 @@ def fake_device(**kw):
     return FullDuplexDevice(input_factory=lambda cb: _Stream(), output_factory=lambda cb, rate: _Stream(), **kw)
 
 
+@pytest.mark.parametrize("partial", [{"vad_model_path": "model.onnx"}, {"vad_model_sha256": "0" * 64}])
+def test_a_model_configured_by_half_is_a_visible_fallback_to_loudness(partial):
+    """PR6-4175621979: with vad = 'auto' and only the path or only the checksum, loudness was chosen without a word."""
+    warned = []
+    assert isinstance(make_vad(SpeechSettings(vad="auto", **partial), warned.append), EnergyProbability)
+    assert len(warned) == 1 and "vad_model_path" in warned[0] and "vad_model_sha256" in warned[0]
+    assert (
+        make_vad(SpeechSettings(vad="energy", **partial), warned.append) and len(warned) == 1
+    )  # asked for loudness: nothing to say
+
+
+def test_a_model_that_checks_out_but_cannot_be_loaded_is_a_visible_fallback_and_an_error_when_asked_for(tmp_path, monkeypatch):
+    """PR6-4175247849: an onnxruntime error escaped as itself instead of the documented warning and fallback."""
+    ort = pytest.importorskip("onnxruntime")
+    pytest.importorskip("numpy")
+    model = tmp_path / "vad.onnx"
+    model.write_bytes(b"not really a model")
+    digest = hashlib.sha256(model.read_bytes()).hexdigest()
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("secret model detail")
+
+    monkeypatch.setattr(ort, "InferenceSession", refuse)
+    settings = {"vad_model_path": str(model), "vad_model_sha256": digest}
+    warned = []
+    assert isinstance(make_vad(SpeechSettings(vad="auto", **settings), warned.append), EnergyProbability)
+    assert len(warned) == 1 and "could not be loaded (RuntimeError)" in warned[0] and "secret" not in warned[0]
+    with pytest.raises(VadError, match=r"could not be loaded \(RuntimeError\)"):
+        make_vad(SpeechSettings(vad="silero", **settings))
+
+
 def test_make_vad_is_loudness_unless_a_model_is_configured():
     assert isinstance(make_vad(SpeechSettings()), EnergyProbability)
     assert isinstance(make_vad(SpeechSettings(vad="energy")), EnergyProbability)
@@ -125,3 +157,98 @@ def test_the_speech_package_names_no_endpoint_hash_model_or_voice(path):
     text = path.read_text()
     for what, pattern in FORBIDDEN.items():
         assert not pattern.search(text), f"{path.name} contains {what}: {pattern.search(text).group(0)!r}"
+
+
+# -- echo cancellation and barge-in wiring ----------------------------------------------------------
+
+
+def test_build_voice_hands_the_barge_in_and_stop_settings_to_the_loop_and_the_assistant():
+    settings = SpeechSettings(barge_min_voiced_ms=250, barge_margin_db=10, barge_min_erle_db=9, stop_phrases=("hold on please",))
+    loop = build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), settings, device=fake_device(), vad=lambda f: 0.0)
+    thresholds = loop.status()["barge_in"]["thresholds"]
+    assert thresholds["min_voiced_ms"] == 256 and thresholds["margin_db"] == 10 and thresholds["min_erle_db"] == 9
+    assert loop.assistant.handle_text("hold on please").route == "stop"
+    loop.assistant.close()
+
+
+def test_build_voice_gives_a_speaker_device_a_canceller_and_a_headset_none(monkeypatch):
+    import glide.speech.session as session
+
+    built = []
+
+    class Marker:
+        hold = False
+        stats = None
+
+        def close(self): ...
+
+    monkeypatch.setattr(session, "make_canceller", lambda name, warn: built.append(name) or Marker())
+    monkeypatch.setattr(FullDuplexDevice, "start", lambda self: None)
+    speakers = build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), SpeechSettings(echo_canceller="nlms"), vad=lambda f: 0.0)
+    assert built == ["nlms"] and speakers.assistant.io.player._canceller is not None
+    speakers.assistant.close()
+    built.clear()
+    headset = build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), SpeechSettings(headset=True), vad=lambda f: 0.0)
+    assert built == [] and headset.assistant.io.player._canceller is None
+    headset.assistant.close()
+
+
+def test_a_named_canceller_that_cannot_be_built_is_an_error_not_a_quiet_half_duplex(monkeypatch):
+    import glide.speech.echo as echo
+
+    class Missing:
+        def __init__(self):
+            raise echo.EchoError("not installed")
+
+    monkeypatch.setattr(echo, "CANCELLERS", {"webrtc": Missing, "nlms": Missing})
+    monkeypatch.setattr(FullDuplexDevice, "start", lambda self: None)
+    with pytest.raises(echo.EchoError):
+        build_voice(FakeConfig(llm=FakeLLM(), tts=FakeTTS()), SpeechSettings(echo_canceller="webrtc"), vad=lambda f: 0.0)
+    warned = []
+    from glide.assistant.core import IO
+
+    loop = build_voice(
+        FakeConfig(llm=FakeLLM(), tts=FakeTTS()),
+        SpeechSettings(echo_canceller="auto"),
+        io=IO(warn=warned.append),
+        vad=lambda f: 0.0,
+    )
+    assert len(warned) == 1 and "half duplex" in warned[0]
+    loop.assistant.close()
+
+
+def test_build_voice_asks_for_a_yes_per_task_when_acting_unless_the_settings_say_otherwise():
+    config = FakeConfig(llm=FakeLLM(), tts=FakeTTS())
+    on = build_voice(
+        config,
+        SpeechSettings(confirm_phrase="go ahead glide", confirm_timeout_s=5),
+        act=True,
+        device=fake_device(),
+        vad=lambda f: 0.0,
+    )
+    assert on._approval is not None and on._approval.phrase == "go ahead glide" and on._approval.timeout_s == 5
+    off = build_voice(config, SpeechSettings(confirm_tasks=False), act=True, device=fake_device(), vad=lambda f: 0.0)
+    assert off._approval is None
+    dry = build_voice(config, SpeechSettings(), act=False, device=fake_device(), vad=lambda f: 0.0)
+    assert dry._approval is None  # nothing acts, so there is nothing to confirm
+    for loop in (on, off, dry):
+        loop.assistant.close()
+
+
+def test_the_device_build_voice_owns_is_opened_only_if_the_caller_is_still_ready(monkeypatch):
+    """PR15-4175491836: opening the device is what asks for the microphone, so a caller whose session was stopped while
+    it was being built can say so before that happens."""
+    opened = []
+
+    class Recording(FullDuplexDevice):
+        def start(self):
+            opened.append(self)
+
+    monkeypatch.setattr("glide.speech.session.FullDuplexDevice", Recording)
+    settings = SpeechSettings(echo_canceller="none")
+    for ready in (False, True):
+        loop = build_voice(
+            FakeConfig(llm=FakeLLM(), tts=FakeTTS()), settings, vad=lambda frame: 0.0, ready=lambda ready=ready: ready
+        )
+        loop.assistant.close()
+    assert len(opened) == 1

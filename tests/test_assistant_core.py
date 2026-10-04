@@ -34,7 +34,7 @@ from glide.assistant.core import ANSWER_TOKENS, IO, Assistant
 from glide.assistant.tasks import abort_on
 from glide.computer import macos, runner
 from glide.computer.models import Abort
-from glide.computer.platform_adapter import desktop
+from glide.computer.platform_adapter import desktop, dispatching
 from glide.computer.runner import RunState
 from glide.providers.errors import ProviderError
 
@@ -552,7 +552,7 @@ def test_the_abort_hook_reaches_the_adapters_own_checks_so_a_stop_lands_mid_typi
 
     monkeypatch.setattr(macos, "_post", post)
     original = macos.check_abort
-    with abort_on(stop), pytest.raises(Abort, match="stopped by the user"):
+    with abort_on(stop), dispatching(), pytest.raises(Abort, match="stopped by the user"):
         macos.type_text("abc")
     assert events == [{"down": True, "text": "a"}, {"down": False, "text": "a"}]
     assert macos.check_abort is original
@@ -675,3 +675,15 @@ def test_the_assistant_closes_the_player_it_was_given(tmp_path):
 
 def test_the_world_module_is_the_shared_simulated_computer():
     assert world.World is World  # the scenario tests and these use the same fake machine
+
+
+def test_a_run_folder_taken_in_the_same_second_is_never_handed_out_twice(tmp_path, monkeypatch):
+    # PR1-4175057750: the folder is made when it is chosen, so two processes starting together cannot share one
+    from glide.assistant import tasks
+
+    monkeypatch.setattr(tasks.time, "strftime", lambda fmt: "20260101-000000")
+    runs = tasks.TaskRunner(object(), tmp_path / "runs")
+    (tmp_path / "runs" / "20260101-000000").mkdir(parents=True)  # another process got there first
+    first, second = runs._fresh_folder(), runs._fresh_folder()
+    assert first.name == "20260101-000000-2" and second.name == "20260101-000000-3"
+    assert first.is_dir() and second.is_dir()

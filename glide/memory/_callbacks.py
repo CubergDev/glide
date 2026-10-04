@@ -4,7 +4,7 @@ import asyncio
 import inspect
 
 
-def _sync(value):
+def require_sync(value):
     if inspect.isawaitable(value):
         if inspect.iscoroutine(value):
             value.close()
@@ -23,7 +23,7 @@ def drive(steps):
             except StopIteration as done:
                 return done.value
             try:
-                value, error = _sync(callback()), None
+                value, error = require_sync(callback()), None
             except BaseException as failure:
                 error = failure
     finally:

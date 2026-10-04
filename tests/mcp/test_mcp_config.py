@@ -38,6 +38,9 @@ def test_servers_parse_with_env_names_only():
         {"servers": [{"name": "a", "command": "x", "env": ["lower-case-with-dash"]}]},
         {"servers": [{"name": "a", "command": "x", "timeout_s": 0}]},
         {"servers": [{"name": "a", "command": "x", "timeout_s": True}]},
+        {"servers": [{"name": "a", "command": "x", "timeout_s": 3600.5}]},
+        {"servers": [{"name": "a", "command": "x", "timeout_s": -1}]},
+        {"servers": [{"name": "a", "command": "x", "timeout_s": "60"}]},
         {"servers": [{"name": "a", "command": "x", "url": "elsewhere"}]},
         {"surprise": 1},
     ],
@@ -64,3 +67,9 @@ def test_load_reads_the_toml_table(tmp_path):
 
 
 from mcp_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)
+
+
+def test_the_longest_allowed_timeout_is_an_hour():
+    assert (
+        McpSettings.from_mapping({"servers": [{"name": "a", "command": "x", "timeout_s": 3600}]}).servers[0].timeout_s == 3600.0
+    )

@@ -88,3 +88,33 @@ def test_settings_error_never_echoes_file_content(tmp_path):
 
 
 from memory_guard_loader import no_real_memory_or_mcp  # noqa: E402, F401  (autouse guard)
+
+
+def test_find_config_picks_the_same_file_as_load_config(tmp_path):
+    """The settings reader must not drift from the one search `load_config` does (the file the rest of Glide reads)."""
+    from glide.providers.config import ConfigError, load_config
+
+    here, home = tmp_path / "here", tmp_path / "home"
+    (home / ".config/glide").mkdir(parents=True)
+    here.mkdir()
+    named, explicit = tmp_path / "named.toml", tmp_path / "explicit.toml"
+    for path in (named, explicit, here / "glide.toml", home / ".config/glide/glide.toml"):
+        path.write_text("")
+
+    def both(env, *, path=None, cwd=here, home_dir=home):
+        found = find_config(env, path=path, cwd=cwd, home=home_dir)
+        loaded = load_config(path, env, cwd=cwd, home=home_dir)
+        return found, None if loaded.source == "built-in defaults" else Path(loaded.source)
+
+    assert both({}) == (here / "glide.toml", here / "glide.toml")
+    (here / "glide.toml").unlink()
+    assert both({}) == (home / ".config/glide/glide.toml",) * 2
+    assert both({"GLIDE_CONFIG": str(named)}) == (named, named)
+    assert both({"GLIDE_CONFIG": str(named)}, path=explicit) == (explicit, explicit)
+    assert both({}, home_dir=tmp_path / "nowhere") == (None, None)
+    # a file that is asked for and missing is an error in both, never a silent fallback
+    for kwargs in ({"env": {"GLIDE_CONFIG": str(tmp_path / "missing.toml")}}, {"env": {}, "path": tmp_path / "missing.toml"}):
+        with pytest.raises(SettingsError):
+            find_config(kwargs["env"], path=kwargs.get("path"), cwd=here, home=home)
+        with pytest.raises(ConfigError):
+            load_config(kwargs.get("path"), kwargs["env"], cwd=here, home=home)

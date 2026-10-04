@@ -18,7 +18,7 @@ from guards_voice import no_real_audio  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # the assistant tests' fakes live one directory up
 
-from test_assistant_fakes import WAIT, FakeConfig, FakeLLM, FakePlayer, FakeTTS, wait_until
+from test_assistant_fakes import WAIT, FakeConfig, FakeLLM, FakePlayer, FakeTTS, route_json, wait_until
 
 from glide.assistant.core import IO, Assistant
 from glide.assistant.tasks import TaskResult
@@ -47,6 +47,13 @@ def vad(frame: bytes) -> float:
 class ScriptedDevice:
     """Hands out `script` one frame per read (None is a read that timed out), then stops the loop."""
 
+    echo = None  # no canceller: what a headset, or speaker mode without one, reports
+    echo_active = False
+    guarding = False  # the microphone is being blanked: speaker mode with no canceller, while Glide speaks
+    echo_name = None
+    reference_underruns = 0
+    output_faults = 0
+
     def __init__(self, script, *, playing=False):
         self.script = list(script)
         self.playing = playing
@@ -65,6 +72,8 @@ class ScriptedDevice:
         if isinstance(item, BaseException):
             raise item
         return item
+
+    def hold_echo_stats(self, hold): ...
 
     def pause_input(self):
         self.paused = True
@@ -104,8 +113,8 @@ class ScriptedSTT:
         raise ProviderError("no batch in this test", kind="unsupported")
 
 
-def rig(script, stt, *, playing=False, tts=None, **loop_kw):
-    llm = FakeLLM()
+def rig(script, stt, *, playing=False, tts=None, llm=None, **loop_kw):
+    llm = llm or FakeLLM()
     tts = tts or FakeTTS()
     player = FakePlayer()
     heard, warned = [], []
@@ -232,6 +241,17 @@ def test_speech_that_never_stops_is_discarded_not_submitted_half_heard():
     assert r.player.played == []
 
 
+def test_bursts_inside_the_merge_window_cannot_build_a_turn_longer_than_the_cap():
+    """Each burst is under the limit and the pauses between them are shorter than the merge window, so no stretch of speech
+    was over the cap on its own: the turn as a whole is what is limited."""
+    burst = [*speech(1000), *quiet(224)]  # 32 s of speech, then the 7 frames that close a stretch at silence_ms = 200
+    stt = ScriptedSTT(["must not be answered", "the rest"])
+    r = run(rig([*burst, *burst, *burst, *quiet(1700)], stt, silence_ms=200, merge_window_s=1.0))
+    assert any("exceeded 60 seconds" in w for w in r.warned)
+    assert 0 not in stt.ended  # the turn that grew too long was discarded, not submitted
+    assert max(len(audio) for audio in stt.audio.values()) // FRAME_BYTES <= 1875 + 8  # nothing longer than the cap went out
+
+
 def test_a_microphone_fault_discards_the_turn_reports_it_and_ends_the_loop():
     stt = ScriptedSTT(["never"])
     r = run(rig([*speech(), DeviceFault("Microphone overflow; the incomplete command was discarded.")], stt))
@@ -325,14 +345,18 @@ def test_a_voice_request_to_act_is_a_dry_run_unless_the_caller_said_otherwise():
         def interrupt_speech(self):
             pass
 
-    for kwargs in ({}, {"act": True}):
+        def wait_idle(self, timeout=None):
+            return True
+
+    # asking to act is not acting: with confirmation (the default, see test_voice_confirm.py) the request runs as a dry run first
+    for kwargs in ({}, {"act": True, "confirm_tasks": False}, {"act": True}):
         device = ScriptedDevice([*speech(3), *quiet(700)])
         loop = VoiceLoop(Recorder(), device, vad, **kwargs)
         device.loop = loop
         loop.stop_soon = loop._stop.set
         loop.run()
         loop.join_turns(WAIT)
-    assert seen == [False, True]
+    assert seen == [False, True, False]
 
 
 # -- internal counters never reach the TTS ----------------------------------------------------------
@@ -349,3 +373,203 @@ def test_a_task_result_is_spoken_without_its_counters(outcome):
     said = " ".join(text for text, _ in r.tts.calls)
     assert said == result.spoken("en")
     assert not any(ch.isdigit() for ch in said) and "runs/" not in said
+
+
+# -- an answer that is not audible yet --------------------------------------------------------------
+
+
+def streamed_answer(gate):
+    """An LLM whose answer (no ready-made reply: it is streamed) is held back until `gate` is set."""
+    return FakeLLM(route=route_json("answer"), deltas=["Answer one. "], gates={0: gate})
+
+
+def test_speech_over_an_answer_that_is_still_being_written_cuts_it_as_the_new_turn_starts():
+    """The device is silent while the model is still writing, so the gate never sees Glide speaking: the answer used to go
+    on and speak over the person's new request."""
+    gate = threading.Event()
+    llm = streamed_answer(gate)
+    stt = ScriptedSTT(["tell me a story", "wait, never mind that story"])
+    r = rig([*speech(), *quiet(700), *speech(), *quiet(700)], stt, llm=llm)
+    first_b = len(speech()) + len(quiet(700))  # the index of B's first frame
+    total = first_b + len(speech()) + len(quiet(700))
+    epochs = {}
+
+    def hook(left):
+        index = total - left
+        if index == first_b:
+            assert wait_until(lambda: llm.stream_calls)  # A has heard its transcript and is being written, silently
+        epochs[index] = r.assistant._epoch
+        if left == 0:
+            gate.set()
+
+    r.device.on_frame = hook
+    run(r)
+    assert epochs[first_b + 2] > epochs[first_b]  # interrupt_speech ran when B began
+    assert sorted(r.heard) == ["tell me a story", "wait, never mind that story"]  # B was not dropped by it
+    assert wait_until(lambda: r.tts.calls) and r.assistant.wait_idle(WAIT)
+    assert len(r.tts.calls) == 1  # only B's answer was ever spoken; A's, released late, was already cancelled
+
+
+def test_a_request_still_awaiting_its_transcript_is_spared_when_an_answer_is_cut():
+    gate, stt_gate = threading.Event(), threading.Event()
+    llm = streamed_answer(gate)
+    stt = ScriptedSTT(["first", "second", "third"], gates={1: stt_gate})
+    r = rig([*speech(), *quiet(700), *speech(), *quiet(700), *speech(), *quiet(700)], stt, llm=llm)
+    one, two = len(speech()) + len(quiet(700)), 2 * (len(speech()) + len(quiet(700)))
+    total = 3 * one
+    epochs = {}
+
+    def hook(left):
+        index = total - left
+        if index == one:
+            assert wait_until(lambda: llm.stream_calls)  # the first answer is being written
+        if index == two:
+            assert wait_until(lambda: len(stt.streams) == 2)  # the second request has reached the transcriber and waits there
+        epochs[index] = r.assistant._epoch
+        if left == 0:
+            gate.set()
+            stt_gate.set()
+
+    r.device.on_frame = hook
+    run(r)
+    assert epochs[one + 2] > epochs[one]  # the first answer was cut, dropping what was pending
+    assert epochs[two + 2] == epochs[two]  # the third turn cut it again but spared the second request, still being heard
+    assert "second" in r.heard and "third" in r.heard
+
+
+def test_nothing_is_cut_when_the_earlier_answer_is_finished_and_spoken():
+    stt = ScriptedSTT(["first", "second"])
+    r = rig([*speech(), *quiet(700), *speech(), *quiet(700)], stt)
+    first_b = len(speech()) + len(quiet(700))
+    total = 2 * first_b
+    epochs = {}
+
+    def hook(left):
+        index = total - left
+        if index == first_b:
+            r.loop.join_turns(WAIT)
+            assert r.assistant.wait_idle(WAIT)  # the first answer is over, and played
+        epochs[index] = r.assistant._epoch
+
+    r.device.on_frame = hook
+    run(r)
+    assert set(epochs.values()) == {0} and sorted(r.heard) == ["first", "second"]
+
+
+def test_speech_that_is_queued_but_not_audible_yet_is_cut_too():
+    """The answer is complete and its thread is gone, but the voice is still being made: the speaker has pending sentences
+    and the device is silent."""
+    release = threading.Event()
+    tts = FakeTTS(release=release)
+    stt = ScriptedSTT(["first", "second"])
+    r = rig([*speech(), *quiet(700), *speech(), *quiet(700)], stt, tts=tts)
+    first_b = len(speech()) + len(quiet(700))
+    total = 2 * first_b
+    epochs = {}
+
+    def hook(left):
+        index = total - left
+        if index == first_b:
+            r.loop.join_turns(WAIT)  # the first request is finished being answered
+            assert wait_until(lambda: tts.calls)  # and its voice is being made, not yet heard
+        epochs[index] = r.assistant._epoch
+        if left == 0:
+            release.set()
+
+    r.device.on_frame = hook
+    run(r)
+    assert epochs[first_b + 2] > epochs[first_b]
+
+
+# -- a loop that cannot go on says so and leaves the microphone off ----------------------------------
+
+
+def test_a_voice_detector_that_raises_ends_listening_loudly_and_closes_the_microphone():
+    """PR6-4175581063: only DeviceFault was handled, so any other error killed the thread silently with the microphone open."""
+
+    def broken(frame: bytes) -> float:
+        raise RuntimeError("model said: secret transcript text")
+
+    r = rig([LOUD, LOUD], ScriptedSTT([]))
+    r.loop._vad = broken
+    r.loop.run()
+    assert r.loop.failure == "Voice detection failed (RuntimeError); hands-free listening stopped."
+    assert r.warned == [r.loop.failure] and "secret" not in r.loop.failure
+    assert r.device.calls == ["pause"]
+
+
+def test_an_idle_callback_that_raises_or_blocks_finds_the_microphone_already_off():
+    """PR6-4175561158: the pause was queued and the callback ran first, so a blocking one left the microphone on and a raising
+    one ended the loop with the pause never applied."""
+    now = [0.0]
+    seen = []
+
+    def on_idle():
+        seen.append(list(r.device.calls))
+        raise RuntimeError("idle callback failed")
+
+    r = rig([None] * 8, ScriptedSTT([]), idle_s=30, clock=lambda: now[0], on_idle=on_idle)
+    r.device.on_frame = lambda left: now.__setitem__(0, now[0] + 10)
+    run(r)
+    assert seen == [["pause"]]  # the microphone was off before the callback was called
+    assert r.warned == ["the idle callback failed (RuntimeError)"] and r.loop._paused
+
+
+def test_glide_speaking_over_a_command_in_half_duplex_discards_it_instead_of_sending_half_of_it():
+    """PR6-4175612955: with no canceller the device blanks the microphone while Glide speaks, and the turn read the zeros as
+    silence and committed what had been said so far."""
+    stt = ScriptedSTT(["open the pod bay doors", "second"])
+    r = rig([*speech(10), *quiet(700), *speech(), *quiet(700)], stt)
+    total, zeros = 20 + 2 * len(quiet(700)), len(quiet(700))
+    # Glide starts speaking after 10 frames of the command, and the device hands over zeros for as long as it does
+    r.device.on_frame = lambda left: setattr(r.device, "guarding", 10 <= total - left < 10 + zeros)
+    run(r)
+    assert r.heard == ["second"] and stt.ended == [1]  # the first stream was aborted, never ended
+    assert r.warned == ["Glide began to speak over your command; it was not sent."]
+
+
+# -- what a pause, a probe and an overlong utterance leave behind --------------------------------------
+
+
+def test_frames_from_before_a_pause_are_not_the_lead_in_of_a_turn_after_it():
+    """PR14-4175428960: the history behind a barge-in turn's lead-in was never cleared by a pause."""
+    r = rig([], ScriptedSTT([]))
+    r.loop._vad = lambda frame: 0.0
+    r.loop._frame(LOUD)
+    r.loop._frame(LOUD)
+    r.loop.pause()
+    r.loop._apply_commands()
+    r.loop.resume()
+    r.loop._apply_commands()
+    for _ in range(3):
+        r.loop._frame(QUIET)
+    assert r.loop._since_onset() == QUIET * 3
+
+
+def test_an_overlong_utterance_is_discarded_whole_not_submitted_from_where_it_was_cut():
+    """PR6-4175247852: the abort reset the detector, so the next voiced frame began a turn out of the tail of what was dropped."""
+    stt = ScriptedSTT(["the tail", "next"])
+    max_frames = 60 * 16000 // 512
+    r = rig([*speech(max_frames + 1), *speech(10), *quiet(700), *speech(), *quiet(700)], stt)
+    run(r)
+    assert r.heard == ["next"] and stt.ended == [1]  # stream 0 was the overlong one, aborted
+    assert len(r.warned) == 1 and "exceeded" in r.warned[0]
+
+
+def test_an_output_fault_is_said_once_and_without_content():
+    r = rig([QUIET] * 4, ScriptedSTT([]))
+    r.device.on_frame = lambda left: setattr(r.device, "output_faults", max(0, 4 - left))  # 0, 1, 2, 3: only ever more
+    run(r)
+    assert r.warned == ["The speaker reported a problem; Glide's speech may have been cut off or garbled."]
+
+
+def test_a_loop_that_ends_on_its_own_says_so_to_its_owner_and_one_that_is_stopped_does_not():
+    told = []
+    r = rig([QUIET, DeviceFault("Microphone overflow")], ScriptedSTT([]))
+    r.loop.on_failure = told.append
+    r.loop.run()
+    assert told == ["Microphone overflow"]
+    r = rig([QUIET, QUIET], ScriptedSTT([]))
+    r.loop.on_failure = told.append
+    r.loop.run()  # the script ends and stops the loop, as stop() would
+    assert told == ["Microphone overflow"]

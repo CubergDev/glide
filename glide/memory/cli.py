@@ -14,7 +14,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TextIO
 
+from .catalog import Catalog
 from .contracts import Model, Scope
+from .harness import Harness
 from .service import MemoryService
 from .settings import MemorySettings, SettingsError
 
@@ -94,33 +96,28 @@ def main(
         return 2
 
 
-def _run(service: MemoryService, scope: Scope, args: argparse.Namespace):
-    store = service.store
-    if args.command == "init":
-        return {"database": str(service.database), "revision": store.revision(scope)}
-    if args.command == "remember":
-        return store.remember(scope, args.key, args.text, level=args.level, ttl_seconds=args.ttl)
-    if args.command == "recall":
-        return store.memories(scope)
-    if args.command == "events":
-        return store.events(scope)
-    if args.command == "forget":
-        return {"forgotten": store.forget(scope, args.id)}
-    if args.command == "propose":
-        return store.propose(scope, args.target, args.text, args.evidence)
-    if args.command == "proposals":
-        return store.proposals(scope)
-    if args.command == "apply":
-        return store.apply(scope, args.id, expected_revision=args.revision)
-    if args.command == "rollback":
-        return store.rollback(scope, args.id, expected_revision=args.revision)
-    from .catalog import Catalog
-    from .harness import Harness
-
+def _plan(store, scope: Scope, args: argparse.Namespace) -> dict:
     catalog = Catalog(args.catalog, enabled_plugins=frozenset(args.plugin))
     harness = Harness(store, catalog, models=(Model(args.model, frozenset({args.stage}), args.window),))
     bundle = harness.prepare(scope, args.goal, stage=args.stage)
     return {"context": bundle.context, **(harness.command(scope, "/context") or {})}
+
+
+def _run(service: MemoryService, scope: Scope, args: argparse.Namespace):
+    store = service.store
+    commands = {
+        "init": lambda: {"database": str(service.database), "revision": store.revision(scope)},
+        "remember": lambda: store.remember(scope, args.key, args.text, level=args.level, ttl_seconds=args.ttl),
+        "recall": lambda: store.memories(scope),
+        "events": lambda: store.events(scope),
+        "forget": lambda: {"forgotten": store.forget(scope, args.id)},
+        "propose": lambda: store.propose(scope, args.target, args.text, args.evidence),
+        "proposals": lambda: store.proposals(scope),
+        "apply": lambda: store.apply(scope, args.id, expected_revision=args.revision),
+        "rollback": lambda: store.rollback(scope, args.id, expected_revision=args.revision),
+        "plan": lambda: _plan(store, scope, args),
+    }
+    return commands[args.command]()
 
 
 __all__ = ["OFF", "SettingsError", "main"]
