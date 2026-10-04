@@ -283,6 +283,10 @@ class Execution:
 
     def _scope(self, ctx):
         cfg = self.cfg
+        if cfg.route in routing.ROUTED:  # the router (glide/routing) already decided who owns this: no second question
+            scope = routing.Scope(cfg.route, "router")
+            self.routes.append(routing.record(scope))
+            return scope
         scope = self.phases("task_scope", routing.decide, ctx.typesafe, ctx.writer, cfg.goal, minimum=cfg.min_confidence)
         self.routes.append(routing.record(scope))
         while scope.workflow == "clarify":

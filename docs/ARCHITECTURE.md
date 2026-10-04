@@ -12,7 +12,7 @@ yet" and nowhere else. Setup and commands are in the [README](../README.md); the
 | `glide/cli.py` | The one `glide` command tree. Optional packages are imported only by the command that needs them. |
 | `glide/features.py` | What `glide doctor` reports for voice, memory, webhooks and mcp: standard library only, starts nothing. |
 | `glide/providers/` | Swappable vendors. `config.py` reads `glide.toml` into one chain per role (`llm.fast`, `llm.smart`, `stt`, `tts`, `classifier`, plus optional `llm.planner` and `llm.research`). `chain.py` is the failover engine, `errors.py` the shared `ProviderError` vocabulary, `base.py` the shapes an adapter speaks, `interrupt.py` how an adapter lets a cancel reach its connection, `doctor.py` what `glide doctor` measures. Adapters: `llm.py`, `stt.py`, `tts.py`, `classifier.py`, and `writer_client.py` (the neutral writer over the chains). |
-| `glide/assistant/` | Turns text or speech into an answer or a computer task and speaks the result: `core.py` (`Assistant`), `router.py` (stop fast path, then one fast-LLM call), `speech.py` and `audio_io.py` (sentence-by-sentence speaking, push-to-talk device), `tasks.py` (`ComputerTask`, one at a time, on a worker thread). |
+| `glide/assistant/` | Turns text or speech into an answer or a computer task and speaks the result: `core.py` (`Assistant`), `answer.py` (the streamed answer's prompt and messages), `clarifier.py` (the channel for a `clarify` decision), `speech.py` and `audio_io.py` (sentence-by-sentence speaking, push-to-talk device), `tasks.py` (`ComputerTask`, one at a time, on a worker thread). |
 | `glide/computer/` | The screen-driving loop. `runner.py` (the legacy loop: perceive, classify, act, verify, with run folders), `perception.py` and `ax_walk.py` (OCR and accessibility), `decide.py` and `actions.py`, `macos.py` and `windows.py` behind `platform_adapter.py`, `control.py` (`RunControl`), `diagnostics.py` (recording), `generation.py` (writer request and result shapes), `desktop_access.py` (permissions). |
 | `glide/computer/execution/` | The structured engine: contracts, planning, policy, progress, query forms, routing (`decide`), the research supervisor and page reading, and the backends `dom.py` (CDP), `native.py`, `obscura.py`, `playwright_cli.py` (with `playwright_driver.js`). `providers.py` picks the backend from `[browser]`; `spawn.py` is the one place a process may be started. |
 | `glide/speech/` | Hands-free voice: `vad.py` (who is speaking), `audio.py` (one full-duplex device with the echo guard and headset mode), `turns.py` (`VoiceLoop`: turns, self-correction, barge-in, idle), `session.py` (builds the real thing), `settings.py` (the `[speech]` table), `elevenlabs.py` (an optional realtime TTS adapter). |
@@ -71,8 +71,11 @@ speech (glide voice): microphone -> VAD -> VoiceLoop -+--> Assistant
   `legacy` because the structured engine has not been qualified live, and the audit rated the legacy loop weaker on
   untrusted screen text; flipping the default is the user's decision after the live checks in `docs/LIVE_CHECKS.md`.
   `glide doctor`, the `glide computer` header, the app's settings and the pet's badge say which engine is active, and
-  `run.json` records it (never content). The engine's own `decide` and the assistant's router are two separate routers
-  (decision D9 is open).
+  `run.json` records it (never content).   The engine's own `decide` now runs only when nothing routed the request first (`glide-computer` run directly): the assistant asks
+  the one router, `glide/routing/` ([ROUTER.md](ROUTER.md): stop phrase, classifier chain, fast-LLM JSON call; a failed or
+  unsure router means answer), and passes its `execute`/`research`/`reason` decision to the engine as `RunConfig.route`.
+  `glide chat` sets `clarify=True`, so a `clarify` decision asks one question and the next typed line is the answer; every
+  other front end keeps it off and says what is needed.
 - **Webhooks** do not go through the assistant: the worker takes a queued `agent.task.requested` call, and only with
   `--allow-desktop`, a yes for that run, and (to click or type) `--act` plus the source's `allow_actions`, hands it to a
   `ComputerExecutor`.
@@ -132,5 +135,5 @@ Stored run data omits utterances, typed text, captured content and raw URLs unle
 
 [DECISIONS.md](DECISIONS.md) lists D0-D18 with what each says, where it landed in the code, and whether it is
 implemented, partly done, not yet done, or waiting for live proof. The original table is kept in
-[history/HANDOFF.md](history/HANDOFF.md) section 2. The two decisions with the most left to do are D9 (one router) and D11
+[history/HANDOFF.md](history/HANDOFF.md) section 2. The two decisions with the most left to do are D9 (the router's live calibration) and D11
 (the SwiftUI app and its socket server).

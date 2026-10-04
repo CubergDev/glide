@@ -38,10 +38,11 @@ from pathlib import Path
 
 from . import features
 from .assistant.audio_io import AudioUnavailable, Endpointer, Microphone, Player
-from .assistant.core import IO, Assistant, Reply
-from .assistant.router import is_stop
+from .assistant.core import IO, Assistant, Reply, routing_table
 from .assistant.tasks import DEFAULT_RUNS_DIR
 from .computer.execution.reading import clean as printable
+from .routing import RoutingSettings
+from .routing.stop import is_stop
 
 ACT_BANNER = (
     "ACT MODE: Glide will click and type on this Mac. Stop it by saying or typing stop, with Ctrl-C, "
@@ -79,6 +80,7 @@ def _load(path: str | None):
 
     _dotenv()
     config = load_config(path)
+    RoutingSettings.from_table(routing_table(config))  # a bad [routing] table is one line and exit 2, not a traceback later
     config.on_switch(lambda event: print(format_switch(event, config), file=sys.stderr, flush=True))
     return config
 
@@ -252,7 +254,8 @@ def _prompt(text: str, state: dict, turn: threading.Thread | None) -> None:
 
 
 def cmd_chat(args: argparse.Namespace, config) -> int:
-    assistant = Assistant(config, io=_make_io(config, speak=args.speak), runs_dir=args.runs)
+    # clarify=True: the router (or a task) may put ONE question to the user, and the next line typed is its answer.
+    assistant = Assistant(config, io=_make_io(config, speak=args.speak), runs_dir=args.runs, clarify=True)
     act = args.act
     lines = LineReader(_read_line)
     print("glide chat. Type a request, /help for commands, /quit to leave.")
@@ -287,6 +290,8 @@ def cmd_chat(args: argparse.Namespace, config) -> int:
                 if is_stop(line):  # heard here, not on a worker: stopping must not wait for a thread to start
                     print("stopped" if assistant.stop() else "stopped (nothing was running)")
                     continue
+                if assistant.pending_question is not None and assistant.answer_pending(line):
+                    continue  # the line answered the question Glide asked; anything else is a new request below
                 assistant.interrupt_speech()  # a new request replaces the last answer, spoken or still being written
                 turn = _spawn(lambda text=line, act=act: _chat_turn(assistant, text, act, args, config), config)
             except KeyboardInterrupt:
@@ -295,6 +300,8 @@ def cmd_chat(args: argparse.Namespace, config) -> int:
                     break
                 interrupted = True
                 print("\nstopped (Ctrl-C again to leave)")
+        if assistant.pending_question is not None:
+            assistant.stop()  # leaving with a question open: nothing will answer it, so do not wait out its timeout
         _finish(assistant, turn)
     except KeyboardInterrupt:
         assistant.stop()

@@ -7,13 +7,15 @@ builds a TTS and `glide chat` never builds an STT.
 
 One request, start to finish:
 
-1. A stop phrase is matched before anything else (router.fast_path): no model, no network, instant.
-2. One fast-LLM call picks the route (router.py). Short answers and the acknowledgement of a task come
-   back in that same call, so they are spoken without a second one.
-3. A longer answer is streamed from the fast LLM, cut into sentences as it arrives and handed to the
-   speaker one sentence at a time, so speech starts after the first sentence (speech.py).
+1. A stop phrase is matched before anything else (routing/stop.py, the one list): no model, no network, instant.
+2. The router (glide/routing, docs/ROUTER.md) decides who owns the request: answer, reason, execute, research,
+   clarify or stop. A failed or unsure router means ANSWER, never a task. Short answers and the acknowledgement of a
+   task can come back in the same call, so they are spoken without a second one.
+3. A longer answer is streamed from the fast LLM (the smart one for `reason`), cut into sentences as it arrives and
+   handed to the speaker one sentence at a time, so speech starts after the first sentence (speech.py).
 4. A computer task runs on a worker thread (tasks.py), as a dry run unless the caller passes
-   `act=True`, and its result is spoken when it ends.
+   `act=True`, and its result is spoken when it ends. With `clarify=True` a `clarify` decision puts its question to
+   the user (clarifier.py) and waits for `answer_pending`; without it nothing is done and the user is told what is needed.
 
 Interruption is real, not only a dropped result. Each request owns a `RunControl` (glide/computer/control.py),
 the one cancel token of the whole path: the providers called for the request (the router, the streamed answer,
@@ -41,22 +43,39 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..computer.control import RunControl, controlled
+from ..memory.settings import SettingsError, read_table
 from ..providers.base import Audio
 from ..providers.config import ConfigError
 from ..providers.errors import CANCELLED, ProviderError
+from ..routing import (
+    ACTING,
+    Context,
+    Decision,
+    Router,
+    RoutingSettings,
+    Span,
+    build_router,
+    is_stop,
+    resolve,
+    stop_phrases,
+)
+from ..routing.decision import CLARIFY, REASON, STOP, WHY_INJECTION, WHY_TIERS_FAILED, WHY_UNCERTAIN, WHY_UNCONFIRMED
+from .answer import DATA_CHARS, DEEP_NOTE, NOT_DONE_NOTE, answer_messages, screen_data
 from .audio_io import SAMPLE_RATE, Player, rms
+from .clarifier import DEFAULT_WAIT_S, PendingQuestion
 from .phrases import say
-from .router import DATA_CHARS, Route, Router, answer_messages, fast_path, is_stop, screen_data, stop_phrases
 from .speech import SentenceSplitter, Speaker, detect_language, split_sentences
 from .tasks import DEFAULT_RUNS_DIR, ComputerTask, TaskBusy, TaskResult, TaskRunner
 
 HISTORY_CHARS = 400  # how much of one earlier message the router and the answer are shown
-ANSWER_TOKENS = 1024  # room for a reasoning model's thinking as well as a short spoken answer (see router.ROUTER_TOKENS)
+ANSWER_TOKENS = 1024  # room for a reasoning model's thinking as well as a short spoken answer
+# The router was not sure enough to act, or could not decide: the request is answered, and the answer must not claim an action.
+DOWNGRADED = frozenset({WHY_INJECTION, WHY_UNCONFIRMED, WHY_UNCERTAIN, WHY_TIERS_FAILED})
 ANSWER_TEMPERATURE = 0.3
 UNWIND_S = 2.0  # how long a request waits for the task whose question it dropped to end, so that its own task can start
 CLOSE_WAIT_S = 5.0  # how long `close()` waits for a stopped task to unwind before it gives up and says so
@@ -66,6 +85,16 @@ MIN_SPEECH_RMS = 150.0  # audio quieter than this overall is silence: an empty t
 
 def _ignore(*_: object) -> None:
     return None
+
+
+def routing_table(config) -> dict:
+    """The `[routing]` table of the glide.toml the configuration was read from ({} for a built-in or in-memory one)."""
+    source = getattr(config, "source", None)
+    try:
+        path = Path(source) if isinstance(source, str) and source else None
+        return dict(read_table("routing", path)) if path is not None and path.is_file() else {}
+    except (SettingsError, OSError):
+        return {}  # the providers loader has already read this file; what it did not like it has reported
 
 
 @dataclass
@@ -93,7 +122,8 @@ class IO:
 
 @dataclass
 class Reply:
-    """What a request came to. `route` is "answer", "computer", "stop", or "none" (nothing usable was said).
+    """What a request came to. `route` is "answer", "computer", "stop", "clarify" (nothing was done: a question is needed),
+    or "none" (nothing usable was said).
 
     `text` is what was said or shown for an answer, or the acknowledgement for a task (the task's own result
     is on `task.result` once `task.wait()` returns, and is shown and spoken by the assistant meanwhile).
@@ -170,6 +200,8 @@ class Assistant:
         clock: Callable[[], float] = time.monotonic,
         clarify: bool = False,
         extra_stop_phrases: Iterable[str] = (),
+        routing: Mapping | None = None,
+        clarify_wait_s: float = DEFAULT_WAIT_S,
         close_wait_s: float = CLOSE_WAIT_S,
         responder: Callable[[str, str | None], Reply] | None = None,
         on_stop: Callable[[], None] | None = None,
@@ -178,7 +210,13 @@ class Assistant:
         self._responder = responder
         self._on_stop = on_stop
         self._close_wait_s = close_wait_s
-        self._stops = stop_phrases(extra_stop_phrases)
+        self._extra_stops = tuple(extra_stop_phrases)
+        self._stops = stop_phrases(self._extra_stops)
+        self._routing = dict(routing) if routing is not None else routing_table(config)
+        RoutingSettings.from_table(self._routing)  # a bad [routing] table is refused here, not on the first request
+        self._router_cache: Router | None = None
+        self._asking: PendingQuestion | None = None  # the question the router has put to the user, if one is open
+        self._clarify_wait_s = clarify_wait_s
         self.io = io or IO()
         self._clock = clock
         self._tasks = TaskRunner(config, runs_dir)
@@ -193,7 +231,7 @@ class Assistant:
         self._speaker: Speaker | None = None
         self._voice: _Voice | None = None
         self._speech_off = False
-        self._clarify = clarify  # whether a computer task may put a question to the user (see `answer_pending`)
+        self._clarify = clarify  # whether the router or a computer task may put a question to the user (see `answer_pending`)
 
     def __repr__(self) -> str:
         return f"<Assistant speaking={self.io.player is not None} task_running={self._tasks.running}>"
@@ -219,7 +257,7 @@ class Assistant:
         text = " ".join(text.split())
         if not text:
             return Reply("none")
-        if fast_path(text, self._stops) is not None:  # before any model is built or asked: stopping must never wait
+        if is_stop(text, self._stops):  # before any model is built or asked: stopping must never wait
             self._stop(turn.seq if turn is not None else ticket)
             if self._on_stop is not None:
                 self._on_stop()
@@ -263,29 +301,60 @@ class Assistant:
             speaker.mark()
         reply = Reply("answer")
         try:
-            llm = self._config.llm("fast")
-        except ConfigError as exc:
+            router = self._router()
+        except ConfigError as exc:  # a [routing] calibration_file that cannot be read: nothing is routed, so nothing acts
             return self._failed(reply, say("no_llm", hint_language), self._scrub(str(exc)), hint_language, speak=True)
-
-        route = Router(llm, clock=self._clock).route(text, self._messages())
-        reply.timings["route_s"] = route.latency_s
-        if route.source == "fallback" and not turn.cancelled:  # a request to act becomes an answer: never silently
-            why = route.error.kind if route.error is not None else "unreadable reply"
-            self.io.warn(f"could not route the request ({why}): answering instead of acting")
-        if route.route == "stop":  # the model heard a stop that the fast path did not
+        if router.classifier is None and router.fast_llm is None:  # nothing can decide, and nothing can answer either
+            try:
+                self._config.llm("fast")
+            except ConfigError as exc:
+                return self._failed(reply, say("no_llm", hint_language), self._scrub(str(exc)), hint_language, speak=True)
+        context = Context.from_messages(self._messages(), running_task=self._running_goal(), language=hint_language)
+        clarifier = self._question_for(turn, hint_language) if self._clarify else None
+        resolution = resolve(router, Span(text), context, clarifier, language=hint_language)
+        decision = resolution.decision
+        reply.timings["route_s"] = decision.latency_s
+        if decision.cancelled or (decision.route == CLARIFY and turn.cancelled):  # cut by a stop or a newer request: silent
+            return Reply("none")
+        if decision.why_code in DOWNGRADED and not decision.errors:
+            # A request to act became an answer: never silently. A tier that failed or was unsure has already been shown
+            # as a hop (`_router_switch`); these are the downgrades with no hop (an override attempt, a missing second key).
+            self.io.warn(f"not acting on this request ({decision.why_code}): answering instead")
+        if decision.route == STOP:  # the router heard a stop that the phrase list did not
             self._stop(turn.seq)
             reply.route = "stop"
             return reply
-        language = route.language or hint_language
-        if route.route == "computer":
+        language = decision.language or hint_language
+        if decision.route in ACTING:
             reply.route = "computer"
-            self._computer(turn, text, route, act, wait, reply, started, language)
+            self._computer(turn, text, decision, act, wait, reply, started, language)
+        elif decision.route == CLARIFY:  # unresolved: no channel, no answer, or the budget was spent. Nothing is done.
+            reply.route = "clarify"
+            self._clarify_unresolved(turn, text, resolution.said, reply, started, language)
         else:
-            self._answer(turn, llm, text, route, reply, started, language)
+            self._answer(turn, text, decision, reply, started, language)
         reply.timings["total_s"] = self._clock() - started
         if speaker is not None and speaker.first_audio_at is not None:
             reply.timings["first_audio_s"] = speaker.first_audio_at - started
         return reply
+
+    def _router(self) -> Router:
+        """The router, built the first time it is needed. A tier with no usable provider is simply one tier less (the
+        classifier and the fast model back each other up); with neither, `_respond` says so."""
+        with self._lock:
+            if self._router_cache is None:
+                self._router_cache, _ = build_router(
+                    self._config, table=self._routing, stop_phrases=self._extra_stops, on_event=self._router_switch
+                )
+            return self._router_cache
+
+    def _router_switch(self, event) -> None:
+        """A tier of the router failed or was unsure and the next one took over. Shown, like every fallback."""
+        self.io.warn(f"fallback: router {event.from_slot} -> {event.to_slot} ({event.kind})")
+
+    def _running_goal(self) -> str:
+        task = self._tasks.current
+        return task.goal if task is not None and task.running else ""
 
     def handle_audio(
         self,
@@ -478,17 +547,26 @@ class Assistant:
 
     @property
     def pending_question(self) -> str | None:
-        """The question a running task has put to the user and is waiting on, or None. Only with `clarify=True`."""
+        """The question the router or a running task has put to the user and is waiting on, or None. Only with `clarify=True`."""
+        with self._lock:
+            asking = self._asking
+        if asking is not None and asking.question is not None:
+            return asking.question
         task = self._tasks.current
         return task.pending_question if task is not None else None
 
     def answer_pending(self, text: str) -> bool:
-        """Give `text` to the task waiting on a question: the only way a question is ever answered. False when none is.
+        """Give `text` to whoever is waiting on a question (the router, else the task): the only way a question is ever
+        answered. False when none is.
 
         A request made through `handle_text` or `handle_audio` is never taken for the answer, whatever it says: it
         is a new request, and it drops the question (the task is stopped, and the question is no longer spoken). The
         front end decides which of the two a line of text or an utterance is.
         """
+        with self._lock:
+            asking = self._asking
+        if asking is not None and asking.answer(text):
+            return True
         task = self._tasks.current
         return task.answer(text) if task is not None else False
 
@@ -524,13 +602,22 @@ class Assistant:
 
     # -- answering ------------------------------------------------------------------------------
 
-    def _answer(self, turn: _Turn, llm, text: str, route: Route, reply: Reply, started: float, language: str | None) -> None:
+    def _answer(self, turn: _Turn, text: str, decision: Decision, reply: Reply, started: float, language: str | None) -> None:
+        """Say the answer: the router's own, or one streamed from the fast model (the smart one for `reason`).
+
+        A request the router would not act on is answered with the note that nothing was done, and never with the reply a
+        tier wrote for an action ("opening it now"): an attempted action is not a verified effect, and no action was tried.
+        """
+        deep = decision.route == REASON
+        downgraded = decision.why_code in DOWNGRADED
+        notes = [*([DEEP_NOTE] if deep else []), *([NOT_DONE_NOTE] if downgraded else [])]
         try:
-            if route.reply:
-                for sentence in split_sentences(route.reply):
+            if decision.reply and not deep and not downgraded:
+                for sentence in split_sentences(decision.reply):
                     language = self._emit(turn, sentence, language, reply, started)
             else:
-                language = self._stream(turn, llm, text, language, reply, started)
+                llm = self._config.llm("smart" if deep else "fast")
+                language = self._stream(turn, llm, (decision.goal if deep else "") or text, language, reply, started, notes)
         except ProviderError as exc:
             if not turn.cancelled:  # an interrupted answer is not a failure: nothing is shown or said about it
                 detail = self._scrub(str(exc))
@@ -542,8 +629,10 @@ class Assistant:
         if reply.text and not turn.cancelled:
             self._remember(text, reply.text)
 
-    def _stream(self, turn: _Turn, llm, text: str, language: str | None, reply: Reply, started: float) -> str | None:
-        messages = answer_messages(text, self._messages(), language)
+    def _stream(
+        self, turn: _Turn, llm, text: str, language: str | None, reply: Reply, started: float, notes: Iterable[str] = ()
+    ) -> str | None:
+        messages = answer_messages(text, self._messages(), language, notes=tuple(notes))
         stream = llm.stream(messages, max_tokens=ANSWER_TOKENS, temperature=ANSWER_TEMPERATURE)
         splitter = SentenceSplitter()
         try:
@@ -560,6 +649,36 @@ class Assistant:
             if close is not None:
                 close()  # a cancelled answer gives its connection back now
         return language
+
+    def _clarify_unresolved(self, turn: _Turn, text: str, said: str, reply: Reply, started: float, language: str | None) -> None:
+        """The router needs an answer and has no way to get one: say what is needed and do nothing."""
+        for sentence in split_sentences(said):
+            language = self._emit(turn, sentence, language, reply, started)
+        reply.text = " ".join(turn.parts)
+        reply.language = language
+        if reply.text and not turn.cancelled:
+            self._remember(text, reply.text)
+
+    def _question_for(self, turn: _Turn, language: str | None) -> PendingQuestion:
+        """The router's channel to the user for this request: shown and spoken here, answered only by `answer_pending`."""
+
+        def present(question: str) -> None:
+            self.io.show(question)
+            speaker = self._speaker_or_none()
+            if speaker is not None:
+                for sentence in split_sentences(question):
+                    speaker.say(sentence, language=language or detect_language(sentence), only_if=lambda: not turn.cancelled)
+
+        def opened(question: PendingQuestion) -> None:
+            with self._lock:
+                self._asking = question
+
+        def closed(question: PendingQuestion) -> None:
+            with self._lock:
+                if self._asking is question:
+                    self._asking = None
+
+        return PendingQuestion(present, turn.control, wait_s=self._clarify_wait_s, on_open=opened, on_close=closed)
 
     def _emit(self, turn: _Turn, sentence: str, language: str | None, reply: Reply, started: float) -> str:
         """Show a sentence and hand it to the speaker. Returns the language, decided by the first sentence."""
@@ -581,9 +700,17 @@ class Assistant:
     # -- computer tasks -------------------------------------------------------------------------
 
     def _computer(
-        self, turn: _Turn, text: str, route: Route, act: bool, wait: bool, reply: Reply, started: float, language: str | None
+        self,
+        turn: _Turn,
+        text: str,
+        decision: Decision,
+        act: bool,
+        wait: bool,
+        reply: Reply,
+        started: float,
+        language: str | None,
     ) -> None:
-        goal = route.goal or text
+        goal = decision.goal or text
         language = language or detect_language(text)
         reply.language = language
         if not self._approved(goal, act):
@@ -591,8 +718,8 @@ class Assistant:
             if not turn.cancelled:  # a stop that ended the question is silent, like every cancel
                 self.io.warn(reply.error)
             return
-        if route.reply:
-            self._emit(turn, route.reply, language, reply, started)
+        if decision.reply:
+            self._emit(turn, decision.reply, language, reply, started)
             reply.text = " ".join(turn.parts)
         try:
             with self._lock:  # checked and started under the lock `stop` takes, so a stop cannot fall between the two
@@ -603,6 +730,7 @@ class Assistant:
                 task = self._tasks.start(
                     goal,
                     act=act,
+                    route=decision.route,
                     on_done=lambda finished: self._finish_task(finished, language),
                     on_question=(lambda finished, question: self._ask_user(finished, question, language))
                     if self._clarify
@@ -616,7 +744,7 @@ class Assistant:
                 self._failed(reply, say("busy", language), "a task is already running", language, speak=True)
             return
         reply.task = task
-        self._remember(text, route.reply or f"(started a computer task: {goal})")
+        self._remember(text, decision.reply or f"(started a computer task: {goal})")
         if wait:
             task.wait()
 

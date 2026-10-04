@@ -234,3 +234,86 @@ def test_scope_clarification_can_resolve_to_reasoning_without_the_browser(monkey
     assert state.answer.achieved and not computer.actions and computer.reads == 0
     assert supervisor.goal == "Help me with this"
     assert "Calculate 200 minus 70 minus 90 minus 24" in supervisor.replies[0]
+
+
+# -- a route the router already decided (RunConfig.route) -------------------------------------------------------
+
+
+def no_scope_question(choice):
+    """A Jev that fails the test if the engine asks the scope question: the router already answered it."""
+    jev = Jev(choice)
+    ask = jev.system_one
+
+    def system_one(state, questions):
+        assert not state.get("task_scope"), "the engine asked who owns the task after the router had decided"
+        return ask(state, questions)
+
+    jev.system_one = system_one
+    return jev
+
+
+def test_a_route_from_the_router_is_the_scope_and_the_scope_question_is_never_asked(monkeypatch, tmp_path):
+    computer = Computer()
+    supervisor = FakeSupervisor([("answer", Answer("Both pages agree.", True))])
+    state = drive(
+        monkeypatch,
+        tmp_path,
+        computer,
+        Reasoner([]),
+        no_scope_question("execute"),  # what the classifier would say: the router's word wins
+        goal="Compare the sources",
+        supervisor=supervisor,
+        route="research",
+    )
+    assert state.outcome == "done" and supervisor.route == "research"
+    report = json.loads((tmp_path / "run.json").read_text())
+    assert report["routing"] == [{"workflow": "research", "source": "router", "owner": "frontier"}]
+
+
+def test_a_reason_route_from_the_router_needs_no_browser(monkeypatch, tmp_path):
+    computer = Computer()
+    computer.on_inspect = lambda _: pytest.fail("a routed reason task attempted to inspect the browser")
+    supervisor = FakeSupervisor([("answer", Answer("391", True))])
+    state = drive(
+        monkeypatch,
+        tmp_path,
+        computer,
+        Reasoner([]),
+        no_scope_question("execute"),
+        goal="17 times 23",
+        supervisor=supervisor,
+        route="reason",
+    )
+    assert state.outcome == "done" and supervisor.route == "reason" and not computer.actions
+
+
+@pytest.mark.parametrize("route", ["", "clarify", "plan", "anything else"])
+def test_without_a_usable_route_the_engine_still_decides_for_itself(monkeypatch, tmp_path, route):
+    supervisor = FakeSupervisor([("answer", Answer("def f(): pass", True))])
+    state = drive(
+        monkeypatch, tmp_path, Computer(), Reasoner([]), Jev("reason"), goal="Write f", supervisor=supervisor, route=route
+    )
+    assert state.outcome == "done" and supervisor.route == "reason"
+    assert json.loads((tmp_path / "run.json").read_text())["routing"][0]["source"] == "jev"
+
+
+def test_the_task_runner_hands_the_route_to_the_run_config(monkeypatch, tmp_path):
+    from glide.assistant import tasks
+    from glide.computer import runner
+    from glide.computer.platform_adapter import desktop
+    from glide.computer.runner import RunState
+
+    seen = []
+
+    def fake_run(cfg, ctx_factory, classifier_factory=None, control=None):
+        seen.append(cfg.route)
+        return RunState(outcome="dry run")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(desktop, "accessibility_trusted", lambda: True)
+    config = type("Config", (), {"writer": lambda self: object(), "classifier": lambda self: object()})()
+    runner_ = tasks.TaskRunner(config, tmp_path)
+    for route in ("research", ""):
+        task = runner_.start("do it", route=route)
+        assert task.wait(5) and task.route == route
+    assert seen == ["research", ""]  # "" is a run nothing routed: the engine decides for itself

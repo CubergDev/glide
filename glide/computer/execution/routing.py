@@ -1,13 +1,14 @@
-"""Decide who owns a task before anything touches a browser: `execute`, `research`, `reason` or `clarify`.
+"""Who owns a task once it is a computer task: `execute`, `research`, `reason` or `clarify`.
 
-`decide` is a pure function of the classifier, the writer and the goal: it keeps no state and touches no machine. It
-is the engine's own scope decision. It is not the final router: a later phase merges it with
-`glide.assistant.router` (stop fast-path, this classifier question, then the fast-LLM JSON call), so keep it
-importable and free of engine state.
+The ONE router is `glide.routing` (docs/ROUTER.md): the assistant asks it first and hands the result to the engine as
+`RunConfig.route`, and the engine then takes it as the scope (`Scope(route, "router")`) instead of asking again. What is
+left here is only what the engine still needs: the scope question for a run nothing routed first (`glide-computer` run
+directly, an empty `route`) or one routed `clarify`, which the engine asks about on its own channel (`ctx.ask`).
 
-One cheap classifier question (Jev) decides; only an uncertain answer (`InvalidAction`: a missing, unknown or
-low-confidence choice) goes to the ordinary writer. A classifier chain that is down raises its own `ProviderError`,
-which is not a reason to guess: the run ends there and says so.
+`decide` is a pure function of the classifier, the writer and the goal: it keeps no state and touches no machine. One
+cheap classifier question (Jev) decides; only an uncertain answer (`InvalidAction`: a missing, unknown or low-confidence
+choice) goes to the ordinary writer. A classifier chain that is down raises its own `ProviderError`, which is not a
+reason to guess: the run ends there and says so.
 """
 
 from dataclasses import dataclass
@@ -18,12 +19,15 @@ from .contracts import InvalidAction
 from .policy import choose
 
 WORKFLOWS = ("execute", "research", "reason", "clarify")
+# What a router decision can hand the engine as final. "clarify" is not here: the router resolves it (asks, or does
+# nothing) before any task starts, and the engine's own question loop stays the way a task asks mid-run.
+ROUTED = frozenset({"execute", "research", "reason"})
 
 
 @dataclass(frozen=True)
 class Scope:
     workflow: str  # one of WORKFLOWS, or "plan" when the writer answered an uncertain classifier
-    source: str  # who decided: "jev" (the classifier) or "writer"
+    source: str  # who decided: "router" (glide/routing, passed in), "jev" (the classifier) or "writer"
     question: str = ""
 
     @property

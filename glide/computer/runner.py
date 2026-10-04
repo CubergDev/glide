@@ -78,6 +78,9 @@ class RunConfig:
     record_content: bool = False
     engine: str = "legacy"  # "structured" is the execution engine (execution/engine.py)
     execution_browser: str = ""
+    # What the router (glide/routing) already decided: "execute", "research", "reason" or "clarify". The structured engine
+    # takes it as the scope instead of asking again; the legacy loop and "" (a run started on its own) ignore it.
+    route: str = ""
     readiness_timeout: float = DEFAULT_READINESS_TIMEOUT
     research_calls: int = DEFAULT_RESEARCH_CALLS  # structured engine: the most model calls a research task may use
 
