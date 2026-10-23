@@ -16,7 +16,7 @@ dependencies = [
     "anthropic==1.6.0",
     "openai==2.54.0",
     # 12.3.0 is the first release without published advisories (earlier 11.x and 12.x releases have them).
-    "pillow>=12.3.0,<13",
+    "pillow>=13.0.0,<14",
     "typesafe-sdk==0.6.0",
     "websocket-client==1.9.0",
     "httpx>=0.27",
